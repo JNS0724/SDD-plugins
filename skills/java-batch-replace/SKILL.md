@@ -52,6 +52,7 @@ python "<skill-dir>/scripts/replace_java_text.py" ./src --old "foo();" --new "ba
 
 - Scan the target directory recursively and only modify files ending in `.java`.
 - Omit `--new` to delete matched content. This is the safest way to express an empty replacement in PowerShell.
+- Inline `--old` and `--new` values decode `\n`, `\r`, `\t`, and `\\` once, so `--new "line1\nline2"` writes a real newline.
 - Accept literal or regex matching.
 - Support multi-line literal replacement through `--old-file` and `--new-file`.
 - Strip UTF-8 BOM from template files loaded with `--old-file` or `--new-file`.

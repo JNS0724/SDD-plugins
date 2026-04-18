@@ -78,6 +78,27 @@ def write_text(path: Path, content: str, encoding: str) -> None:
         handle.write(content)
 
 
+def decode_inline_escapes(text: str) -> str:
+    escape_map = {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "\\": "\\",
+    }
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\" and index + 1 < len(text):
+            escaped = escape_map.get(text[index + 1])
+            if escaped is not None:
+                result.append(escaped)
+                index += 2
+                continue
+        result.append(text[index])
+        index += 1
+    return "".join(result)
+
+
 def strip_bom(text: str) -> str:
     if text.startswith("\ufeff"):
         return text[1:]
@@ -107,7 +128,16 @@ def load_payload(
     if file_value:
         return strip_bom(read_text(Path(file_value), encoding))
 
-    return inline_value or ""
+    return decode_inline_escapes(inline_value or "")
+
+
+def load_new_payload(inline_value: str, file_value: str | None, encoding: str) -> str:
+    if file_value:
+        if inline_value != "":
+            raise SystemExit("You must provide exactly one of --new or --new-file.")
+        return strip_bom(read_text(Path(file_value), encoding))
+
+    return decode_inline_escapes(inline_value)
 
 
 def iter_java_files(root: Path) -> list[Path]:
@@ -153,11 +183,7 @@ def main() -> int:
         return 1
 
     old_text = load_payload(args.old, args.old_file, args.encoding, "old")
-    new_text = (
-        load_payload(args.new, args.new_file, args.encoding, "new")
-        if args.new_file
-        else args.new
-    )
+    new_text = load_new_payload(args.new, args.new_file, args.encoding)
 
     if old_text == "":
         print("Old text cannot be empty.", file=sys.stderr)
