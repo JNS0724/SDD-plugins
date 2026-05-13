@@ -4,9 +4,23 @@ import path from "node:path"
 
 const port = Number(process.env.FAKE_OPENAI_PORT || 48127)
 const scenario = process.env.FAKE_SCENARIO || "sdd-design"
-const logPath = path.resolve("fake-openai.log")
+const logPath = path.resolve(process.env.FAKE_LOG_PATH || "fake-openai.log")
+const readyPath = path.resolve(process.env.FAKE_READY_PATH || "fake-openai.ready")
 let requestCount = 0
 let toolStage = 0
+
+const messageText = (messages) =>
+  (messages || [])
+    .map((message) => {
+      if (typeof message.content === "string") return message.content
+      if (Array.isArray(message.content)) {
+        return message.content
+          .map((part) => part.text || part.content || "")
+          .join("\n")
+      }
+      return ""
+    })
+    .join("\n")
 
 const log = (entry) => {
   fs.appendFileSync(logPath, JSON.stringify(entry) + "\n")
@@ -61,6 +75,14 @@ const toolArguments = JSON.stringify({
 const readArguments = JSON.stringify({
   filePath: target,
 })
+const tasksArguments = JSON.stringify({
+  filePath: "sdd/changes/test-feat/tasks.md",
+  content:
+    "# Tasks\n\n- [x] Synced by fake opencode model after SDD drift follow-up.\n",
+})
+const readTasksArguments = JSON.stringify({
+  filePath: "sdd/changes/test-feat/tasks.md",
+})
 
 const server = http.createServer(async (request, response) => {
   if (request.method === "GET" && request.url === "/v1/models") {
@@ -80,11 +102,14 @@ const server = http.createServer(async (request, response) => {
   const payload = JSON.parse(body)
   requestCount += 1
   const toolNames = (payload.tools || []).map((tool) => tool.function?.name || tool.name)
+  const promptText = messageText(payload.messages)
+  const isFollowup = promptText.includes("SDD drift check follow-up")
   log({
     request: requestCount,
     scenario,
     stream: payload.stream,
     toolNames,
+    isFollowup,
     messageRoles: (payload.messages || []).map((message) => message.role),
   })
 
@@ -160,9 +185,93 @@ const server = http.createServer(async (request, response) => {
       }),
     )
     sse(response, completionChunk({}, "tool_calls"))
+  } else if (
+    scenario === "sdd-cascade" &&
+    isFollowup &&
+    toolNames.includes("write") &&
+    toolStage === 2
+  ) {
+    toolStage += 1
+    sse(response, completionChunk({ role: "assistant" }))
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_read_tasks",
+            type: "function",
+            function: {
+              name: "read",
+              arguments: "",
+            },
+          },
+        ],
+      }),
+    )
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            function: {
+              arguments: readTasksArguments,
+            },
+          },
+        ],
+      }),
+    )
+    sse(response, completionChunk({}, "tool_calls"))
+  } else if (
+    scenario === "sdd-cascade" &&
+    isFollowup &&
+    toolNames.includes("write") &&
+    toolStage === 3
+  ) {
+    toolStage += 1
+    sse(response, completionChunk({ role: "assistant" }))
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_write_tasks",
+            type: "function",
+            function: {
+              name: "write",
+              arguments: "",
+            },
+          },
+        ],
+      }),
+    )
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            function: {
+              arguments: tasksArguments,
+            },
+          },
+        ],
+      }),
+    )
+    sse(response, completionChunk({}, "tool_calls"))
   } else {
     sse(response, completionChunk({ role: "assistant" }))
-    sse(response, completionChunk({ content: "Design file updated." }))
+    sse(
+      response,
+      completionChunk({
+        content:
+          scenario === "sdd-cascade" && toolStage >= 4
+            ? "Design and tasks files updated."
+            : "Design file updated.",
+      }),
+    )
     sse(response, completionChunk({}, "stop"))
   }
 
@@ -170,7 +279,7 @@ const server = http.createServer(async (request, response) => {
 })
 
 server.listen(port, "127.0.0.1", () => {
-  fs.writeFileSync("fake-openai.ready", String(port))
+  fs.writeFileSync(readyPath, String(port))
   console.log(`fake OpenAI-compatible server listening on ${port}`)
 })
 

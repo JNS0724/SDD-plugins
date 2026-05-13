@@ -20,9 +20,17 @@ type State = {
   touched: Set<string>
   edited: Set<string>
   changeDirs: Set<string>
+  followupSent: Set<string>
 }
 
-export const SddDriftCheck: Plugin = async ({ directory }) => {
+type PeerGap = {
+  key: string
+  relDir: string
+  edited: string[]
+  missing: string[]
+}
+
+export const SddDriftCheck: Plugin = async ({ directory, client }) => {
   const sessions = new Map<string, State>()
 
   const ensure = (id: string): State => {
@@ -31,9 +39,62 @@ export const SddDriftCheck: Plugin = async ({ directory }) => {
         touched: new Set(),
         edited: new Set(),
         changeDirs: new Set(),
+        followupSent: new Set(),
       })
     }
     return sessions.get(id)!
+  }
+
+  const resolveFile = (fp: string) =>
+    path.isAbsolute(fp) ? path.normalize(fp) : path.resolve(directory, fp)
+
+  const collectPeerGaps = (st: State): PeerGap[] => {
+    const gaps: PeerGap[] = []
+
+    for (const dir of st.changeDirs) {
+      const peers = ["design.md", "tasks.md"].filter((f) =>
+        fs.existsSync(path.join(dir, f))
+      )
+      const edited = peers.filter((f) => st.edited.has(path.join(dir, f)))
+      const missing = peers.filter((f) => !st.edited.has(path.join(dir, f)))
+      if (edited.length && missing.length) {
+        const relDir = toPosix(path.relative(directory, dir))
+        gaps.push({
+          key: `${relDir}:${missing.join(",")}`,
+          relDir,
+          edited,
+          missing,
+        })
+      }
+    }
+
+    return gaps
+  }
+
+  const buildPeerFollowup = (gaps: PeerGap[]) => {
+    const detail = gaps
+      .map(
+        (gap) =>
+          `- ${gap.relDir}: edited [${gap.edited.join(", ")}], missing [${gap.missing.join(", ")}]`
+      )
+      .join("\n")
+    return [
+      "SDD drift check follow-up.",
+      "Some SDD change documents were edited, but their peer documents were not synchronized:",
+      detail,
+      "",
+      "Before giving a final answer, continue this same task. Read the missing peer file(s), update them to match the edited SDD change document(s), and do not modify unrelated files.",
+    ].join("\n")
+  }
+
+  const sendPeerFollowup = async (sessionID: string, gaps: PeerGap[]) => {
+    const text = buildPeerFollowup(gaps)
+    console.error(`[sdd-drift-check] requesting peer follow-up for ${sessionID}`)
+    await client.session.prompt({
+      sessionID,
+      directory,
+      parts: [{ type: "text", text }],
+    })
   }
 
   const findSdd = (fp: string): string | null => {
@@ -111,7 +172,7 @@ export const SddDriftCheck: Plugin = async ({ directory }) => {
       const fp = (input as any).args?.filePath
       if (!fp || typeof fp !== "string") return
 
-      const abs = path.resolve(fp)
+      const abs = resolveFile(fp)
       const st = ensure(input.sessionID)
       st.touched.add(abs)
 
@@ -125,12 +186,54 @@ export const SddDriftCheck: Plugin = async ({ directory }) => {
       }
     },
 
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const latest = output.messages[output.messages.length - 1]
+      const sessionID = latest?.info.sessionID
+      if (!sessionID) return
+      const st = sessions.get(sessionID)
+      if (!st) return
+
+      const peerGaps = collectPeerGaps(st)
+      if (!peerGaps.length) return
+
+      const userMessage = [...output.messages]
+        .reverse()
+        .find((message) => message.info.role === "user")
+      if (!userMessage) return
+
+      const now = Date.now()
+      userMessage.parts.push({
+        id: `sdd_drift_${now}`,
+        sessionID,
+        messageID: userMessage.info.id,
+        type: "text",
+        text: buildPeerFollowup(peerGaps),
+        synthetic: true,
+        time: { start: now },
+      } as any)
+    },
+
     event: async ({ event }) => {
       if (event.type !== "session.idle") return
       const sessionID = (event as any).properties?.sessionID
       if (!sessionID) return
       const st = sessions.get(sessionID)
       if (!st) return
+
+      const peerGaps = collectPeerGaps(st)
+      const unsentPeerGaps = peerGaps.filter(
+        (gap) => !st.followupSent.has(gap.key)
+      )
+      if (unsentPeerGaps.length) {
+        for (const gap of unsentPeerGaps) st.followupSent.add(gap.key)
+        try {
+          await sendPeerFollowup(sessionID, unsentPeerGaps)
+          return
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          console.error(`[sdd-drift-check] peer follow-up failed: ${message}`)
+        }
+      }
 
       const lines: string[] = []
 

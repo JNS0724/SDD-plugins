@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("sdd-design", "code")]
+  [ValidateSet("sdd-design", "sdd-cascade", "code")]
   [string]$Scenario = "sdd-design"
 )
 
@@ -9,26 +9,18 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 }
 
 $root = Split-Path -Parent $PSScriptRoot
+$runId = [guid]::NewGuid().ToString("N")
 $opencodeHome = Join-Path $root ".home-e2e"
-$serverOut = Join-Path $root "fake-openai.out.log"
-$serverErr = Join-Path $root "fake-openai.err.log"
-$runOut = Join-Path $root "opencode-run.out.log"
-$runErr = Join-Path $root "opencode-run.err.log"
-$ready = Join-Path $root "fake-openai.ready"
+$serverOut = Join-Path $root "fake-openai.$runId.out.log"
+$serverErr = Join-Path $root "fake-openai.$runId.err.log"
+$runOut = Join-Path $root "opencode-run.$runId.out.log"
+$runErr = Join-Path $root "opencode-run.$runId.err.log"
+$ready = Join-Path $root "fake-openai.$runId.ready"
+$fakeLog = Join-Path $root "fake-openai.$runId.log"
 $report = Join-Path $root ".sdd-drift-report.md"
-$serverPidFile = Join-Path $root "fake-openai.pid"
 
-if (Test-Path -LiteralPath $serverPidFile) {
-  $stalePid = Get-Content -LiteralPath $serverPidFile -ErrorAction SilentlyContinue
-  if ($stalePid) {
-    Stop-Process -Id ([int]$stalePid) -Force -ErrorAction SilentlyContinue
-  }
-}
-
-foreach ($file in @($serverOut, $serverErr, $runOut, $runErr, $ready, $report, $serverPidFile, (Join-Path $root "fake-openai.log"))) {
-  if (Test-Path -LiteralPath $file) {
-    Remove-Item -LiteralPath $file -Force
-  }
+if (Test-Path -LiteralPath $report) {
+  Clear-Content -LiteralPath $report -ErrorAction SilentlyContinue
 }
 
 Set-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md") -Value "# Design`n`nInitial design."
@@ -36,6 +28,8 @@ Set-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Val
 Set-Content -LiteralPath (Join-Path $root "src\app.ts") -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
 
 $env:FAKE_SCENARIO = $Scenario
+$env:FAKE_LOG_PATH = $fakeLog
+$env:FAKE_READY_PATH = $ready
 $server = Start-Process node `
   -ArgumentList ".\fake-openai-server.mjs" `
   -WorkingDirectory $root `
@@ -43,7 +37,6 @@ $server = Start-Process node `
   -RedirectStandardError $serverErr `
   -WindowStyle Hidden `
   -PassThru
-Set-Content -LiteralPath $serverPidFile -Value $server.Id
 
 try {
   $deadline = (Get-Date).AddSeconds(10)
@@ -76,18 +69,18 @@ try {
   if ($server -and !$server.HasExited) {
     Stop-Process -Id $server.Id -Force
   }
-  if (Test-Path -LiteralPath $serverPidFile) {
-    Remove-Item -LiteralPath $serverPidFile -Force
-  }
 }
 
 Write-Output "--- fake-openai.log ---"
-if (Test-Path -LiteralPath (Join-Path $root "fake-openai.log")) {
-  Get-Content -LiteralPath (Join-Path $root "fake-openai.log")
+if (Test-Path -LiteralPath $fakeLog) {
+  Get-Content -LiteralPath $fakeLog
 }
 
 Write-Output "--- design.md ---"
 Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md")
+
+Write-Output "--- tasks.md ---"
+Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md")
 
 Write-Output "--- src/app.ts ---"
 Get-Content -LiteralPath (Join-Path $root "src\app.ts")
@@ -111,4 +104,19 @@ if (Test-Path -LiteralPath $runErr) {
 
 if ($opencodeExit -ne 0) {
   exit $opencodeExit
+}
+
+if ($Scenario -eq "sdd-cascade") {
+  $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
+  if ($tasksText -notmatch "Synced by fake opencode model") {
+    throw "expected plugin follow-up to trigger tasks.md synchronization"
+  }
+  $reportText = if (Test-Path -LiteralPath $report) {
+    Get-Content -LiteralPath $report -Raw
+  } else {
+    ""
+  }
+  if ($reportText.Trim().Length -gt 0) {
+    throw "expected no drift report after successful cascade synchronization"
+  }
 }
