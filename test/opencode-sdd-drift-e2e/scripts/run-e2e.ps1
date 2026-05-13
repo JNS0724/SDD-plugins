@@ -112,7 +112,8 @@ if ($Scenario -eq "sdd-cascade") {
     throw "expected plugin follow-up to trigger tasks.md synchronization"
   }
   $reportText = if (Test-Path -LiteralPath $report) {
-    Get-Content -LiteralPath $report -Raw
+    $content = Get-Content -LiteralPath $report -Raw
+    if ($null -eq $content) { "" } else { $content }
   } else {
     ""
   }

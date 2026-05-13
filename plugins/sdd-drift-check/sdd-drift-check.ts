@@ -3,6 +3,9 @@ import * as fs from "fs"
 import * as path from "path"
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs)$/
+const MAX_FOLLOWUP_ATTEMPTS = 3
+const FOLLOWUP_DELAY_MS = 800
+
 const toPosix = (fp: string) => fp.replace(/\\/g, "/")
 const isSddPath = (fp: string) => {
   const normalized = toPosix(fp)
@@ -20,7 +23,8 @@ type State = {
   touched: Set<string>
   edited: Set<string>
   changeDirs: Set<string>
-  followupSent: Set<string>
+  followupAttempts: Map<string, number>
+  followupTimer?: ReturnType<typeof setTimeout>
 }
 
 type PeerGap = {
@@ -39,7 +43,7 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
         touched: new Set(),
         edited: new Set(),
         changeDirs: new Set(),
-        followupSent: new Set(),
+        followupAttempts: new Map(),
       })
     }
     return sessions.get(id)!
@@ -71,30 +75,85 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
     return gaps
   }
 
-  const buildPeerFollowup = (gaps: PeerGap[]) => {
+  const buildPeerFollowup = (gaps: PeerGap[], attempt?: number) => {
     const detail = gaps
       .map(
         (gap) =>
           `- ${gap.relDir}: edited [${gap.edited.join(", ")}], missing [${gap.missing.join(", ")}]`
       )
       .join("\n")
+    const label = attempt
+      ? `SDD drift check follow-up (attempt ${attempt}/${MAX_FOLLOWUP_ATTEMPTS}).`
+      : "SDD drift check follow-up."
+
     return [
-      "SDD drift check follow-up.",
+      label,
+      "This is an automatic plugin enforcement message, not a final-answer request.",
       "Some SDD change documents were edited, but their peer documents were not synchronized:",
       detail,
       "",
-      "Before giving a final answer, continue this same task. Read the missing peer file(s), update them to match the edited SDD change document(s), and do not modify unrelated files.",
+      "Continue now. Do not answer with only a summary.",
+      "Use the read tool on the missing peer file(s), then use edit or write to synchronize them with the edited SDD change document(s). Do not modify unrelated files.",
     ].join("\n")
   }
 
-  const sendPeerFollowup = async (sessionID: string, gaps: PeerGap[]) => {
-    const text = buildPeerFollowup(gaps)
-    console.error(`[sdd-drift-check] requesting peer follow-up for ${sessionID}`)
-    await client.session.prompt({
+  const sendPeerFollowup = async (
+    sessionID: string,
+    gaps: PeerGap[],
+    attempt: number
+  ) => {
+    console.error(
+      `[sdd-drift-check] requesting peer follow-up for ${sessionID}, attempt ${attempt}`
+    )
+    await client.session.promptAsync({
       sessionID,
       directory,
-      parts: [{ type: "text", text }],
+      parts: [{ type: "text", text: buildPeerFollowup(gaps, attempt) }],
     })
+  }
+
+  const schedulePeerFollowup = (
+    sessionID: string,
+    delay = FOLLOWUP_DELAY_MS
+  ) => {
+    const st = sessions.get(sessionID)
+    if (!st || st.followupTimer) return
+
+    st.followupTimer = setTimeout(() => {
+      st.followupTimer = undefined
+      void (async () => {
+        const fresh = sessions.get(sessionID)
+        if (!fresh) return
+
+        const retryableGaps = collectPeerGaps(fresh).filter(
+          (gap) =>
+            (fresh.followupAttempts.get(gap.key) || 0) <
+            MAX_FOLLOWUP_ATTEMPTS
+        )
+        if (!retryableGaps.length) return
+
+        let attempt = 1
+        for (const gap of retryableGaps) {
+          const next = (fresh.followupAttempts.get(gap.key) || 0) + 1
+          fresh.followupAttempts.set(gap.key, next)
+          attempt = Math.max(attempt, next)
+        }
+
+        try {
+          await sendPeerFollowup(sessionID, retryableGaps, attempt)
+        } catch (err) {
+          for (const gap of retryableGaps) {
+            fresh.followupAttempts.set(
+              gap.key,
+              Math.max(0, (fresh.followupAttempts.get(gap.key) || 1) - 1)
+            )
+          }
+          const message = err instanceof Error ? err.message : String(err)
+          console.error(`[sdd-drift-check] peer follow-up failed: ${message}`)
+          schedulePeerFollowup(sessionID, delay * 2)
+        }
+      })()
+    }, delay)
   }
 
   const findSdd = (fp: string): string | null => {
@@ -121,7 +180,7 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
 
       if (rel.startsWith("specs/")) {
         warn.push(
-          `⚠ 直接修改了 ${rel}。SDD 流程要求通过 sdd/changes/<id>/ 提出变更，确认要绕过？`
+          `SDD DRIFT: ${rel} was changed directly. SDD changes should normally go through sdd/changes/<id>/. If this bypass is intentional, mention it explicitly.`
         )
       }
 
@@ -140,13 +199,13 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
           const peerPath = path.join(dir, peer)
           if (fs.existsSync(peerPath) && !st.edited.has(peerPath)) {
             warn.push(
-              `⚠ 改了 sdd/changes/${id}/${file}，本会话未同步 sdd/changes/${id}/${peer}。`
+              `SDD DRIFT: changed sdd/changes/${id}/${file}, but sdd/changes/${id}/${peer} has not been synchronized in this session. Continue with read + edit/write on the peer file before finalizing.`
             )
           }
         }
         if (file === "proposal.md") {
           warn.push(
-            `⚠ proposal.md 变更通常牵连同目录 design.md / tasks.md，请检查。`
+            "SDD DRIFT: proposal.md changes usually need matching design.md / tasks.md updates. Check and synchronize them before finalizing."
           )
         }
       }
@@ -154,12 +213,10 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
     }
 
     if (CODE_EXT.test(fp)) {
-      const touchedChange = [...st.touched].some(
-        (f) => isSddChangePath(f)
-      )
+      const touchedChange = [...st.touched].some((f) => isSddChangePath(f))
       if (!touchedChange) {
         warn.push(
-          `⚠ 修改了代码 (${path.basename(fp)})，但本会话未读/改任何 sdd/changes/**。SDD 要求先有变更提案。`
+          `SDD DRIFT: code file ${path.basename(fp)} was changed, but this session did not touch any sdd/changes/** file. SDD expects a change proposal first.`
         )
       }
     }
@@ -182,6 +239,9 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
         if (warnings.length) {
           output.output =
             (output.output || "") + "\n\n---\n" + warnings.join("\n")
+        }
+        if (collectPeerGaps(st).length) {
+          schedulePeerFollowup(input.sessionID)
         }
       }
     },
@@ -221,18 +281,12 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
       if (!st) return
 
       const peerGaps = collectPeerGaps(st)
-      const unsentPeerGaps = peerGaps.filter(
-        (gap) => !st.followupSent.has(gap.key)
+      const retryablePeerGaps = peerGaps.filter(
+        (gap) => (st.followupAttempts.get(gap.key) || 0) < MAX_FOLLOWUP_ATTEMPTS
       )
-      if (unsentPeerGaps.length) {
-        for (const gap of unsentPeerGaps) st.followupSent.add(gap.key)
-        try {
-          await sendPeerFollowup(sessionID, unsentPeerGaps)
-          return
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          console.error(`[sdd-drift-check] peer follow-up failed: ${message}`)
-        }
+      if (retryablePeerGaps.length) {
+        schedulePeerFollowup(sessionID)
+        return
       }
 
       const lines: string[] = []
@@ -242,16 +296,12 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
         const exists = candidates.filter((f) =>
           fs.existsSync(path.join(dir, f))
         )
-        const edited = exists.filter((f) =>
-          st.edited.has(path.join(dir, f))
-        )
-        const missing = exists.filter(
-          (f) => !st.edited.has(path.join(dir, f))
-        )
+        const edited = exists.filter((f) => st.edited.has(path.join(dir, f)))
+        const missing = exists.filter((f) => !st.edited.has(path.join(dir, f)))
         if (edited.length && missing.length) {
-          const relDir = path.relative(directory, dir)
+          const relDir = toPosix(path.relative(directory, dir))
           lines.push(
-            `  • ${relDir}: 改了 [${edited.join(", ")}]，未改 [${missing.join(", ")}]`
+            `  - ${relDir}: edited [${edited.join(", ")}], missing [${missing.join(", ")}]`
           )
         }
       }
@@ -259,18 +309,16 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
       const codeEdited = [...st.edited].filter(
         (f) => CODE_EXT.test(f) && !isSddPath(f)
       )
-      const sddTouched = [...st.touched].some(
-        (f) => isSddPath(f)
-      )
+      const sddTouched = [...st.touched].some((f) => isSddPath(f))
       if (codeEdited.length && !sddTouched) {
         lines.push(
-          `  • 改了 ${codeEdited.length} 个代码文件但全程未碰任何 sdd/ 文档`
+          `  - edited ${codeEdited.length} code file(s), but did not touch any sdd/ document`
         )
       }
 
       if (lines.length) {
         const ts = new Date().toISOString()
-        const report = `📋 SDD 会话对账 (${ts})\n${lines.join("\n")}\n`
+        const report = `SDD session drift (${ts})\n${lines.join("\n")}\n`
         console.error("\n" + report)
         try {
           fs.appendFileSync(
