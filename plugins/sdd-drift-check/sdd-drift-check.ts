@@ -42,7 +42,7 @@ export const SddDriftCheck: Plugin = async ({ directory }) => {
     const warn: string[] = []
     const root = findSdd(fp)
 
-    if (root) {
+    if (root && !path.relative(root, fp).startsWith("..")) {
       const rel = path.relative(root, fp)
 
       if (rel.startsWith("specs/")) {
@@ -97,7 +97,7 @@ export const SddDriftCheck: Plugin = async ({ directory }) => {
   return {
     "tool.execute.after": async (input, output) => {
       const tool = input.tool.toLowerCase()
-      const fp = (output.args as any)?.filePath
+      const fp = (input as any).args?.filePath
       if (!fp || typeof fp !== "string") return
 
       const abs = path.resolve(fp)
