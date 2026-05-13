@@ -1,0 +1,6 @@
+node_modules/
+.home*/
+*.log
+*.ready
+*.pid
+.sdd-drift-report.md

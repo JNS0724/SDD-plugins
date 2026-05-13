@@ -1,0 +1,43 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "fake/fake-model",
+  "small_model": "fake/fake-model",
+  "enabled_providers": ["fake"],
+  "autoupdate": false,
+  "share": "disabled",
+  "snapshot": false,
+  "permission": "allow",
+  "provider": {
+    "fake": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Fake OpenAI-compatible provider",
+      "options": {
+        "baseURL": "http://127.0.0.1:48127/v1",
+        "apiKey": "test-key"
+      },
+      "models": {
+        "fake-model": {
+          "name": "Fake Tool Model",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 200000,
+            "output": 4096
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "build": {
+      "model": "fake/fake-model",
+      "permission": "allow",
+      "steps": 3
+    },
+    "title": {
+      "model": "fake/fake-model",
+      "permission": "allow",
+      "steps": 1
+    }
+  }
+}

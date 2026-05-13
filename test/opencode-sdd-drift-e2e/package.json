@@ -1,0 +1,14 @@
+{
+  "name": "opencode-sdd-drift-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-e2e.ps1",
+    "fake-openai": "node ./fake-openai-server.mjs",
+    "opencode": "opencode"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.2.27",
+    "opencode-ai": "1.2.27"
+  }
+}
