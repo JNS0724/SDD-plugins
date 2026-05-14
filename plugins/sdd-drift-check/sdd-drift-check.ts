@@ -4,7 +4,12 @@ import * as path from "path"
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs)$/
 const MAX_FOLLOWUP_ATTEMPTS = 3
-const FOLLOWUP_DELAY_MS = 800
+const FOLLOWUP_RETRY_MS = 3000
+const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
+const DEBUG_LOGS = SHOW_WARNINGS || process.env.SDD_DRIFT_DEBUG === "1"
+const debug = (message: string) => {
+  if (DEBUG_LOGS) console.error(message)
+}
 
 const toPosix = (fp: string) => fp.replace(/\\/g, "/")
 const isSddPath = (fp: string) => {
@@ -24,7 +29,8 @@ type State = {
   edited: Set<string>
   changeDirs: Set<string>
   followupAttempts: Map<string, number>
-  followupTimer?: ReturnType<typeof setTimeout>
+  followupLastSent: Map<string, number>
+  retryTimer?: ReturnType<typeof setTimeout>
 }
 
 type PeerGap = {
@@ -44,6 +50,7 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
         edited: new Set(),
         changeDirs: new Set(),
         followupAttempts: new Map(),
+        followupLastSent: new Map(),
       })
     }
     return sessions.get(id)!
@@ -100,10 +107,11 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
   const sendPeerFollowup = async (
     sessionID: string,
     gaps: PeerGap[],
-    attempt: number
+    attempt: number,
+    reason: string
   ) => {
-    console.error(
-      `[sdd-drift-check] requesting peer follow-up for ${sessionID}, attempt ${attempt}`
+    debug(
+      `[sdd-drift-check] requesting peer follow-up for ${sessionID}, attempt ${attempt}, reason ${reason}`
     )
     await client.session.promptAsync({
       sessionID,
@@ -112,48 +120,63 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
     })
   }
 
-  const schedulePeerFollowup = (
-    sessionID: string,
-    delay = FOLLOWUP_DELAY_MS
-  ) => {
+  const schedulePeerRetry = (sessionID: string, delay = FOLLOWUP_RETRY_MS) => {
     const st = sessions.get(sessionID)
-    if (!st || st.followupTimer) return
+    if (!st || st.retryTimer) return
 
-    st.followupTimer = setTimeout(() => {
-      st.followupTimer = undefined
+    st.retryTimer = setTimeout(() => {
+      st.retryTimer = undefined
       void (async () => {
-        const fresh = sessions.get(sessionID)
-        if (!fresh) return
-
-        const retryableGaps = collectPeerGaps(fresh).filter(
-          (gap) =>
-            (fresh.followupAttempts.get(gap.key) || 0) <
-            MAX_FOLLOWUP_ATTEMPTS
-        )
-        if (!retryableGaps.length) return
-
-        let attempt = 1
-        for (const gap of retryableGaps) {
-          const next = (fresh.followupAttempts.get(gap.key) || 0) + 1
-          fresh.followupAttempts.set(gap.key, next)
-          attempt = Math.max(attempt, next)
-        }
-
-        try {
-          await sendPeerFollowup(sessionID, retryableGaps, attempt)
-        } catch (err) {
-          for (const gap of retryableGaps) {
-            fresh.followupAttempts.set(
-              gap.key,
-              Math.max(0, (fresh.followupAttempts.get(gap.key) || 1) - 1)
-            )
-          }
-          const message = err instanceof Error ? err.message : String(err)
-          console.error(`[sdd-drift-check] peer follow-up failed: ${message}`)
-          schedulePeerFollowup(sessionID, delay * 2)
-        }
+        await requestPeerFollowup(sessionID, "retry")
       })()
     }, delay)
+  }
+
+  const requestPeerFollowup = async (sessionID: string, reason: string) => {
+    const st = sessions.get(sessionID)
+    if (!st) return false
+
+    const now = Date.now()
+    const gaps = collectPeerGaps(st)
+    const retryableGaps = gaps.filter(
+      (gap) =>
+        (st.followupAttempts.get(gap.key) || 0) < MAX_FOLLOWUP_ATTEMPTS
+    )
+    if (!retryableGaps.length) return false
+
+    const sendableGaps = retryableGaps.filter(
+      (gap) => now - (st.followupLastSent.get(gap.key) || 0) >= FOLLOWUP_RETRY_MS
+    )
+    if (!sendableGaps.length) {
+      schedulePeerRetry(sessionID)
+      return true
+    }
+
+    let attempt = 1
+    for (const gap of sendableGaps) {
+      const next = (st.followupAttempts.get(gap.key) || 0) + 1
+      st.followupAttempts.set(gap.key, next)
+      st.followupLastSent.set(gap.key, now)
+      attempt = Math.max(attempt, next)
+    }
+
+    try {
+      await sendPeerFollowup(sessionID, sendableGaps, attempt, reason)
+      schedulePeerRetry(sessionID)
+      return true
+    } catch (err) {
+      for (const gap of sendableGaps) {
+        st.followupAttempts.set(
+          gap.key,
+          Math.max(0, (st.followupAttempts.get(gap.key) || 1) - 1)
+        )
+        st.followupLastSent.delete(gap.key)
+      }
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`[sdd-drift-check] peer follow-up failed: ${message}`)
+      schedulePeerRetry(sessionID)
+      return false
+    }
   }
 
   const findSdd = (fp: string): string | null => {
@@ -236,12 +259,12 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
       if (tool === "edit" || tool === "write") {
         st.edited.add(abs)
         const warnings = drift(abs, st)
-        if (warnings.length) {
+        if (SHOW_WARNINGS && warnings.length) {
           output.output =
             (output.output || "") + "\n\n---\n" + warnings.join("\n")
         }
         if (collectPeerGaps(st).length) {
-          schedulePeerFollowup(input.sessionID)
+          await requestPeerFollowup(input.sessionID, "tool.execute.after")
         }
       }
     },
@@ -262,6 +285,9 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
       if (!userMessage) return
 
       const now = Date.now()
+      debug(
+        `[sdd-drift-check] messages.transform injected peer follow-up for ${sessionID}`
+      )
       userMessage.parts.push({
         id: `sdd_drift_${now}`,
         sessionID,
@@ -285,7 +311,7 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
         (gap) => (st.followupAttempts.get(gap.key) || 0) < MAX_FOLLOWUP_ATTEMPTS
       )
       if (retryablePeerGaps.length) {
-        schedulePeerFollowup(sessionID)
+        await requestPeerFollowup(sessionID, "session.idle")
         return
       }
 

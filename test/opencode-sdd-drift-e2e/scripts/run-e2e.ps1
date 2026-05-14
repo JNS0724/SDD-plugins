@@ -30,6 +30,7 @@ Set-Content -LiteralPath (Join-Path $root "src\app.ts") -Value "export function 
 $env:FAKE_SCENARIO = $Scenario
 $env:FAKE_LOG_PATH = $fakeLog
 $env:FAKE_READY_PATH = $ready
+$env:SDD_DRIFT_DEBUG = "1"
 $server = Start-Process node `
   -ArgumentList ".\fake-openai-server.mjs" `
   -WorkingDirectory $root `
@@ -106,10 +107,32 @@ if ($opencodeExit -ne 0) {
   exit $opencodeExit
 }
 
+$visibleOutput = if (Test-Path -LiteralPath $runOut) {
+  $content = Get-Content -LiteralPath $runOut -Raw
+  if ($null -eq $content) { "" } else { $content }
+} else {
+  ""
+}
+if ($env:SDD_DRIFT_SHOW_WARNINGS -ne "1" -and $visibleOutput -match "SDD DRIFT:") {
+  throw "expected no visible SDD drift warning in tool output by default"
+}
+
 if ($Scenario -eq "sdd-cascade") {
   $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
   if ($tasksText -notmatch "Synced by fake opencode model") {
     throw "expected plugin follow-up to trigger tasks.md synchronization"
+  }
+  $errText = if (Test-Path -LiteralPath $runErr) {
+    $content = Get-Content -LiteralPath $runErr -Raw
+    if ($null -eq $content) { "" } else { $content }
+  } else {
+    ""
+  }
+  if ($errText -notmatch "requesting peer follow-up .* reason tool\.execute\.after") {
+    throw "expected plugin to request follow-up from tool.execute.after"
+  }
+  if ($errText -notmatch "path=/session/\{id\}/prompt_async") {
+    throw "expected plugin follow-up to call session.promptAsync"
   }
   $reportText = if (Test-Path -LiteralPath $report) {
     $content = Get-Content -LiteralPath $report -Raw
