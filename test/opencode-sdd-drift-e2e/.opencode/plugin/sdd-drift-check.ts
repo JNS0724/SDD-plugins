@@ -3,13 +3,7 @@ import * as fs from "fs"
 import * as path from "path"
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs)$/
-const MAX_FOLLOWUP_ATTEMPTS = 3
-const FOLLOWUP_RETRY_MS = 3000
 const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
-const DEBUG_LOGS = SHOW_WARNINGS || process.env.SDD_DRIFT_DEBUG === "1"
-const debug = (message: string) => {
-  if (DEBUG_LOGS) console.error(message)
-}
 
 const toPosix = (fp: string) => fp.replace(/\\/g, "/")
 const isSddPath = (fp: string) => {
@@ -28,9 +22,6 @@ type State = {
   touched: Set<string>
   edited: Set<string>
   changeDirs: Set<string>
-  followupAttempts: Map<string, number>
-  followupLastSent: Map<string, number>
-  retryTimer?: ReturnType<typeof setTimeout>
 }
 
 type PeerGap = {
@@ -40,7 +31,7 @@ type PeerGap = {
   missing: string[]
 }
 
-export const SddDriftCheck: Plugin = async ({ directory, client }) => {
+export const SddDriftCheck: Plugin = async ({ directory }) => {
   const sessions = new Map<string, State>()
 
   const ensure = (id: string): State => {
@@ -49,8 +40,6 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
         touched: new Set(),
         edited: new Set(),
         changeDirs: new Set(),
-        followupAttempts: new Map(),
-        followupLastSent: new Map(),
       })
     }
     return sessions.get(id)!
@@ -82,101 +71,25 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
     return gaps
   }
 
-  const buildPeerFollowup = (gaps: PeerGap[], attempt?: number) => {
+  const buildToolEnforcement = (gaps: PeerGap[]) => {
     const detail = gaps
       .map(
         (gap) =>
-          `- ${gap.relDir}: edited [${gap.edited.join(", ")}], missing [${gap.missing.join(", ")}]`
+          `- ${gap.relDir}: edited [${gap.edited.join(", ")}], missing [${gap.missing.join(", ")}]. Read and update: ${gap.missing
+            .map((file) => `${gap.relDir}/${file}`)
+            .join(", ")}`
       )
       .join("\n")
-    const label = attempt
-      ? `SDD drift check follow-up (attempt ${attempt}/${MAX_FOLLOWUP_ATTEMPTS}).`
-      : "SDD drift check follow-up."
 
     return [
-      label,
-      "This is an automatic plugin enforcement message, not a final-answer request.",
-      "Some SDD change documents were edited, but their peer documents were not synchronized:",
+      "SDD drift tool result enforcement.",
+      "The preceding tool changed SDD change document(s), but peer document(s) are still unsynchronized:",
       detail,
       "",
-      "Continue now. Do not answer with only a summary.",
-      "Use the read tool on the missing peer file(s), then use edit or write to synchronize them with the edited SDD change document(s). Do not modify unrelated files.",
+      "This assistant turn is incomplete until the missing peer document(s) are synchronized.",
+      "Before any final answer, use the read tool on each missing peer file, then use edit or write to synchronize it with the edited SDD change document(s).",
+      "Do not stop or summarize completion until the missing peer document(s) are updated.",
     ].join("\n")
-  }
-
-  const sendPeerFollowup = async (
-    sessionID: string,
-    gaps: PeerGap[],
-    attempt: number,
-    reason: string
-  ) => {
-    debug(
-      `[sdd-drift-check] requesting peer follow-up for ${sessionID}, attempt ${attempt}, reason ${reason}`
-    )
-    await client.session.promptAsync({
-      sessionID,
-      directory,
-      parts: [{ type: "text", text: buildPeerFollowup(gaps, attempt) }],
-    })
-  }
-
-  const schedulePeerRetry = (sessionID: string, delay = FOLLOWUP_RETRY_MS) => {
-    const st = sessions.get(sessionID)
-    if (!st || st.retryTimer) return
-
-    st.retryTimer = setTimeout(() => {
-      st.retryTimer = undefined
-      void (async () => {
-        await requestPeerFollowup(sessionID, "retry")
-      })()
-    }, delay)
-  }
-
-  const requestPeerFollowup = async (sessionID: string, reason: string) => {
-    const st = sessions.get(sessionID)
-    if (!st) return false
-
-    const now = Date.now()
-    const gaps = collectPeerGaps(st)
-    const retryableGaps = gaps.filter(
-      (gap) =>
-        (st.followupAttempts.get(gap.key) || 0) < MAX_FOLLOWUP_ATTEMPTS
-    )
-    if (!retryableGaps.length) return false
-
-    const sendableGaps = retryableGaps.filter(
-      (gap) => now - (st.followupLastSent.get(gap.key) || 0) >= FOLLOWUP_RETRY_MS
-    )
-    if (!sendableGaps.length) {
-      schedulePeerRetry(sessionID)
-      return true
-    }
-
-    let attempt = 1
-    for (const gap of sendableGaps) {
-      const next = (st.followupAttempts.get(gap.key) || 0) + 1
-      st.followupAttempts.set(gap.key, next)
-      st.followupLastSent.set(gap.key, now)
-      attempt = Math.max(attempt, next)
-    }
-
-    try {
-      await sendPeerFollowup(sessionID, sendableGaps, attempt, reason)
-      schedulePeerRetry(sessionID)
-      return true
-    } catch (err) {
-      for (const gap of sendableGaps) {
-        st.followupAttempts.set(
-          gap.key,
-          Math.max(0, (st.followupAttempts.get(gap.key) || 1) - 1)
-        )
-        st.followupLastSent.delete(gap.key)
-      }
-      const message = err instanceof Error ? err.message : String(err)
-      console.error(`[sdd-drift-check] peer follow-up failed: ${message}`)
-      schedulePeerRetry(sessionID)
-      return false
-    }
   }
 
   const findSdd = (fp: string): string | null => {
@@ -259,44 +172,15 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
       if (tool === "edit" || tool === "write") {
         st.edited.add(abs)
         const warnings = drift(abs, st)
-        if (SHOW_WARNINGS && warnings.length) {
+        const peerGaps = collectPeerGaps(st)
+        if (peerGaps.length) {
+          output.output =
+            (output.output || "") + "\n\n---\n" + buildToolEnforcement(peerGaps)
+        } else if (SHOW_WARNINGS && warnings.length) {
           output.output =
             (output.output || "") + "\n\n---\n" + warnings.join("\n")
         }
-        if (collectPeerGaps(st).length) {
-          await requestPeerFollowup(input.sessionID, "tool.execute.after")
-        }
       }
-    },
-
-    "experimental.chat.messages.transform": async (_input, output) => {
-      const latest = output.messages[output.messages.length - 1]
-      const sessionID = latest?.info.sessionID
-      if (!sessionID) return
-      const st = sessions.get(sessionID)
-      if (!st) return
-
-      const peerGaps = collectPeerGaps(st)
-      if (!peerGaps.length) return
-
-      const userMessage = [...output.messages]
-        .reverse()
-        .find((message) => message.info.role === "user")
-      if (!userMessage) return
-
-      const now = Date.now()
-      debug(
-        `[sdd-drift-check] messages.transform injected peer follow-up for ${sessionID}`
-      )
-      userMessage.parts.push({
-        id: `sdd_drift_${now}`,
-        sessionID,
-        messageID: userMessage.info.id,
-        type: "text",
-        text: buildPeerFollowup(peerGaps),
-        synthetic: true,
-        time: { start: now },
-      } as any)
     },
 
     event: async ({ event }) => {
@@ -305,15 +189,6 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
       if (!sessionID) return
       const st = sessions.get(sessionID)
       if (!st) return
-
-      const peerGaps = collectPeerGaps(st)
-      const retryablePeerGaps = peerGaps.filter(
-        (gap) => (st.followupAttempts.get(gap.key) || 0) < MAX_FOLLOWUP_ATTEMPTS
-      )
-      if (retryablePeerGaps.length) {
-        await requestPeerFollowup(sessionID, "session.idle")
-        return
-      }
 
       const lines: string[] = []
 
@@ -344,8 +219,6 @@ export const SddDriftCheck: Plugin = async ({ directory, client }) => {
 
       if (lines.length) {
         const ts = new Date().toISOString()
-        const report = `SDD session drift (${ts})\n${lines.join("\n")}\n`
-        console.error("\n" + report)
         try {
           fs.appendFileSync(
             path.join(directory, ".sdd-drift-report.md"),

@@ -30,7 +30,6 @@ Set-Content -LiteralPath (Join-Path $root "src\app.ts") -Value "export function 
 $env:FAKE_SCENARIO = $Scenario
 $env:FAKE_LOG_PATH = $fakeLog
 $env:FAKE_READY_PATH = $ready
-$env:SDD_DRIFT_DEBUG = "1"
 $server = Start-Process node `
   -ArgumentList ".\fake-openai-server.mjs" `
   -WorkingDirectory $root `
@@ -55,8 +54,11 @@ try {
   } else {
     "Use the read tool, then the write tool, to update sdd/changes/test-feat/design.md only."
   }
+
+  $runArgs = @("opencode", "run", "--print-logs", "--log-level", "DEBUG", "--format", "json", $prompt)
+
   $opencode = Start-Process npx.cmd `
-    -ArgumentList "opencode", "run", "--print-logs", "--log-level", "DEBUG", "--format", "json", $prompt `
+    -ArgumentList $runArgs `
     -WorkingDirectory $root `
     -RedirectStandardOutput $runOut `
     -RedirectStandardError $runErr `
@@ -64,6 +66,17 @@ try {
     -Wait `
     -PassThru
   $opencodeExit = $opencode.ExitCode
+
+  if ($Scenario -eq "sdd-cascade") {
+    $syncDeadline = (Get-Date).AddSeconds(20)
+    do {
+      $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
+      if ($tasksText -match "Synced by fake opencode model") {
+        break
+      }
+      Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $syncDeadline)
+  }
 
   Write-Output "OPENCODE_EXIT=$opencodeExit"
 } finally {
@@ -114,13 +127,13 @@ $visibleOutput = if (Test-Path -LiteralPath $runOut) {
   ""
 }
 if ($env:SDD_DRIFT_SHOW_WARNINGS -ne "1" -and $visibleOutput -match "SDD DRIFT:") {
-  throw "expected no visible SDD drift warning in tool output by default"
+  throw "expected no legacy SDD DRIFT warning in tool output by default"
 }
 
 if ($Scenario -eq "sdd-cascade") {
   $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
   if ($tasksText -notmatch "Synced by fake opencode model") {
-    throw "expected plugin follow-up to trigger tasks.md synchronization"
+    throw "expected tool result enforcement to trigger tasks.md synchronization"
   }
   $errText = if (Test-Path -LiteralPath $runErr) {
     $content = Get-Content -LiteralPath $runErr -Raw
@@ -128,11 +141,20 @@ if ($Scenario -eq "sdd-cascade") {
   } else {
     ""
   }
-  if ($errText -notmatch "requesting peer follow-up .* reason tool\.execute\.after") {
-    throw "expected plugin to request follow-up from tool.execute.after"
+  if ($errText -match "\[sdd-drift-check\]") {
+    throw "expected no plugin stderr output by default"
   }
-  if ($errText -notmatch "path=/session/\{id\}/prompt_async") {
-    throw "expected plugin follow-up to call session.promptAsync"
+  $fakeLogText = if (Test-Path -LiteralPath $fakeLog) {
+    $content = Get-Content -LiteralPath $fakeLog -Raw
+    if ($null -eq $content) { "" } else { $content }
+  } else {
+    ""
+  }
+  if ($fakeLogText -notmatch '"hasToolEnforcement":true') {
+    throw "expected plugin to inject SDD drift tool result enforcement"
+  }
+  if ($errText -match "path=/session/\{id\}/message") {
+    throw "expected plugin not to call session.prompt"
   }
   $reportText = if (Test-Path -LiteralPath $report) {
     $content = Get-Content -LiteralPath $report -Raw

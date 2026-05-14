@@ -78,7 +78,7 @@ const readArguments = JSON.stringify({
 const tasksArguments = JSON.stringify({
   filePath: "sdd/changes/test-feat/tasks.md",
   content:
-    "# Tasks\n\n- [x] Synced by fake opencode model after SDD drift follow-up.\n",
+    "# Tasks\n\n- [x] Synced by fake opencode model after SDD drift tool result enforcement.\n",
 })
 const readTasksArguments = JSON.stringify({
   filePath: "sdd/changes/test-feat/tasks.md",
@@ -103,13 +103,13 @@ const server = http.createServer(async (request, response) => {
   requestCount += 1
   const toolNames = (payload.tools || []).map((tool) => tool.function?.name || tool.name)
   const promptText = messageText(payload.messages)
-  const isFollowup = promptText.includes("SDD drift check follow-up")
+  const hasToolEnforcement = promptText.includes("SDD drift tool result enforcement")
   log({
     request: requestCount,
     scenario,
     stream: payload.stream,
     toolNames,
-    isFollowup,
+    hasToolEnforcement,
     messageRoles: (payload.messages || []).map((message) => message.role),
   })
 
@@ -187,7 +187,7 @@ const server = http.createServer(async (request, response) => {
     sse(response, completionChunk({}, "tool_calls"))
   } else if (
     scenario === "sdd-cascade" &&
-    isFollowup &&
+    hasToolEnforcement &&
     toolNames.includes("write") &&
     toolStage === 2
   ) {
@@ -225,7 +225,7 @@ const server = http.createServer(async (request, response) => {
     sse(response, completionChunk({}, "tool_calls"))
   } else if (
     scenario === "sdd-cascade" &&
-    isFollowup &&
+    hasToolEnforcement &&
     toolNames.includes("write") &&
     toolStage === 3
   ) {
