@@ -18,9 +18,70 @@ $runErr = Join-Path $root "opencode-run.$runId.err.log"
 $ready = Join-Path $root "fake-openai.$runId.ready"
 $fakeLog = Join-Path $root "fake-openai.$runId.log"
 $report = Join-Path $root ".sdd-drift-report.md"
+$hookState = Join-Path $root ".sdd-drift-hook-state"
+$configPath = Join-Path $root ".opencode\opencode.jsonc"
+$configBackupPath = Join-Path $root ".opencode\opencode.e2e-backup.tmp"
+if (Test-Path -LiteralPath $configBackupPath) {
+  throw "opencode e2e config backup already exists; another e2e run may be active: $configBackupPath"
+}
+$configHadFile = Test-Path -LiteralPath $configPath
+$configBackup = if ($configHadFile) {
+  Get-Content -LiteralPath $configPath -Raw
+} else {
+  $null
+}
+$fakeConfig = @'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "fake/fake-model",
+  "small_model": "fake/fake-model",
+  "enabled_providers": ["fake"],
+  "autoupdate": false,
+  "share": "disabled",
+  "snapshot": false,
+  "permission": "allow",
+  "provider": {
+    "fake": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Fake OpenAI-compatible provider",
+      "options": {
+        "baseURL": "http://127.0.0.1:48127/v1",
+        "apiKey": "test-key"
+      },
+      "models": {
+        "fake-model": {
+          "name": "Fake Tool Model",
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 200000,
+            "output": 4096
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "build": {
+      "model": "fake/fake-model",
+      "permission": "allow",
+      "steps": 3
+    },
+    "title": {
+      "model": "fake/fake-model",
+      "permission": "allow",
+      "steps": 1
+    }
+  }
+}
+'@
 
 if (Test-Path -LiteralPath $report) {
   Clear-Content -LiteralPath $report -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $hookState) {
+  Get-ChildItem -LiteralPath $hookState -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Set-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md") -Value "# Design`n`nInitial design."
@@ -30,6 +91,10 @@ Set-Content -LiteralPath (Join-Path $root "src\app.ts") -Value "export function 
 $env:FAKE_SCENARIO = $Scenario
 $env:FAKE_LOG_PATH = $fakeLog
 $env:FAKE_READY_PATH = $ready
+$env:OMO_SEND_ANONYMOUS_TELEMETRY = "0"
+$env:OMO_DISABLE_POSTHOG = "1"
+Set-Content -LiteralPath $configBackupPath -Value $configBackup -NoNewline
+Set-Content -LiteralPath $configPath -Value $fakeConfig -NoNewline
 $server = Start-Process node `
   -ArgumentList ".\fake-openai-server.mjs" `
   -WorkingDirectory $root `
@@ -55,7 +120,7 @@ try {
     "Use the read tool, then the write tool, to update sdd/changes/test-feat/design.md only."
   }
 
-  $runArgs = @("opencode", "run", "--print-logs", "--log-level", "DEBUG", "--format", "json", $prompt)
+  $runArgs = @("opencode", "run", "--print-logs", "--log-level", "DEBUG", "--agent", "build", "--format", "json", $prompt)
 
   $opencode = Start-Process npx.cmd `
     -ArgumentList $runArgs `
@@ -82,6 +147,15 @@ try {
 } finally {
   if ($server -and !$server.HasExited) {
     Stop-Process -Id $server.Id -Force
+  }
+  if (Test-Path -LiteralPath $configBackupPath) {
+    if ($configHadFile) {
+      $restoreConfig = Get-Content -LiteralPath $configBackupPath -Raw
+      Set-Content -LiteralPath $configPath -Value $restoreConfig -NoNewline
+    } elseif (Test-Path -LiteralPath $configPath) {
+      Remove-Item -LiteralPath $configPath -Force
+    }
+    Remove-Item -LiteralPath $configBackupPath -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -164,5 +238,34 @@ if ($Scenario -eq "sdd-cascade") {
   }
   if ($reportText.Trim().Length -gt 0) {
     throw "expected no drift report after successful cascade synchronization"
+  }
+} elseif ($Scenario -eq "sdd-design") {
+  $fakeLogText = if (Test-Path -LiteralPath $fakeLog) {
+    $content = Get-Content -LiteralPath $fakeLog -Raw
+    if ($null -eq $content) { "" } else { $content }
+  } else {
+    ""
+  }
+  if ($fakeLogText -notmatch '"hasToolEnforcement":true') {
+    throw "expected plugin to inject SDD drift tool result enforcement"
+  }
+  $reportText = if (Test-Path -LiteralPath $report) {
+    $content = Get-Content -LiteralPath $report -Raw
+    if ($null -eq $content) { "" } else { $content }
+  } else {
+    ""
+  }
+  if ($reportText -notmatch "missing \[tasks.md\]") {
+    throw "expected unresolved SDD drift report for unsynchronized tasks.md"
+  }
+} elseif ($Scenario -eq "code") {
+  $fakeLogText = if (Test-Path -LiteralPath $fakeLog) {
+    $content = Get-Content -LiteralPath $fakeLog -Raw
+    if ($null -eq $content) { "" } else { $content }
+  } else {
+    ""
+  }
+  if ($fakeLogText -match '"hasToolEnforcement":true') {
+    throw "expected ordinary code edit not to inject design/tasks tool enforcement"
   }
 }

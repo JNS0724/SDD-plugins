@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.cjs"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.cjs"
+          }
+        ]
+      }
+    ]
+  }
+}

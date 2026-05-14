@@ -4,3 +4,5 @@ node_modules/
 *.ready
 *.pid
 .sdd-drift-report.md
+.sdd-drift-hook-state/
+.opencode/*.tmp
