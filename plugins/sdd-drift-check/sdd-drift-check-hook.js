@@ -15,6 +15,11 @@ const CHANGE_DOC_REQUIREMENTS = {
   "design.md": ["tasks.md"],
   "tasks.md": ["design.md"],
 }
+const DOCUMENT_SYNC_RULES = [
+  "When updating SDD documents, preserve the existing document template and heading structure.",
+  "Do not add a new section or rewrite the template just to satisfy this enforcement.",
+  "Read the target document first, find the most appropriate existing section, and make the smallest needed update there.",
+]
 
 const toPosix = (fp) => fp.replace(/\\/g, "/")
 const isCaseInsensitiveFs = () =>
@@ -433,6 +438,7 @@ const buildToolEnforcement = (gaps) => {
     "",
     "This assistant turn is incomplete until the required peer document(s) are synchronized.",
     "Before any final answer, use the read tool on each required peer file, then use edit or write to synchronize it with the edited SDD change document(s).",
+    ...DOCUMENT_SYNC_RULES,
     "Do not stop or summarize completion until the required peer document(s) are updated.",
   ].join("\n")
 }
@@ -454,6 +460,7 @@ const buildCodeEnforcement = (cwd, gaps) => {
     "This assistant turn is incomplete until the relevant SDD design document is synchronized.",
     "Before any final answer, use the read tool on the relevant design.md, then use edit or write to update it so the design matches the code change.",
     "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/design.md for this code change.",
+    ...DOCUMENT_SYNC_RULES,
     "Do not stop or summarize completion until the required design document is updated.",
   ].join("\n")
 }

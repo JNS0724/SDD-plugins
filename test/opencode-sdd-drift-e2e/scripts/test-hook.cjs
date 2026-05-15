@@ -31,7 +31,11 @@ try {
     const gaps = hook.collectPeerGaps(cwd, state)
     assert.strictEqual(gaps.length, 1)
     assert.deepStrictEqual(gaps[0].missing, ["tasks.md"])
-    assert.match(hook.buildToolEnforcement(gaps), /sdd\/changes\/alpha\/tasks\.md/)
+    const enforcement = hook.buildToolEnforcement(gaps)
+    assert.match(enforcement, /sdd\/changes\/alpha\/tasks\.md/)
+    assert.match(enforcement, /preserve the existing document template and heading structure/)
+    assert.match(enforcement, /Do not add a new section/)
+    assert.match(enforcement, /find the most appropriate existing section/)
   }
 
   {
@@ -107,7 +111,11 @@ try {
     assert.match(hook.drift(cwd, code, state).join("\n"), /did not edit any sdd\/changes/)
     const codeGaps = hook.collectCodeGaps(cwd, state)
     assert.strictEqual(codeGaps.length, 1)
-    assert.match(hook.buildCodeEnforcement(cwd, codeGaps), /sdd\/changes\/epsilon\/design\.md/)
+    const enforcement = hook.buildCodeEnforcement(cwd, codeGaps)
+    assert.match(enforcement, /sdd\/changes\/epsilon\/design\.md/)
+    assert.match(enforcement, /preserve the existing document template and heading structure/)
+    assert.match(enforcement, /Do not add a new section/)
+    assert.match(enforcement, /find the most appropriate existing section/)
 
     edit(state, readOnlyDesign)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
