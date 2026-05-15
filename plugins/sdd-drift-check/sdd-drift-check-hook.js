@@ -6,6 +6,7 @@ const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|swift|cc|
 const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
 const STRICT_BLOCK = process.env.SDD_DRIFT_STRICT === "1"
 const DEBUG = process.env.SDD_DRIFT_DEBUG === "1"
+const OUTPUT_MODE = String(process.env.SDD_DRIFT_OUTPUT || "").toLowerCase()
 const STATE_DIR = ".sdd-drift-hook-state"
 const PEER_FILES = ["design.md", "tasks.md"]
 const DESIGN_FILE = "design.md"
@@ -52,6 +53,8 @@ const readStdin = () =>
     process.stdin.on("error", reject)
   })
 
+const parseHookInput = (raw) => JSON.parse(String(raw || "{}").replace(/^\uFEFF/, ""))
+
 const sanitize = (value) => String(value || "default").replace(/[^a-zA-Z0-9_.-]/g, "_")
 const hash = (value) => crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 12)
 
@@ -78,7 +81,17 @@ const findNearestGitDir = (cwd) => {
 
 const stateDir = (cwd) => {
   const gitDir = findNearestGitDir(cwd)
-  return gitDir ? path.join(gitDir, "sdd-drift-hook-state") : path.join(cwd, STATE_DIR)
+  if (gitDir) {
+    const gitStateDir = path.join(gitDir, "sdd-drift-hook-state")
+    try {
+      fs.mkdirSync(gitStateDir, { recursive: true })
+      const probe = path.join(gitStateDir, `.probe.${process.pid}.${Date.now()}`)
+      fs.writeFileSync(probe, "")
+      fs.unlinkSync(probe)
+      return gitStateDir
+    } catch {}
+  }
+  return path.join(cwd, STATE_DIR)
 }
 
 const statePath = (cwd, sessionID) =>
@@ -149,7 +162,16 @@ const writeTextAtomic = (target, text) => {
     `.${path.basename(target)}.${process.pid}.${Date.now()}.tmp`
   )
   fs.writeFileSync(tmp, text)
-  fs.renameSync(tmp, target)
+  try {
+    fs.renameSync(tmp, target)
+  } catch (err) {
+    try {
+      fs.writeFileSync(target, text)
+      fs.unlinkSync(tmp)
+      return
+    } catch {}
+    throw err
+  }
 }
 
 const cleanupOldState = (cwd) => {
@@ -466,16 +488,34 @@ const refreshReport = (cwd, state) => {
   } catch {}
 }
 
-const emitEnforcement = (message) => {
+const isOpenCodeHookInput = (input) => {
+  if (OUTPUT_MODE === "opencode") return true
+  if (OUTPUT_MODE === "claude" || OUTPUT_MODE === "claude-code") return false
+  return input?.hook_source === "opencode-plugin"
+}
+
+const buildClaudeCodeOutput = (hookEventName, message) =>
+  JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: hookEventName || "PostToolUse",
+      additionalContext: message,
+    },
+  })
+
+const emitEnforcement = (input, message) => {
   if (STRICT_BLOCK) {
     process.stderr.write(message)
     process.exit(2)
   }
-  process.stdout.write(message)
+  if (isOpenCodeHookInput(input)) {
+    process.stdout.write(message)
+    return
+  }
+  process.stdout.write(buildClaudeCodeOutput(input?.hook_event_name, message))
 }
 
 const main = async () => {
-  const input = JSON.parse((await readStdin()) || "{}")
+  const input = parseHookInput(await readStdin())
   const cwd = input.cwd || process.cwd()
   const sessionID = input.session_id || "default"
   const state = loadState(cwd, sessionID)
@@ -510,11 +550,11 @@ const main = async () => {
     refreshReport(cwd, state)
 
     if (peerGaps.length) {
-      emitEnforcement(buildToolEnforcement(peerGaps))
+      emitEnforcement(input, buildToolEnforcement(peerGaps))
     } else if (codeGaps.length) {
-      emitEnforcement(buildCodeEnforcement(cwd, codeGaps))
+      emitEnforcement(input, buildCodeEnforcement(cwd, codeGaps))
     } else if (SHOW_WARNINGS && warnings.length) {
-      emitEnforcement(warnings.join("\n"))
+      emitEnforcement(input, warnings.join("\n"))
     }
     return
   }
@@ -530,6 +570,7 @@ if (require.main === module) {
 } else {
   module.exports = {
     buildToolEnforcement,
+    buildClaudeCodeOutput,
     buildCodeEnforcement,
     collectCodeGaps,
     collectPeerGaps,
@@ -539,8 +580,10 @@ if (require.main === module) {
     findSdd,
     getChangeDoc,
     hasEditedSddChange,
+    isOpenCodeHookInput,
     loadState,
     normalizeKey,
+    parseHookInput,
     recordFile,
     refreshReport,
     saveState,

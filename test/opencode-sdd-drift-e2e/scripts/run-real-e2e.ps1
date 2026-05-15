@@ -25,7 +25,7 @@ $configBackupPath = Join-Path $root ".opencode\opencode.real-backup.tmp"
 $configTemplate = Join-Path $root ".opencode\opencode.$Provider.jsonc.example"
 $ohmyConfigPath = Join-Path $root ".opencode\oh-my-openagent.jsonc"
 $ohmyBackupPath = Join-Path $root ".opencode\oh-my-openagent.real-backup.tmp"
-$hookPath = (Join-Path $repoRoot "plugins\sdd-drift-check\sdd-drift-check-hook.cjs").Replace("\", "/")
+$hookPath = (Join-Path $repoRoot "plugins\sdd-drift-check\sdd-drift-check-hook.js").Replace("\", "/")
 
 if (!(Test-Path -LiteralPath $configTemplate)) {
   throw "missing provider config template: $configTemplate"

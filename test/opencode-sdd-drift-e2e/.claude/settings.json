@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.cjs"
+            "command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.js"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.cjs"
+            "command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.js"
           }
         ]
       }

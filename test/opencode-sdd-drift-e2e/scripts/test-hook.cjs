@@ -3,7 +3,7 @@ const fs = require("fs")
 const os = require("os")
 const path = require("path")
 
-const hook = require("../../../plugins/sdd-drift-check/sdd-drift-check-hook.cjs")
+const hook = require("../../../plugins/sdd-drift-check/sdd-drift-check-hook.js")
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sdd-drift-hook-"))
 
@@ -123,6 +123,21 @@ try {
       path.normalize(hook.findSdd(nested)),
       path.join(tmpRoot, "repo", "services", "api", "sdd")
     )
+  }
+
+  {
+    assert.deepStrictEqual(hook.parseHookInput('\uFEFF{"hook_event_name":"PostToolUse"}'), {
+      hook_event_name: "PostToolUse",
+    })
+    assert.strictEqual(hook.isOpenCodeHookInput({ hook_source: "opencode-plugin" }), true)
+    assert.strictEqual(hook.isOpenCodeHookInput({ hook_event_name: "PostToolUse" }), false)
+    const output = JSON.parse(hook.buildClaudeCodeOutput("PostToolUse", "sync tasks.md"))
+    assert.deepStrictEqual(output, {
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext: "sync tasks.md",
+      },
+    })
   }
 
   console.log("sdd-drift hook unit tests passed")

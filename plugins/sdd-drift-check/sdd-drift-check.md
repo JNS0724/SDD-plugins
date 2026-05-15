@@ -1,4 +1,4 @@
-# SDD Drift Check - oh-my-opencode hook
+# SDD Drift Check - OpenCode and Claude Code hook
 
 ## Current behavior note
 
@@ -9,6 +9,15 @@ to the tool result. The model is instructed to read and update the relevant
 `design.md` before giving a final answer. Once `design.md` is updated, the
 existing peer rule still applies: `design.md` then requires the same change
 directory's `tasks.md` to be synchronized.
+
+The same hook entrypoint also supports Claude Code. When the hook input contains
+`hook_source: "opencode-plugin"` it emits plain stdout so `oh-my-opencode` can
+append the text to the OpenCode tool result. When that marker is absent, it emits
+Claude Code structured JSON:
+`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"..."}}`.
+This lets Claude Code inject the enforcement as model-visible context next to the
+tool result without using `stderr` / `exit 2`. Set `SDD_DRIFT_OUTPUT=opencode` or
+`SDD_DRIFT_OUTPUT=claude` only if a wrapper needs an explicit override.
 
 这个插件用于在 OpenCode 的 SDD 工作流中检查文档漂移。当前推荐方式是安装
 `oh-my-opencode@3.17.2`，通过 Claude-compatible `PostToolUse` hook 把约束追加到
@@ -34,7 +43,7 @@ OpenCode tool result 中，让下一次模型请求能看到并继续同步 peer
 ## 安装到业务项目
 
 下面假设你在业务项目根目录安装，并把 hook 脚本复制到该项目的
-`.opencode/hooks/sdd-drift-check-hook.cjs`。
+`.opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js`。
 
 ### 1. 安装 oh-my-opencode
 
@@ -45,8 +54,9 @@ npm install --save-dev oh-my-opencode@3.17.2
 ### 2. 复制 hook 脚本
 
 ```powershell
-New-Item -ItemType Directory -Force .opencode\hooks
-Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.cjs .opencode\hooks\sdd-drift-check-hook.cjs
+New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\package.json .opencode\hooks\sdd-drift-check\package.json
 ```
 
 ### 3. 加载 oh-my-opencode 插件
@@ -105,7 +115,7 @@ New-Item -ItemType Directory -Force .claude
         "hooks": [
           {
             "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check-hook.cjs"
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
           }
         ]
       }
@@ -116,7 +126,7 @@ New-Item -ItemType Directory -Force .claude
         "hooks": [
           {
             "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check-hook.cjs"
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
           }
         ]
       }
@@ -126,7 +136,7 @@ New-Item -ItemType Directory -Force .claude
 ```
 
 `command` 相对业务项目根目录执行。业务项目安装时优先使用
-`node .opencode/hooks/sdd-drift-check-hook.cjs`，不要照抄本仓库测试工程里的相对路径。
+`node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js`，不要照抄本仓库测试工程里的相对路径。
 
 ### 6. 忽略运行产物
 
@@ -147,7 +157,7 @@ New-Item -ItemType Directory -Force .claude
 中的 command 是：
 
 ```json
-"command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.cjs"
+"command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.js"
 ```
 
 运行：
