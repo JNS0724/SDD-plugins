@@ -75,6 +75,14 @@ const toolArguments = JSON.stringify({
 const readArguments = JSON.stringify({
   filePath: target,
 })
+const designArguments = JSON.stringify({
+  filePath: "sdd/changes/test-feat/design.md",
+})
+const codeDesignArguments = JSON.stringify({
+  filePath: "sdd/changes/test-feat/design.md",
+  content:
+    "# Design\n\nInitial design.\n\n## Synced by fake opencode model after code drift enforcement.\n",
+})
 const tasksArguments = JSON.stringify({
   filePath: "sdd/changes/test-feat/tasks.md",
   content:
@@ -102,14 +110,16 @@ const server = http.createServer(async (request, response) => {
   const payload = JSON.parse(body)
   requestCount += 1
   const toolNames = (payload.tools || []).map((tool) => tool.function?.name || tool.name)
-  const promptText = messageText(payload.messages)
-  const hasToolEnforcement = promptText.includes("SDD drift tool result enforcement")
+  const toolText = messageText((payload.messages || []).filter((message) => message.role === "tool"))
+  const hasToolEnforcement = toolText.includes("SDD drift tool result enforcement")
+  const hasCodeEnforcement = toolText.includes("changed code")
   log({
     request: requestCount,
     scenario,
     stream: payload.stream,
     toolNames,
     hasToolEnforcement,
+    hasCodeEnforcement,
     messageRoles: (payload.messages || []).map((message) => message.role),
   })
 
@@ -186,10 +196,86 @@ const server = http.createServer(async (request, response) => {
     )
     sse(response, completionChunk({}, "tool_calls"))
   } else if (
-    scenario === "sdd-cascade" &&
+    scenario === "code" &&
     hasToolEnforcement &&
     toolNames.includes("write") &&
     toolStage === 2
+  ) {
+    toolStage += 1
+    sse(response, completionChunk({ role: "assistant" }))
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_read_design_after_code",
+            type: "function",
+            function: {
+              name: "read",
+              arguments: "",
+            },
+          },
+        ],
+      }),
+    )
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            function: {
+              arguments: designArguments,
+            },
+          },
+        ],
+      }),
+    )
+    sse(response, completionChunk({}, "tool_calls"))
+  } else if (
+    scenario === "code" &&
+    hasToolEnforcement &&
+    toolNames.includes("write") &&
+    toolStage === 3
+  ) {
+    toolStage += 1
+    sse(response, completionChunk({ role: "assistant" }))
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_write_design_after_code",
+            type: "function",
+            function: {
+              name: "write",
+              arguments: "",
+            },
+          },
+        ],
+      }),
+    )
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            function: {
+              arguments: codeDesignArguments,
+            },
+          },
+        ],
+      }),
+    )
+    sse(response, completionChunk({}, "tool_calls"))
+  } else if (
+    (scenario === "sdd-cascade" || scenario === "code") &&
+    hasToolEnforcement &&
+    toolNames.includes("write") &&
+    (scenario === "sdd-cascade" ? toolStage === 2 : toolStage === 4)
   ) {
     toolStage += 1
     sse(response, completionChunk({ role: "assistant" }))
@@ -224,10 +310,10 @@ const server = http.createServer(async (request, response) => {
     )
     sse(response, completionChunk({}, "tool_calls"))
   } else if (
-    scenario === "sdd-cascade" &&
+    (scenario === "sdd-cascade" || scenario === "code") &&
     hasToolEnforcement &&
     toolNames.includes("write") &&
-    toolStage === 3
+    (scenario === "sdd-cascade" ? toolStage === 3 : toolStage === 5)
   ) {
     toolStage += 1
     sse(response, completionChunk({ role: "assistant" }))
@@ -267,7 +353,8 @@ const server = http.createServer(async (request, response) => {
       response,
       completionChunk({
         content:
-          scenario === "sdd-cascade" && toolStage >= 4
+          (scenario === "sdd-cascade" && toolStage >= 4) ||
+          (scenario === "code" && toolStage >= 6)
             ? "Design and tasks files updated."
             : "Design file updated.",
       }),

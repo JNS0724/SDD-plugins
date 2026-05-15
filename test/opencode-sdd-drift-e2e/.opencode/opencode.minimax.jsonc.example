@@ -3,6 +3,7 @@
   "model": "minimax/MiniMax-M2.7",
   "small_model": "minimax/MiniMax-M2.7",
   "enabled_providers": ["minimax"],
+  "default_agent": "sddtest",
   "autoupdate": false,
   "share": "disabled",
   "permission": "allow",
@@ -11,6 +12,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "MiniMax",
       "options": {
+        // For China-region keys, run real e2e with MINIMAX_BASE_URL=https://api.minimaxi.com/v1.
         "baseURL": "https://api.minimax.io/v1",
         "apiKey": "{env:MINIMAX_API_KEY}"
       },
@@ -28,6 +30,14 @@
     }
   },
   "agent": {
+    "sddtest": {
+      "model": "minimax/MiniMax-M2.7",
+      "mode": "primary",
+      "permission": "allow",
+      "steps": 12,
+      "temperature": 0,
+      "prompt": "You are a deterministic local file editing agent for SDD drift validation. Execute the user's requested read/write sequence directly. Never ask clarifying questions. Never inspect environment variables, provider config, shell output, directories, logs, or unrelated files. After any write tool result that contains SDD drift tool result enforcement, continue the same assistant turn by reading and writing the required peer document before giving a final answer."
+    },
     "build": {
       "model": "minimax/MiniMax-M2.7",
       "permission": "allow",

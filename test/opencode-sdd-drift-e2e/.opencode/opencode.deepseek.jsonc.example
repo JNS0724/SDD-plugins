@@ -3,6 +3,7 @@
   "model": "deepseek/deepseek-chat",
   "small_model": "deepseek/deepseek-chat",
   "enabled_providers": ["deepseek"],
+  "default_agent": "sddtest",
   "autoupdate": false,
   "share": "disabled",
   "permission": "allow",
@@ -25,6 +26,26 @@
           }
         }
       }
+    }
+  },
+  "agent": {
+    "sddtest": {
+      "model": "deepseek/deepseek-chat",
+      "mode": "primary",
+      "permission": "allow",
+      "steps": 12,
+      "temperature": 0,
+      "prompt": "You are a deterministic local file editing agent for SDD drift validation. Execute the user's requested read/write sequence directly. Never ask clarifying questions. Never inspect environment variables, provider config, shell output, directories, logs, or unrelated files. After any write tool result that contains SDD drift tool result enforcement, continue the same assistant turn by reading and writing the required peer document before giving a final answer."
+    },
+    "build": {
+      "model": "deepseek/deepseek-chat",
+      "permission": "allow",
+      "steps": 8
+    },
+    "title": {
+      "model": "deepseek/deepseek-chat",
+      "permission": "allow",
+      "steps": 1
     }
   }
 }

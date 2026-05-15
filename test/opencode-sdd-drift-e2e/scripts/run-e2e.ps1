@@ -8,7 +8,26 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
   $PSNativeCommandUseErrorActionPreference = $false
 }
 
+function Get-FreeTcpPort {
+  for ($i = 0; $i -lt 50; $i++) {
+    $port = Get-Random -Minimum 20000 -Maximum 48000
+    $listener = $null
+    try {
+      $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), $port)
+      $listener.Start()
+      return $port
+    } catch {
+    } finally {
+      if ($listener) {
+        $listener.Stop()
+      }
+    }
+  }
+  throw "could not find a free localhost TCP port"
+}
+
 $root = Split-Path -Parent $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $root)
 $runId = [guid]::NewGuid().ToString("N")
 $opencodeHome = Join-Path $root ".home-e2e"
 $serverOut = Join-Path $root "fake-openai.$runId.out.log"
@@ -18,15 +37,28 @@ $runErr = Join-Path $root "opencode-run.$runId.err.log"
 $ready = Join-Path $root "fake-openai.$runId.ready"
 $fakeLog = Join-Path $root "fake-openai.$runId.log"
 $report = Join-Path $root ".sdd-drift-report.md"
-$hookState = Join-Path $root ".sdd-drift-hook-state"
+$hookState = Join-Path $repoRoot ".git\sdd-drift-hook-state"
+$legacyHookState = Join-Path $root ".sdd-drift-hook-state"
 $configPath = Join-Path $root ".opencode\opencode.jsonc"
 $configBackupPath = Join-Path $root ".opencode\opencode.e2e-backup.tmp"
+$ohmyConfigPath = Join-Path $root ".opencode\oh-my-openagent.jsonc"
+$ohmyBackupPath = Join-Path $root ".opencode\oh-my-openagent.e2e-backup.tmp"
+$fakePort = Get-FreeTcpPort
 if (Test-Path -LiteralPath $configBackupPath) {
   throw "opencode e2e config backup already exists; another e2e run may be active: $configBackupPath"
+}
+if (Test-Path -LiteralPath $ohmyBackupPath) {
+  throw "oh-my-opencode e2e config backup already exists; another e2e run may be active: $ohmyBackupPath"
 }
 $configHadFile = Test-Path -LiteralPath $configPath
 $configBackup = if ($configHadFile) {
   Get-Content -LiteralPath $configPath -Raw
+} else {
+  $null
+}
+$ohmyHadFile = Test-Path -LiteralPath $ohmyConfigPath
+$ohmyBackup = if ($ohmyHadFile) {
+  Get-Content -LiteralPath $ohmyConfigPath -Raw
 } else {
   $null
 }
@@ -36,6 +68,7 @@ $fakeConfig = @'
   "model": "fake/fake-model",
   "small_model": "fake/fake-model",
   "enabled_providers": ["fake"],
+  "default_agent": "sddtest",
   "autoupdate": false,
   "share": "disabled",
   "snapshot": false,
@@ -45,7 +78,7 @@ $fakeConfig = @'
       "npm": "@ai-sdk/openai-compatible",
       "name": "Fake OpenAI-compatible provider",
       "options": {
-        "baseURL": "http://127.0.0.1:48127/v1",
+        "baseURL": "__FAKE_BASE_URL__",
         "apiKey": "test-key"
       },
       "models": {
@@ -62,6 +95,14 @@ $fakeConfig = @'
     }
   },
   "agent": {
+    "sddtest": {
+      "model": "fake/fake-model",
+      "mode": "primary",
+      "permission": "allow",
+      "steps": 12,
+      "temperature": 0,
+      "prompt": "You are a deterministic local file editing agent for SDD drift validation. Execute the user's requested read/write sequence directly. Never ask clarifying questions. After any write tool result that contains SDD drift tool result enforcement, continue the same assistant turn by reading and writing the required peer document before giving a final answer."
+    },
     "build": {
       "model": "fake/fake-model",
       "permission": "allow",
@@ -75,12 +116,97 @@ $fakeConfig = @'
   }
 }
 '@
+$fakeConfig = $fakeConfig -replace "__FAKE_BASE_URL__", "http://127.0.0.1:$fakePort/v1"
+$ohmyConfig = @'
+{
+  "$schema": "../node_modules/oh-my-opencode/schema.json",
+  "sisyphus_agent": {
+    "disabled": true
+  },
+  "experimental": {
+    "disable_omo_env": true
+  },
+  "disabled_agents": [
+    "sisyphus",
+    "hephaestus",
+    "prometheus",
+    "atlas",
+    "sisyphus-junior"
+  ],
+  "disabled_hooks": [
+    "atlas",
+    "ralph-loop",
+    "start-work",
+    "todo-continuation-enforcer",
+    "context-window-monitor",
+    "session-recovery",
+    "session-notification",
+    "comment-checker",
+    "tool-output-truncator",
+    "question-label-truncator",
+    "directory-agents-injector",
+    "directory-readme-injector",
+    "empty-task-response-detector",
+    "think-mode",
+    "model-fallback",
+    "anthropic-context-window-limit-recovery",
+    "preemptive-compaction",
+    "rules-injector",
+    "background-notification",
+    "auto-update-checker",
+    "startup-toast",
+    "keyword-detector",
+    "agent-usage-reminder",
+    "non-interactive-env",
+    "interactive-bash-session",
+    "thinking-block-validator",
+    "tool-pair-validator",
+    "category-skill-reminder",
+    "compaction-context-injector",
+    "compaction-todo-preserver",
+    "auto-slash-command",
+    "edit-error-recovery",
+    "json-error-recovery",
+    "delegate-task-retry",
+    "prometheus-md-only",
+    "sisyphus-junior-notepad",
+    "no-sisyphus-gpt",
+    "no-hephaestus-non-gpt",
+    "unstable-agent-babysitter",
+    "task-resume-info",
+    "stop-continuation-guard",
+    "tasks-todowrite-disabler",
+    "runtime-fallback",
+    "write-existing-file-guard",
+    "bash-file-read-guard",
+    "anthropic-effort",
+    "hashline-read-enhancer",
+    "read-image-resizer",
+    "todo-description-override",
+    "webfetch-redirect-guard",
+    "legacy-plugin-toast"
+  ],
+  "disabled_mcps": ["context7", "grep-app"],
+  "claude_code": {
+    "commands": false,
+    "skills": false,
+    "agents": false,
+    "mcp": false,
+    "plugins": false,
+    "hooks": true
+  }
+}
+'@
 
 if (Test-Path -LiteralPath $report) {
   Clear-Content -LiteralPath $report -ErrorAction SilentlyContinue
 }
 if (Test-Path -LiteralPath $hookState) {
   Get-ChildItem -LiteralPath $hookState -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $legacyHookState) {
+  Get-ChildItem -LiteralPath $legacyHookState -Force -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -91,10 +217,13 @@ Set-Content -LiteralPath (Join-Path $root "src\app.ts") -Value "export function 
 $env:FAKE_SCENARIO = $Scenario
 $env:FAKE_LOG_PATH = $fakeLog
 $env:FAKE_READY_PATH = $ready
+$env:FAKE_OPENAI_PORT = "$fakePort"
 $env:OMO_SEND_ANONYMOUS_TELEMETRY = "0"
 $env:OMO_DISABLE_POSTHOG = "1"
 Set-Content -LiteralPath $configBackupPath -Value $configBackup -NoNewline
 Set-Content -LiteralPath $configPath -Value $fakeConfig -NoNewline
+Set-Content -LiteralPath $ohmyBackupPath -Value $ohmyBackup -NoNewline
+Set-Content -LiteralPath $ohmyConfigPath -Value $ohmyConfig -NoNewline
 $server = Start-Process node `
   -ArgumentList ".\fake-openai-server.mjs" `
   -WorkingDirectory $root `
@@ -120,7 +249,7 @@ try {
     "Use the read tool, then the write tool, to update sdd/changes/test-feat/design.md only."
   }
 
-  $runArgs = @("opencode", "run", "--print-logs", "--log-level", "DEBUG", "--agent", "build", "--format", "json", $prompt)
+  $runArgs = @("opencode", "run", "--print-logs", "--log-level", "DEBUG", "--agent", "sddtest", "--format", "json", $prompt)
 
   $opencode = Start-Process npx.cmd `
     -ArgumentList $runArgs `
@@ -132,7 +261,7 @@ try {
     -PassThru
   $opencodeExit = $opencode.ExitCode
 
-  if ($Scenario -eq "sdd-cascade") {
+  if ($Scenario -eq "sdd-cascade" -or $Scenario -eq "code") {
     $syncDeadline = (Get-Date).AddSeconds(20)
     do {
       $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
@@ -156,6 +285,15 @@ try {
       Remove-Item -LiteralPath $configPath -Force
     }
     Remove-Item -LiteralPath $configBackupPath -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $ohmyBackupPath) {
+    if ($ohmyHadFile) {
+      $restoreOhmy = Get-Content -LiteralPath $ohmyBackupPath -Raw
+      Set-Content -LiteralPath $ohmyConfigPath -Value $restoreOhmy -NoNewline
+    } elseif (Test-Path -LiteralPath $ohmyConfigPath) {
+      Remove-Item -LiteralPath $ohmyConfigPath -Force
+    }
+    Remove-Item -LiteralPath $ohmyBackupPath -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -265,7 +403,27 @@ if ($Scenario -eq "sdd-cascade") {
   } else {
     ""
   }
-  if ($fakeLogText -match '"hasToolEnforcement":true') {
-    throw "expected ordinary code edit not to inject design/tasks tool enforcement"
+  if ($fakeLogText -notmatch '"hasToolEnforcement":true') {
+    throw "expected code edit to inject SDD drift tool result enforcement"
+  }
+  if ($fakeLogText -notmatch '"hasCodeEnforcement":true') {
+    throw "expected code edit to inject code drift design enforcement"
+  }
+  $designText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md") -Raw
+  if ($designText -notmatch "Synced by fake opencode model after code drift enforcement") {
+    throw "expected code drift enforcement to trigger design.md synchronization"
+  }
+  $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
+  if ($tasksText -notmatch "Synced by fake opencode model") {
+    throw "expected design synchronization to cascade into tasks.md synchronization"
+  }
+  $reportText = if (Test-Path -LiteralPath $report) {
+    $content = Get-Content -LiteralPath $report -Raw
+    if ($null -eq $content) { "" } else { $content }
+  } else {
+    ""
+  }
+  if ($reportText.Trim().Length -gt 0) {
+    throw "expected no drift report after successful code to design to tasks synchronization"
   }
 }

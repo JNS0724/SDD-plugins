@@ -2,6 +2,11 @@ import type { Plugin } from "@opencode-ai/plugin"
 import * as fs from "fs"
 import * as path from "path"
 
+// Legacy OpenCode plugin entry. The maintained implementation is
+// sdd-drift-check-hook.cjs, installed through oh-my-opencode Claude-compatible
+// hooks. Keep this file only for older experiments and do not install it for
+// current SDD drift enforcement.
+
 const CODE_EXT = /\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs)$/
 const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
 

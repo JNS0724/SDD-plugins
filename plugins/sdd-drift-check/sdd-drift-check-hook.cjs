@@ -1,22 +1,45 @@
+const crypto = require("crypto")
 const fs = require("fs")
 const path = require("path")
 
-const CODE_EXT = /\.(ts|tsx|js|jsx|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs)$/
+const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/
 const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
+const STRICT_BLOCK = process.env.SDD_DRIFT_STRICT === "1"
+const DEBUG = process.env.SDD_DRIFT_DEBUG === "1"
 const STATE_DIR = ".sdd-drift-hook-state"
+const PEER_FILES = ["design.md", "tasks.md"]
+const DESIGN_FILE = "design.md"
+const CHANGE_DOC_REQUIREMENTS = {
+  "proposal.md": ["design.md", "tasks.md"],
+  "design.md": ["tasks.md"],
+  "tasks.md": ["design.md"],
+}
 
 const toPosix = (fp) => fp.replace(/\\/g, "/")
+const isCaseInsensitiveFs = () =>
+  process.platform === "win32" || process.platform === "darwin"
+
+const normalizeKey = (fp) => {
+  const normalized = toPosix(path.resolve(fp))
+  return isCaseInsensitiveFs() ? normalized.toLowerCase() : normalized
+}
+
+const samePath = (left, right) => normalizeKey(left) === normalizeKey(right)
+
 const isSddPath = (fp) => {
-  const normalized = toPosix(fp)
+  const normalized = toPosix(path.resolve(fp))
   return normalized.includes("/sdd/") || normalized.includes("/.sdd/")
 }
+
 const isSddChangePath = (fp) => {
-  const normalized = toPosix(fp)
+  const normalized = toPosix(path.resolve(fp))
   return (
     normalized.includes("/sdd/changes/") ||
     normalized.includes("/.sdd/changes/")
   )
 }
+
+const isCodePath = (fp) => CODE_EXT.test(fp) && !isSddPath(fp)
 
 const readStdin = () =>
   new Promise((resolve, reject) => {
@@ -30,109 +53,246 @@ const readStdin = () =>
   })
 
 const sanitize = (value) => String(value || "default").replace(/[^a-zA-Z0-9_.-]/g, "_")
+const hash = (value) => crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 12)
+
+const findNearestGitDir = (cwd) => {
+  let dir = path.resolve(cwd)
+  while (dir !== path.dirname(dir)) {
+    const gitPath = path.join(dir, ".git")
+    try {
+      const stat = fs.statSync(gitPath)
+      if (stat.isDirectory()) return gitPath
+      if (stat.isFile()) {
+        const content = fs.readFileSync(gitPath, "utf8").trim()
+        const match = content.match(/^gitdir:\s*(.+)$/i)
+        if (match) {
+          const gitDir = match[1].trim()
+          return path.resolve(dir, gitDir)
+        }
+      }
+    } catch {}
+    dir = path.dirname(dir)
+  }
+  return null
+}
+
+const stateDir = (cwd) => {
+  const gitDir = findNearestGitDir(cwd)
+  return gitDir ? path.join(gitDir, "sdd-drift-hook-state") : path.join(cwd, STATE_DIR)
+}
+
 const statePath = (cwd, sessionID) =>
-  path.join(cwd, STATE_DIR, `${sanitize(sessionID)}.json`)
+  path.join(stateDir(cwd), `${hash(path.resolve(cwd))}-${sanitize(sessionID)}.json`)
 
 const emptyState = () => ({
+  version: 2,
+  clock: 0,
   touched: [],
   edited: [],
   changeDirs: [],
+  files: {},
+  requirements: {},
 })
+
+const addPath = (items, item) => {
+  if (!items.some((existing) => samePath(existing, item))) items.push(path.normalize(item))
+}
+
+const normalizeState = (parsed) => {
+  const state = emptyState()
+  if (!parsed || typeof parsed !== "object") return state
+
+  state.version = 2
+  state.clock = Number.isFinite(parsed.clock) ? parsed.clock : 0
+  state.touched = Array.isArray(parsed.touched) ? parsed.touched.map((fp) => path.normalize(fp)) : []
+  state.edited = Array.isArray(parsed.edited) ? parsed.edited.map((fp) => path.normalize(fp)) : []
+  state.changeDirs = Array.isArray(parsed.changeDirs)
+    ? parsed.changeDirs.map((fp) => path.normalize(fp))
+    : []
+  state.files = parsed.files && typeof parsed.files === "object" ? parsed.files : {}
+  state.requirements =
+    parsed.requirements && typeof parsed.requirements === "object" ? parsed.requirements : {}
+
+  for (const fp of state.touched) {
+    const key = normalizeKey(fp)
+    state.files[key] = {
+      ...(state.files[key] || {}),
+      path: path.normalize(fp),
+      touchedSeq: state.files[key]?.touchedSeq || 1,
+    }
+  }
+  for (const fp of state.edited) {
+    const key = normalizeKey(fp)
+    state.files[key] = {
+      ...(state.files[key] || {}),
+      path: path.normalize(fp),
+      touchedSeq: state.files[key]?.touchedSeq || 1,
+      editedSeq: state.files[key]?.editedSeq || 1,
+    }
+  }
+
+  return state
+}
 
 const loadState = (cwd, sessionID) => {
   try {
-    const parsed = JSON.parse(fs.readFileSync(statePath(cwd, sessionID), "utf8"))
-    return {
-      touched: Array.isArray(parsed.touched) ? parsed.touched : [],
-      edited: Array.isArray(parsed.edited) ? parsed.edited : [],
-      changeDirs: Array.isArray(parsed.changeDirs) ? parsed.changeDirs : [],
-    }
+    return normalizeState(JSON.parse(fs.readFileSync(statePath(cwd, sessionID), "utf8")))
   } catch {
     return emptyState()
   }
 }
 
-const saveState = (cwd, sessionID, state) => {
-  fs.mkdirSync(path.join(cwd, STATE_DIR), { recursive: true })
-  fs.writeFileSync(statePath(cwd, sessionID), JSON.stringify(state, null, 2))
+const writeTextAtomic = (target, text) => {
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  const tmp = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.${process.pid}.${Date.now()}.tmp`
+  )
+  fs.writeFileSync(tmp, text)
+  fs.renameSync(tmp, target)
 }
 
-const deleteState = (cwd, sessionID) => {
+const cleanupOldState = (cwd) => {
+  const dir = stateDir(cwd)
+  const maxAgeMs = 7 * 24 * 60 * 60 * 1000
   try {
-    fs.unlinkSync(statePath(cwd, sessionID))
+    const now = Date.now()
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue
+      const fp = path.join(dir, entry.name)
+      const stat = fs.statSync(fp)
+      if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(fp)
+    }
   } catch {}
 }
 
-const addUnique = (items, item) => {
-  if (!items.includes(item)) items.push(item)
+const saveState = (cwd, sessionID, state) => {
+  cleanupOldState(cwd)
+  writeTextAtomic(statePath(cwd, sessionID), JSON.stringify(state, null, 2))
 }
 
 const resolveFile = (cwd, fp) =>
   path.isAbsolute(fp) ? path.normalize(fp) : path.resolve(cwd, fp)
 
 const findSdd = (fp) => {
-  let dir = path.dirname(fp)
-  while (dir !== path.dirname(dir)) {
-    for (const name of ["sdd", ".sdd"]) {
-      const candidate = path.join(dir, name)
-      try {
-        if (fs.statSync(candidate).isDirectory()) return candidate
-      } catch {}
+  const parts = toPosix(path.resolve(fp)).split("/")
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index]
+    if (part !== "sdd" && part !== ".sdd") continue
+
+    const rel = parts.slice(index + 1).join("/")
+    if (rel === "" || rel.startsWith("changes/") || rel.startsWith("specs/")) {
+      return path.normalize(parts.slice(0, index + 1).join("/"))
     }
-    dir = path.dirname(dir)
   }
   return null
 }
 
-const drift = (cwd, fp, state) => {
-  const warn = []
+const getChangeDoc = (fp) => {
   const root = findSdd(fp)
   const rawRel = root ? path.relative(root, fp) : ""
+  if (!root || rawRel.startsWith("..")) return null
 
-  if (root && !rawRel.startsWith("..")) {
-    const rel = toPosix(rawRel)
+  const rel = toPosix(rawRel)
+  const match = rel.match(/^changes\/([^/]+)\/([^/]+\.md)$/)
+  if (!match) return { root, rel }
 
-    if (rel.startsWith("specs/")) {
-      warn.push(
-        `SDD DRIFT: ${rel} was changed directly. SDD changes should normally go through sdd/changes/<id>/. If this bypass is intentional, mention it explicitly.`
-      )
+  const [, id, file] = match
+  return {
+    root,
+    rel,
+    id,
+    file,
+    dir: path.join(root, "changes", id),
+  }
+}
+
+const editedSeq = (state, fp) => state.files[normalizeKey(fp)]?.editedSeq || 0
+
+const rel = (cwd, fp) => toPosix(path.relative(cwd, fp))
+
+const recordFile = (state, fp, edited) => {
+  const abs = path.normalize(path.resolve(fp))
+  const key = normalizeKey(abs)
+  state.clock += 1
+  state.files[key] = {
+    ...(state.files[key] || {}),
+    path: abs,
+    touchedSeq: state.clock,
+    ...(edited ? { editedSeq: state.clock } : {}),
+  }
+  addPath(state.touched, abs)
+  if (edited) addPath(state.edited, abs)
+  return state.clock
+}
+
+const addChangeDir = (state, dir) => addPath(state.changeDirs, dir)
+
+const getRequirementBucket = (state, dir, create) => {
+  const key = normalizeKey(dir)
+  if (!state.requirements[key] && create) {
+    state.requirements[key] = { dir: path.normalize(dir), files: {} }
+  }
+  return state.requirements[key]
+}
+
+const cleanupRequirementBucket = (state, dir) => {
+  const key = normalizeKey(dir)
+  const bucket = state.requirements[key]
+  if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.requirements[key]
+}
+
+const updateRequirementsForEdit = (state, dir, file, seq) => {
+  const bucket = getRequirementBucket(state, dir, false)
+  const pending = bucket?.files?.[file]
+  if (pending && seq > pending.afterSeq) {
+    delete bucket.files[file]
+    cleanupRequirementBucket(state, dir)
+    return
+  }
+
+  const requiredPeers = CHANGE_DOC_REQUIREMENTS[file] || []
+  if (requiredPeers.length === 0) return
+
+  const target = getRequirementBucket(state, dir, true)
+  for (const peer of requiredPeers) {
+    const peerPath = path.join(dir, peer)
+    if (editedSeq(state, peerPath) > seq) continue
+    target.files[peer] = {
+      sourceFile: file,
+      afterSeq: seq,
     }
+  }
+  cleanupRequirementBucket(state, dir)
+}
 
-    const match = rel.match(/^changes\/([^/]+)\/(.+\.md)$/)
-    if (match) {
-      const [, id, file] = match
-      const dir = path.join(root, "changes", id)
-      addUnique(state.changeDirs, dir)
+const hasEditedSddChange = (state) =>
+  Object.values(state.files).some((file) => file.editedSeq && isSddChangePath(file.path || ""))
 
-      const peers = {
-        "design.md": "tasks.md",
-        "tasks.md": "design.md",
-      }
-      const peer = peers[file]
-      if (peer) {
-        const peerPath = path.join(dir, peer)
-        if (fs.existsSync(peerPath) && !state.edited.includes(peerPath)) {
-          warn.push(
-            `SDD DRIFT: changed sdd/changes/${id}/${file}, but sdd/changes/${id}/${peer} has not been synchronized in this session. Continue with read + edit/write on the peer file before finalizing.`
-          )
-        }
-      }
-      if (file === "proposal.md") {
-        warn.push(
-          "SDD DRIFT: proposal.md changes usually need matching design.md / tasks.md updates. Check and synchronize them before finalizing."
-        )
-      }
+const hasEditedChangeDesignAfter = (state, seq) =>
+  Object.values(state.files).some((file) => {
+    if (!file.editedSeq || file.editedSeq <= seq) return false
+    const doc = getChangeDoc(file.path || "")
+    return doc?.file === DESIGN_FILE
+  })
+
+const drift = (cwd, fp, state) => {
+  const warn = []
+  const doc = getChangeDoc(fp)
+
+  if (doc?.root) {
+    if (doc.rel.startsWith("specs/")) {
+      warn.push(
+        `SDD DRIFT: ${doc.rel} was changed directly. SDD changes should normally go through sdd/changes/<id>/. If this bypass is intentional, mention it explicitly.`
+      )
     }
     return warn
   }
 
-  if (CODE_EXT.test(fp)) {
-    const touchedChange = state.touched.some((file) => isSddChangePath(file))
-    if (!touchedChange) {
-      warn.push(
-        `SDD DRIFT: code file ${path.basename(fp)} was changed, but this session did not touch any sdd/changes/** file. SDD expects a change proposal first.`
-      )
-    }
+  if (CODE_EXT.test(fp) && !hasEditedSddChange(state)) {
+    warn.push(
+      `SDD DRIFT: code file ${path.basename(fp)} was changed, but this session did not edit any sdd/changes/** file. SDD expects a change proposal first.`
+    )
   }
 
   return warn
@@ -141,30 +301,104 @@ const drift = (cwd, fp, state) => {
 const collectPeerGaps = (cwd, state) => {
   const gaps = []
 
-  for (const dir of state.changeDirs) {
-    const peers = ["design.md", "tasks.md"].filter((file) =>
-      fs.existsSync(path.join(dir, file))
-    )
-    const edited = peers.filter((file) => state.edited.includes(path.join(dir, file)))
-    const missing = peers.filter((file) => !state.edited.includes(path.join(dir, file)))
-    if (edited.length && missing.length) {
-      const relDir = toPosix(path.relative(cwd, dir))
-      gaps.push({
-        relDir,
-        edited,
-        missing,
-      })
+  for (const bucket of Object.values(state.requirements || {})) {
+    const dir = bucket.dir
+    const missing = []
+    const stale = []
+    const required = []
+
+    for (const [file, requirement] of Object.entries(bucket.files || {})) {
+      const peerPath = path.join(dir, file)
+      const seq = editedSeq(state, peerPath)
+      if (seq > requirement.afterSeq) continue
+
+      required.push(file)
+      if (!fs.existsSync(peerPath) || seq === 0) {
+        missing.push(file)
+      } else {
+        stale.push(file)
+      }
     }
+
+    if (!required.length) continue
+
+    const edited = ["proposal.md", ...PEER_FILES].filter((file) => editedSeq(state, path.join(dir, file)) > 0)
+    const relDir = toPosix(path.relative(cwd, dir))
+    gaps.push({
+      relDir,
+      edited,
+      missing,
+      stale,
+      required,
+    })
   }
 
   return gaps
+}
+
+const discoverChangeDirs = (cwd) => {
+  const roots = ["sdd", ".sdd"].map((dir) => path.join(cwd, dir))
+  const dirs = []
+
+  for (const root of roots) {
+    const changesRoot = path.join(root, "changes")
+    try {
+      for (const entry of fs.readdirSync(changesRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) dirs.push(path.join(changesRoot, entry.name))
+      }
+    } catch {}
+  }
+
+  return dirs
+}
+
+const collectDesignTargets = (cwd, state) => {
+  const dirs = [...(state.changeDirs || []), ...discoverChangeDirs(cwd)]
+  const targets = []
+
+  for (const dir of dirs) {
+    const design = path.join(dir, DESIGN_FILE)
+    if (!targets.some((target) => samePath(target, design))) targets.push(path.normalize(design))
+  }
+
+  if (targets.length) return targets
+
+  const fallbackRoot = fs.existsSync(path.join(cwd, ".sdd")) ? ".sdd" : "sdd"
+  return [path.join(cwd, fallbackRoot, "changes", "<change-id>", DESIGN_FILE)]
+}
+
+const collectCodeGaps = (cwd, state) => {
+  const codeFiles = Object.values(state.files || {})
+    .filter((file) => file.editedSeq && isCodePath(file.path || ""))
+    .sort((left, right) => (right.editedSeq || 0) - (left.editedSeq || 0))
+
+  if (!codeFiles.length) return []
+
+  const latestCodeSeq = codeFiles[0].editedSeq || 0
+  if (hasEditedChangeDesignAfter(state, latestCodeSeq)) return []
+
+  const designTargets = collectDesignTargets(cwd, state)
+  return [
+    {
+      codeFiles: codeFiles.map((file) => file.path),
+      latestCodeSeq,
+      designTargets,
+    },
+  ]
+}
+
+const formatGap = (gap) => {
+  const parts = [`required [${gap.required.join(", ")}]`]
+  if (gap.missing.length) parts.push(`missing [${gap.missing.join(", ")}]`)
+  if (gap.stale.length) parts.push(`stale [${gap.stale.join(", ")}]`)
+  return `${gap.relDir}: edited [${gap.edited.join(", ")}], ${parts.join(", ")}`
 }
 
 const buildToolEnforcement = (gaps) => {
   const detail = gaps
     .map(
       (gap) =>
-        `- ${gap.relDir}: edited [${gap.edited.join(", ")}], missing [${gap.missing.join(", ")}]. Read and update: ${gap.missing
+        `- ${formatGap(gap)}. Read and update: ${gap.required
           .map((file) => `${gap.relDir}/${file}`)
           .join(", ")}`
     )
@@ -175,33 +409,41 @@ const buildToolEnforcement = (gaps) => {
     "The preceding tool changed SDD change document(s), but peer document(s) are still unsynchronized:",
     detail,
     "",
-    "This assistant turn is incomplete until the missing peer document(s) are synchronized.",
-    "Before any final answer, use the read tool on each missing peer file, then use edit or write to synchronize it with the edited SDD change document(s).",
-    "Do not stop or summarize completion until the missing peer document(s) are updated.",
+    "This assistant turn is incomplete until the required peer document(s) are synchronized.",
+    "Before any final answer, use the read tool on each required peer file, then use edit or write to synchronize it with the edited SDD change document(s).",
+    "Do not stop or summarize completion until the required peer document(s) are updated.",
+  ].join("\n")
+}
+
+const buildCodeEnforcement = (cwd, gaps) => {
+  const detail = gaps
+    .map((gap) => {
+      const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ")
+      const designList = gap.designTargets.map((file) => rel(cwd, file)).join(", ")
+      return `- code changed [${codeList}]. Read and update design document(s): ${designList}`
+    })
+    .join("\n")
+
+  return [
+    "SDD drift tool result enforcement.",
+    "The preceding tool changed code, but no sdd/changes/**/design.md document has been synchronized after that code change:",
+    detail,
+    "",
+    "This assistant turn is incomplete until the relevant SDD design document is synchronized.",
+    "Before any final answer, use the read tool on the relevant design.md, then use edit or write to update it so the design matches the code change.",
+    "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/design.md for this code change.",
+    "Do not stop or summarize completion until the required design document is updated.",
   ].join("\n")
 }
 
 const collectReportLines = (cwd, state) => {
-  const lines = []
+  const lines = collectPeerGaps(cwd, state).map((gap) => `  - ${formatGap(gap)}`)
 
-  for (const dir of state.changeDirs) {
-    const candidates = ["proposal.md", "design.md", "tasks.md"]
-    const exists = candidates.filter((file) => fs.existsSync(path.join(dir, file)))
-    const edited = exists.filter((file) => state.edited.includes(path.join(dir, file)))
-    const missing = exists.filter((file) => !state.edited.includes(path.join(dir, file)))
-    if (edited.length && missing.length) {
-      const relDir = toPosix(path.relative(cwd, dir))
-      lines.push(
-        `  - ${relDir}: edited [${edited.join(", ")}], missing [${missing.join(", ")}]`
-      )
-    }
-  }
-
-  const codeEdited = state.edited.filter((file) => CODE_EXT.test(file) && !isSddPath(file))
-  const sddTouched = state.touched.some((file) => isSddPath(file))
-  if (codeEdited.length && !sddTouched) {
+  for (const gap of collectCodeGaps(cwd, state)) {
+    const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ")
+    const designList = gap.designTargets.map((file) => rel(cwd, file)).join(", ")
     lines.push(
-      `  - edited ${codeEdited.length} code file(s), but did not touch any sdd/ document`
+      `  - edited code file(s) [${codeList}], but did not update design document(s) after the code change: ${designList}`
     )
   }
 
@@ -214,10 +456,7 @@ const refreshReport = (cwd, state) => {
 
   if (lines.length) {
     try {
-      fs.writeFileSync(
-        reportPath,
-        "## " + new Date().toISOString() + "\n" + lines.join("\n") + "\n"
-      )
+      writeTextAtomic(reportPath, "## " + new Date().toISOString() + "\n" + lines.join("\n") + "\n")
     } catch {}
     return
   }
@@ -225,6 +464,14 @@ const refreshReport = (cwd, state) => {
   try {
     fs.unlinkSync(reportPath)
   } catch {}
+}
+
+const emitEnforcement = (message) => {
+  if (STRICT_BLOCK) {
+    process.stderr.write(message)
+    process.exit(2)
+  }
+  process.stdout.write(message)
 }
 
 const main = async () => {
@@ -235,7 +482,6 @@ const main = async () => {
 
   if (input.hook_event_name === "Stop") {
     refreshReport(cwd, state)
-    deleteState(cwd, sessionID)
     return
   }
 
@@ -247,19 +493,28 @@ const main = async () => {
   if (!fp || typeof fp !== "string") return
 
   const abs = resolveFile(cwd, fp)
-  addUnique(state.touched, abs)
+  const isEdit = tool === "edit" || tool === "write"
+  const seq = recordFile(state, abs, isEdit)
 
-  if (tool === "edit" || tool === "write") {
-    addUnique(state.edited, abs)
+  if (isEdit) {
+    const doc = getChangeDoc(abs)
+    if (doc?.dir && doc.file) {
+      addChangeDir(state, doc.dir)
+      updateRequirementsForEdit(state, doc.dir, doc.file, seq)
+    }
+
     const warnings = drift(cwd, abs, state)
     const peerGaps = collectPeerGaps(cwd, state)
+    const codeGaps = collectCodeGaps(cwd, state)
     saveState(cwd, sessionID, state)
     refreshReport(cwd, state)
 
     if (peerGaps.length) {
-      process.stdout.write(buildToolEnforcement(peerGaps))
+      emitEnforcement(buildToolEnforcement(peerGaps))
+    } else if (codeGaps.length) {
+      emitEnforcement(buildCodeEnforcement(cwd, codeGaps))
     } else if (SHOW_WARNINGS && warnings.length) {
-      process.stdout.write(warnings.join("\n"))
+      emitEnforcement(warnings.join("\n"))
     }
     return
   }
@@ -267,6 +522,28 @@ const main = async () => {
   saveState(cwd, sessionID, state)
 }
 
-main().catch(() => {
-  process.exit(0)
-})
+if (require.main === module) {
+  main().catch((err) => {
+    if (DEBUG) process.stderr.write(`[sdd-drift-check] ${err?.stack || err}\n`)
+    process.exit(0)
+  })
+} else {
+  module.exports = {
+    buildToolEnforcement,
+    buildCodeEnforcement,
+    collectCodeGaps,
+    collectPeerGaps,
+    collectReportLines,
+    drift,
+    emptyState,
+    findSdd,
+    getChangeDoc,
+    hasEditedSddChange,
+    loadState,
+    normalizeKey,
+    recordFile,
+    refreshReport,
+    saveState,
+    updateRequirementsForEdit,
+  }
+}
