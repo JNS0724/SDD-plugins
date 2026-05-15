@@ -12,8 +12,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "MiniMax",
       "options": {
-        // For China-region keys, run real e2e with MINIMAX_BASE_URL=https://api.minimaxi.com/v1.
-        "baseURL": "https://api.minimax.io/v1",
+        "baseURL": "https://api.minimaxi.com/v1",
         "apiKey": "{env:MINIMAX_API_KEY}"
       },
       "models": {

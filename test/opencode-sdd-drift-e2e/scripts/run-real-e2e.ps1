@@ -73,7 +73,7 @@ if ($Provider -eq "minimax") {
     $minimaxBaseUrl = [Environment]::GetEnvironmentVariable("MINIMAX_BASE_URL", "Machine")
   }
   if (!$minimaxBaseUrl) {
-    $minimaxBaseUrl = "https://api.minimax.io/v1"
+    $minimaxBaseUrl = "https://api.minimaxi.com/v1"
   }
 }
 
@@ -198,7 +198,7 @@ Set-Content -LiteralPath (Join-Path $workRoot ".claude\settings.json") -Value $s
 
 $config = Get-Content -LiteralPath $configTemplate -Raw
 if ($Provider -eq "minimax") {
-  $config = $config -replace "https://api\.minimax\.io/v1", $minimaxBaseUrl.TrimEnd("/")
+  $config = $config -replace "https://api\.minimax(?:i)?\.com/v1", $minimaxBaseUrl.TrimEnd("/")
 }
 $restrictedPermission = @'
 "permission": {
