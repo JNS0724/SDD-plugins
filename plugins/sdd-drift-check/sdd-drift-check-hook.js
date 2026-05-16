@@ -3,7 +3,7 @@ const fs = require("fs")
 const os = require("os")
 const path = require("path")
 
-const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/
+const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i
 const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
 const STRICT_BLOCK = process.env.SDD_DRIFT_STRICT === "1"
 const DEBUG = process.env.SDD_DRIFT_DEBUG === "1"
@@ -17,15 +17,22 @@ const DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
 const DIAGNOSTIC_LOG_RETENTION_DAYS = Number.parseFloat(
   process.env.SDD_DRIFT_LOG_RETENTION_DAYS || "3"
 )
+const TOOL_EVENT_CAP = 200
+const DEFAULT_LOCK_STALE_MS = 5 * 60 * 1000
+const STATE_LOCK_STALE_MS = 30 * 1000
+const STATE_LOCK_WAIT_MS = 5 * 1000
+const STATE_LOCK_RETRY_MS = 20
+const STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const STATE_DIR = ".sdd-drift-hook-state"
 const PEER_FILES = ["design.md", "tasks.md"]
+const PROPOSAL_FILE = "proposal.md"
 const DESIGN_FILE = "design.md"
 const TASKS_FILE = "tasks.md"
 const REVIEW_FILES = [DESIGN_FILE, TASKS_FILE]
 const CHANGE_DOC_REQUIREMENTS = {
-  "proposal.md": ["design.md", "tasks.md"],
-  "design.md": ["tasks.md"],
-  "tasks.md": ["design.md"],
+  [PROPOSAL_FILE]: [DESIGN_FILE],
+  [DESIGN_FILE]: [TASKS_FILE],
+  [TASKS_FILE]: [DESIGN_FILE],
 }
 const DOCUMENT_SYNC_RULES = [
   "Before editing any SDD document, read the current file and preserve its existing Markdown template.",
@@ -181,7 +188,10 @@ const summarizeGaps = (cwd, peerGaps, codeGaps) => ({
   peerGaps: peerGaps.map((gap) => ({
     relDir: gap.relDir,
     required: gap.required,
-    missing: gap.missing,
+    stageOnly: Boolean(gap.stageOnly),
+    sourceFiles: gap.sourceFiles || [],
+    absent: gap.absent,
+    unsynced: gap.unsynced,
     stale: gap.stale,
   })),
   codeGaps: codeGaps.map((gap) => ({
@@ -275,7 +285,7 @@ const cleanupDiagnosticLogs = (target, now = Date.now()) => {
 }
 
 const acquireFileLock = (target, options = {}) => {
-  const staleMs = options.staleMs || 5 * 60 * 1000
+  const staleMs = options.staleMs || DEFAULT_LOCK_STALE_MS
   const waitMs = options.waitMs || 0
   const retryMs = options.retryMs || 25
   const lockPath = `${target}.lock`
@@ -349,6 +359,7 @@ const emptyState = () => ({
   toolEvents: {},
   peerSyncs: {},
   codeDriftNotice: null,
+  peerDriftNotice: null,
   codeReviewConfirmations: {},
 })
 
@@ -377,6 +388,10 @@ const normalizeState = (parsed) => {
     parsed.codeDriftNotice && typeof parsed.codeDriftNotice === "object"
       ? parsed.codeDriftNotice
       : null
+  state.peerDriftNotice =
+    parsed.peerDriftNotice && typeof parsed.peerDriftNotice === "object"
+      ? parsed.peerDriftNotice
+      : null
   state.codeReviewConfirmations =
     parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object"
       ? parsed.codeReviewConfirmations
@@ -397,6 +412,7 @@ const normalizeState = (parsed) => {
       path: path.normalize(fp),
       touchedSeq: state.files[key]?.touchedSeq || 1,
       editedSeq: state.files[key]?.editedSeq || 1,
+      firstEditedSeq: state.files[key]?.firstEditedSeq || state.files[key]?.editedSeq || 1,
     }
   }
 
@@ -438,14 +454,13 @@ const writeTextAtomic = (target, text) => {
 
 const cleanupOldState = (cwd) => {
   const dir = stateDir(cwd)
-  const maxAgeMs = 7 * 24 * 60 * 60 * 1000
   try {
     const now = Date.now()
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue
       const fp = path.join(dir, entry.name)
       const stat = fs.statSync(fp)
-      if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(fp)
+      if (now - stat.mtimeMs > STATE_RETENTION_MS) fs.unlinkSync(fp)
     }
   } catch {}
 }
@@ -517,6 +532,7 @@ const getChangeDoc = (fp) => {
 
 const touchedSeq = (state, fp) => state.files[normalizeKey(fp)]?.touchedSeq || 0
 const editedSeq = (state, fp) => state.files[normalizeKey(fp)]?.editedSeq || 0
+const firstEditedSeq = (state, fp) => state.files[normalizeKey(fp)]?.firstEditedSeq || 0
 
 const latestEditedCodeSeq = (state) =>
   Object.values(state.files || {}).reduce((latest, file) => {
@@ -546,10 +562,10 @@ const markToolEvent = (state, eventKey) => {
 
   state.toolEvents[eventKey] = Date.now()
   const entries = Object.entries(state.toolEvents)
-  if (entries.length > 200) {
+  if (entries.length > TOOL_EVENT_CAP) {
     entries
       .sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0))
-      .slice(0, entries.length - 200)
+      .slice(0, entries.length - TOOL_EVENT_CAP)
       .forEach(([key]) => {
         delete state.toolEvents[key]
       })
@@ -560,12 +576,14 @@ const markToolEvent = (state, eventKey) => {
 const recordFile = (state, fp, edited) => {
   const abs = path.normalize(path.resolve(fp))
   const key = normalizeKey(abs)
+  const existing = state.files[key] || {}
   state.clock += 1
   state.files[key] = {
-    ...(state.files[key] || {}),
+    ...existing,
     path: abs,
     touchedSeq: state.clock,
     ...(edited ? { editedSeq: state.clock } : {}),
+    ...(edited ? { firstEditedSeq: existing.firstEditedSeq || existing.editedSeq || state.clock } : {}),
   }
   addPath(state.touched, abs)
   if (edited) addPath(state.edited, abs)
@@ -594,6 +612,85 @@ const applyToolRecord = (cwd, state, toolName, toolInput) => {
   }
 
   return true
+}
+
+const transcriptContentBlocks = (entry) => {
+  const content = entry?.message?.content
+  if (Array.isArray(content)) return content
+  return []
+}
+
+const transcriptToolUseRecord = (block) => {
+  const name = block?.name || block?.tool || block?.tool_name
+  const input = block?.input || block?.tool_input || block?.state?.input
+  if (!name || !input || typeof input !== "object") return null
+  return {
+    id: block.id || block.tool_use_id || block.callID || block.call_id || null,
+    name,
+    input,
+    source: "tool_use",
+    completed: block?.state?.status === "completed",
+  }
+}
+
+const transcriptToolResultRecord = (entry, block) => {
+  const result = entry?.tool_use_result || block?.tool_use_result
+  const id = block?.tool_use_id || entry?.parent_tool_use_id || entry?.tool_use_id || null
+  const failed = Boolean(entry?.is_error || block?.is_error || result?.is_error || result?.error)
+  const fp = result?.filePath || result?.file_path
+  if (!fp || typeof fp !== "string") {
+    return id ? { id, source: "tool_result", failed } : null
+  }
+
+  const type = String(result?.type || "").toLowerCase()
+  const name =
+    type === "text" && !result?.oldString && !result?.newString && !result?.structuredPatch
+      ? "Read"
+      : "Edit"
+  return {
+    id,
+    name,
+    input: { file_path: fp },
+    source: "tool_result",
+    failed,
+  }
+}
+
+const transcriptLegacyToolResultRecord = (entry) => {
+  const name = entry?.tool_name
+  const input = entry?.tool_input
+  if (!name || !input || typeof input !== "object") return null
+  return {
+    id: entry.tool_use_id || null,
+    name,
+    input,
+    source: "tool_result",
+    failed: Boolean(entry?.is_error || entry?.error),
+  }
+}
+
+const transcriptToolRecords = (entry) => {
+  const records = []
+  const blocks = transcriptContentBlocks(entry)
+  const add = (record) => {
+    if (record) records.push(record)
+  }
+
+  add(transcriptToolUseRecord(entry))
+  if (entry?.part?.type === "tool") add(transcriptToolUseRecord(entry.part))
+  if (entry?.type === "tool_result") {
+    add(transcriptLegacyToolResultRecord(entry))
+  }
+
+  for (const block of blocks) {
+    if (block?.type === "tool_use") add(transcriptToolUseRecord(block))
+    if (block?.type === "tool_result") add(transcriptToolResultRecord(entry, block))
+  }
+
+  if (entry?.type === "user" && !blocks.some((block) => block?.type === "tool_result")) {
+    add(transcriptToolResultRecord(entry, null))
+  }
+  return records
 }
 
 const getRequirementBucket = (state, dir, create) => {
@@ -660,19 +757,56 @@ const clearPeerSyncs = (state) => {
   state.peerSyncs = {}
 }
 
+const clearStageOnlyRequirements = (state) => {
+  for (const [key, bucket] of Object.entries(state.requirements || {})) {
+    for (const [file, requirement] of Object.entries(bucket.files || {})) {
+      if (requirement?.stageOnly || requirement?.sourceFile === PROPOSAL_FILE) delete bucket.files[file]
+    }
+    if (Object.keys(bucket.files || {}).length === 0) delete state.requirements[key]
+  }
+}
+
+const isInitialTasksPlanEdit = (state, dir, seq) => {
+  const tasksPath = path.join(dir, TASKS_FILE)
+  const designPath = path.join(dir, DESIGN_FILE)
+  const designSourceSeq = Math.max(touchedSeq(state, designPath), editedSeq(state, designPath))
+  return (
+    firstEditedSeq(state, tasksPath) === seq &&
+    designSourceSeq > 0 &&
+    fs.existsSync(designPath)
+  )
+}
+
 const updateRequirementsForEdit = (state, dir, file, seq) => {
   const bucket = getRequirementBucket(state, dir, false)
   const pending = bucket?.files?.[file]
+  let satisfiedStageOnly = false
   if (pending && seq > pending.afterSeq) {
-    markPeerSyncResponse(state, dir, file, pending.sourceFile, pending.afterSeq, seq)
+    satisfiedStageOnly = Boolean(pending.stageOnly || pending.sourceFile === PROPOSAL_FILE)
+    if (!satisfiedStageOnly) {
+      markPeerSyncResponse(state, dir, file, pending.sourceFile, pending.afterSeq, seq)
+    }
     delete bucket.files[file]
     cleanupRequirementBucket(state, dir)
-    return
+    if (!satisfiedStageOnly) return
   }
 
-  if (isPeerSyncContinuation(state, dir, file, seq)) return
+  if (!satisfiedStageOnly && isPeerSyncContinuation(state, dir, file, seq)) return
+  if (file === TASKS_FILE && isInitialTasksPlanEdit(state, dir, seq)) {
+    const designPath = path.join(dir, DESIGN_FILE)
+    markPeerSyncResponse(
+      state,
+      dir,
+      TASKS_FILE,
+      DESIGN_FILE,
+      Math.max(touchedSeq(state, designPath), editedSeq(state, designPath)),
+      seq
+    )
+    return
+  }
   clearPeerSyncsForSourceEdit(state, dir, file, seq)
 
+  const stageOnly = file === PROPOSAL_FILE
   let requiredPeers = CHANGE_DOC_REQUIREMENTS[file] || []
   if (file === TASKS_FILE) {
     const latestCodeSeq = latestEditedCodeSeq(state)
@@ -687,10 +821,14 @@ const updateRequirementsForEdit = (state, dir, file, seq) => {
   const target = getRequirementBucket(state, dir, true)
   for (const peer of requiredPeers) {
     const peerPath = path.join(dir, peer)
+    if (!fs.existsSync(peerPath)) continue
     if (editedSeq(state, peerPath) > seq) continue
+    const existing = target.files[peer]
+    if (existing && !existing.stageOnly && stageOnly) continue
     target.files[peer] = {
       sourceFile: file,
       afterSeq: seq,
+      stageOnly,
     }
   }
   cleanupRequirementBucket(state, dir)
@@ -701,6 +839,8 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
 
   let changed = false
   let content = ""
+  const seen = new Set()
+  const pendingToolUses = new Map()
   try {
     content = fs.readFileSync(transcriptPath, "utf8")
   } catch {
@@ -717,8 +857,30 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
       continue
     }
 
-    if (entry?.type !== "tool_result") continue
-    if (applyToolRecord(cwd, state, entry.tool_name, entry.tool_input)) changed = true
+    for (const record of transcriptToolRecords(entry)) {
+      if (record.source === "tool_use" && record.id && !record.completed) {
+        pendingToolUses.set(record.id, record)
+        continue
+      }
+
+      let finalRecord = record
+      if (record.source === "tool_result" && record.id && pendingToolUses.has(record.id)) {
+        finalRecord = {
+          ...pendingToolUses.get(record.id),
+          source: "tool_result",
+          failed: record.failed,
+        }
+      }
+      if (finalRecord.failed) continue
+      if (finalRecord.source === "tool_use" && !finalRecord.completed) continue
+
+      const key =
+        finalRecord.id ||
+        `${String(finalRecord.name || "").toLowerCase()}:${JSON.stringify(finalRecord.input || {})}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (applyToolRecord(cwd, state, finalRecord.name, finalRecord.input)) changed = true
+    }
   }
 
   return changed
@@ -749,23 +911,33 @@ const drift = (cwd, fp, state) => {
   return warn
 }
 
-const collectPeerGaps = (cwd, state) => {
+const collectPeerGaps = (cwd, state, options = {}) => {
+  const includeStageOnly = options.includeStageOnly !== false
+  const includeHard = options.includeHard !== false
   const gaps = []
 
   for (const bucket of Object.values(state.requirements || {})) {
     const dir = bucket.dir
-    const missing = []
+    const absent = []
+    const unsynced = []
     const stale = []
     const required = []
+    const pendingRequirements = []
 
     for (const [file, requirement] of Object.entries(bucket.files || {})) {
+      const requirementStageOnly = Boolean(requirement?.stageOnly || requirement?.sourceFile === PROPOSAL_FILE)
+      if (requirementStageOnly ? !includeStageOnly : !includeHard) continue
+
       const peerPath = path.join(dir, file)
       const seq = editedSeq(state, peerPath)
       if (seq > requirement.afterSeq) continue
 
       required.push(file)
-      if (!fs.existsSync(peerPath) || seq === 0) {
-        missing.push(file)
+      pendingRequirements.push({ file, ...requirement, stageOnly: requirementStageOnly })
+      if (!fs.existsSync(peerPath)) {
+        absent.push(file)
+      } else if (seq === 0) {
+        unsynced.push(file)
       } else {
         stale.push(file)
       }
@@ -773,12 +945,19 @@ const collectPeerGaps = (cwd, state) => {
 
     if (!required.length) continue
 
-    const edited = ["proposal.md", ...PEER_FILES].filter((file) => editedSeq(state, path.join(dir, file)) > 0)
+    const stageOnly = pendingRequirements.every((requirement) => requirement.stageOnly)
+    if (stageOnly && !includeStageOnly) continue
+
+    const edited = [PROPOSAL_FILE, ...PEER_FILES].filter((file) => editedSeq(state, path.join(dir, file)) > 0)
     const relDir = toPosix(path.relative(cwd, dir))
     gaps.push({
       relDir,
       edited,
-      missing,
+      sourceFiles: [...new Set(pendingRequirements.map((requirement) => requirement.sourceFile).filter(Boolean))],
+      stageOnly,
+      absent,
+      missing: absent,
+      unsynced,
       stale,
       required,
     })
@@ -868,20 +1047,43 @@ const collectCodeGaps = (cwd, state) => {
 
 const formatGap = (gap) => {
   const parts = [`required [${gap.required.join(", ")}]`]
-  if (gap.missing.length) parts.push(`missing [${gap.missing.join(", ")}]`)
-  if (gap.stale.length) parts.push(`stale [${gap.stale.join(", ")}]`)
+  if (gap.stageOnly) parts.push("stage reminder")
+  if (gap.absent?.length) parts.push(`absent [${gap.absent.join(", ")}]`)
+  if (gap.unsynced?.length) parts.push(`unsynced in this session [${gap.unsynced.join(", ")}]`)
+  if (gap.stale?.length) parts.push(`stale [${gap.stale.join(", ")}]`)
   return `${gap.relDir}: edited [${gap.edited.join(", ")}], ${parts.join(", ")}`
 }
 
-const buildToolEnforcement = (gaps) => {
+const buildToolEnforcement = (gaps, options = {}) => {
+  const compact = Boolean(options.compact)
+  const stageOnly = gaps.length > 0 && gaps.every((gap) => gap.stageOnly)
   const detail = gaps
     .map(
       (gap) =>
-        `- ${formatGap(gap)}. Read and update: ${gap.required
+        `- ${formatGap(gap)}. Synchronize: ${gap.required
           .map((file) => `${gap.relDir}/${file}`)
           .join(", ")}`
     )
     .join("\n")
+
+  if (stageOnly) {
+    return [
+      "SDD proposal stage reminder.",
+      "The preceding tool changed proposal.md. A proposal-only turn is valid; if the current user request only asked for proposal drafting or refinement, you may finish normally.",
+      "If you continue this same request into design work, read the current design.md first and update the appropriate existing section without changing its template.",
+      "Do not create or edit tasks.md directly from proposal.md. Let tasks.md follow only after design.md has been reviewed or updated.",
+      detail,
+    ].join("\n")
+  }
+
+  if (compact) {
+    return [
+      "SDD drift reminder.",
+      "Peer SDD document synchronization is still pending:",
+      detail,
+      "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
+    ].join("\n")
+  }
 
   return [
     "SDD drift tool result enforcement.",
@@ -889,7 +1091,7 @@ const buildToolEnforcement = (gaps) => {
     detail,
     "",
     "This assistant turn is incomplete until the required peer document(s) are synchronized.",
-    "Before any final answer, use the read tool on each required peer file, then use edit or write to synchronize it with the edited SDD change document(s).",
+    "Before any final answer, read each listed required peer file, then use edit or write to synchronize it with the edited SDD change document(s). If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
     ...DOCUMENT_SYNC_RULES,
     "Do not stop or summarize completion until the required peer document(s) are updated.",
   ].join("\n")
@@ -946,7 +1148,10 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
 const serializablePeerGap = (gap) => ({
   relDir: gap.relDir,
   edited: [...gap.edited].sort(),
-  missing: [...gap.missing].sort(),
+  sourceFiles: [...(gap.sourceFiles || [])].sort(),
+  stageOnly: Boolean(gap.stageOnly),
+  absent: [...(gap.absent || [])].sort(),
+  unsynced: [...(gap.unsynced || [])].sort(),
   stale: [...gap.stale].sort(),
   required: [...gap.required].sort(),
 })
@@ -965,6 +1170,23 @@ const clearCodeDriftNoticeIfResolved = (state, codeGaps) => {
   state.codeDriftNotice = null
 }
 
+const clearPeerDriftNoticeIfResolved = (state, peerGaps) => {
+  if (peerGaps.length) return
+  state.peerDriftNotice = null
+}
+
+const peerDriftSignature = (peerGaps) =>
+  hash(JSON.stringify({ type: "peer", gaps: peerGaps.map(serializablePeerGap) }))
+
+const markPeerDriftNoticeEmitted = (state, peerGaps) => {
+  if (!peerGaps.length) return
+  state.peerDriftNotice = {
+    active: true,
+    signature: peerDriftSignature(peerGaps),
+    emittedAt: new Date().toISOString(),
+  }
+}
+
 const shouldEmitCodeDriftNotice = (state, codeGaps) =>
   codeGaps.length > 0
 
@@ -978,13 +1200,15 @@ const markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
   }
 }
 
-const buildPendingEnforcement = (cwd, state) => {
-  const peerGaps = collectPeerGaps(cwd, state)
+const buildPendingEnforcement = (cwd, state, options = {}) => {
+  const peerGaps = collectPeerGaps(cwd, state, {
+    includeStageOnly: options.includeStageOnly !== false,
+  })
   if (peerGaps.length) {
     return {
       type: "peer",
       message: buildToolEnforcement(peerGaps),
-      signature: hash(JSON.stringify({ type: "peer", gaps: peerGaps.map(serializablePeerGap) })),
+      signature: peerDriftSignature(peerGaps),
     }
   }
 
@@ -1049,7 +1273,7 @@ const buildStopEnforcement = (pendingMessage) =>
   ].join("\n")
 
 const collectReportLines = (cwd, state) => {
-  const lines = collectPeerGaps(cwd, state).map((gap) => `  - ${formatGap(gap)}`)
+  const lines = collectPeerGaps(cwd, state, { includeStageOnly: false }).map((gap) => `  - ${formatGap(gap)}`)
 
   for (const gap of collectCodeGaps(cwd, state)) {
     const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ")
@@ -1135,10 +1359,19 @@ const main = async () => {
   const sessionID = input.session_id || "default"
   const currentStatePath = statePath(cwd, sessionID)
   const stateLock = acquireFileLock(currentStatePath, {
-    staleMs: 30 * 1000,
-    waitMs: 5 * 1000,
-    retryMs: 20,
+    staleMs: STATE_LOCK_STALE_MS,
+    waitMs: STATE_LOCK_WAIT_MS,
+    retryMs: STATE_LOCK_RETRY_MS,
   })
+
+  if (!stateLock) {
+    writeDiagnosticLog(cwd, {
+      event: "state_lock_unavailable",
+      input: summarizeInput(input),
+      statePath: currentStatePath,
+    })
+    return
+  }
 
   try {
   const state = loadState(cwd, sessionID)
@@ -1154,10 +1387,11 @@ const main = async () => {
   if (input.hook_event_name === "Stop") {
     const transcriptPath = resolveTranscriptPath(input)
     const hydrated = hydrateStateFromTranscript(cwd, state, transcriptPath)
-    const pending = buildPendingEnforcement(cwd, state)
+    const pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false })
     if (!pending) {
       state.stopBlocks = {}
       clearPeerSyncs(state)
+      clearStageOnlyRequirements(state)
       refreshReport(cwd, state)
       saveState(cwd, sessionID, state)
       writeDiagnosticLog(cwd, {
@@ -1267,10 +1501,24 @@ const main = async () => {
 
   const warnings = isEdit ? drift(cwd, abs, state) : []
   const peerGaps = collectPeerGaps(cwd, state)
+  const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
+  const stagePeerGaps = collectPeerGaps(cwd, state, { includeHard: false })
   const codeGaps = collectCodeGaps(cwd, state)
+  const noticePeerGaps = hardPeerGaps.length ? hardPeerGaps : stagePeerGaps
+  clearPeerDriftNoticeIfResolved(state, noticePeerGaps)
   clearCodeDriftNoticeIfResolved(state, codeGaps)
-  const emitCodeGap = !peerGaps.length && shouldEmitCodeDriftNotice(state, codeGaps)
+  const emitCodeGap = !hardPeerGaps.length && shouldEmitCodeDriftNotice(state, codeGaps)
+  const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
+  const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : []
+  const peerSignature = emitPeerGaps.length ? peerDriftSignature(emitPeerGaps) : null
+  const compactPeerGap =
+    emitPeerGaps.length > 0 &&
+    Boolean(state.peerDriftNotice?.active) &&
+    state.peerDriftNotice.signature === peerSignature
   const compactCodeGap = emitCodeGap && Boolean(state.codeDriftNotice?.active)
+  if (emitPeerGaps.length) {
+    markPeerDriftNoticeEmitted(state, emitPeerGaps)
+  }
   if (emitCodeGap && !state.codeDriftNotice?.active) {
     markCodeDriftNoticeEmitted(cwd, state, codeGaps)
   }
@@ -1278,16 +1526,18 @@ const main = async () => {
   saveState(cwd, sessionID, state)
   refreshReport(cwd, state)
 
-  if (peerGaps.length) {
+  if (emitPeerGaps.length) {
     writeDiagnosticLog(cwd, {
-      event: "emit_peer_enforcement",
+      event: emitPeerGaps.every((gap) => gap.stageOnly)
+        ? "emit_peer_stage_reminder"
+        : "emit_peer_enforcement",
       input: summarizeInput(input),
       file: rel(cwd, abs),
       tool,
       isEdit,
       ...summarizeGaps(cwd, peerGaps, codeGaps),
     })
-    emitEnforcement(input, buildToolEnforcement(peerGaps))
+    emitEnforcement(input, buildToolEnforcement(emitPeerGaps, { compact: compactPeerGap }))
   } else if (emitCodeGap) {
     writeDiagnosticLog(cwd, {
       event: compactCodeGap ? "emit_code_reminder_compact" : "emit_code_enforcement",

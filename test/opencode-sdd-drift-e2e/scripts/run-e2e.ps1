@@ -480,7 +480,7 @@ if ($Scenario -eq "sdd-cascade") {
   } else {
     ""
   }
-  if ($reportText -notmatch "missing \[tasks.md\]") {
+  if ($reportText -notmatch "unsynced in this session \[tasks.md\]") {
     throw "expected unresolved SDD drift report for unsynchronized tasks.md"
   }
 } elseif ($Scenario -eq "code") {

@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax", "all")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "design-no-peer", "proposal-no-peer")]
   [string]$Scenario = "multi-code-cascade",
 
   [ValidateSet("opencode", "claude", "both")]

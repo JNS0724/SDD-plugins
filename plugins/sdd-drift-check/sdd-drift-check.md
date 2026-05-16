@@ -23,8 +23,9 @@ The hook does not use `console.error`, `messages.transform`, or
 | --- | --- |
 | `design.md` changed but same-directory `tasks.md` not synced | Requires `tasks.md` sync |
 | `tasks.md` changed but same-directory `design.md` not synced | Requires `design.md` sync |
-| `proposal.md` changed | Requires same-directory `design.md` and `tasks.md` sync |
-| peer file missing | Reports it as missing and asks the model to create/update it |
+| `proposal.md` changed | Emits a soft next-stage reminder only when `design.md` already exists; proposal-only turns may finish normally |
+| peer file absent | Treats it as a later SDD stage and does not inject cascade synchronization |
+| peer file exists but was not synced in this session | Reports it as unsynced and asks the model to read/update it |
 | peer file synced later in the same session | Clears the gap and does not create a reverse ping-pong requirement |
 | normal code changed without later SDD review | Emits deferred reminders to review relevant `design.md` and `tasks.md` before the final answer |
 | many code files changed in one turn | Keeps accumulating changed files and repeats compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
@@ -41,11 +42,40 @@ when an agent emits parallel file writes: a `design.md` edit that asks for
 one session state, otherwise one hook process can overwrite the other and create
 design/tasks ping-pong reminders.
 
+`proposal.md` is treated as a stage boundary. Editing it does not create
+`design.md` by itself. If `design.md` already exists, the hook can softly remind
+the model to review or update it before planning work, but it is not a
+Stop-blocking gap and it does not require `tasks.md` directly. Once `design.md`
+is actually edited, the normal `design.md -> tasks.md` synchronization rule
+applies only if `tasks.md` already exists.
+
+Missing peer documents are treated as future workflow stages rather than drift.
+For example, a user can generate and manually refine `design.md` for several
+turns while `tasks.md` does not exist, then later create `tasks.md` from the
+approved design without the hook forcing an immediate reverse `tasks.md ->
+design.md` edit. After both files exist, later edits again use the normal peer
+sync rules.
+
 The hook also tracks peer-sync responses inside the session. If `tasks.md` is
 being edited to satisfy a pending `design.md -> tasks.md` requirement, immediate
 follow-up edits to that same `tasks.md` are treated as part of the same sync
 cycle rather than as a fresh `tasks.md -> design.md` requirement. A new source
 document edit or a clean `Stop` starts the next cycle.
+
+Peer drift output focuses on existing-but-unsynced files. This avoids telling the
+model to create `tasks.md` just because `design.md` is still under review. The
+first reminder for a peer gap is full; repeated reminders for the same pending
+gap are compact so the signal survives long turns without flooding context.
+
+If the hook cannot acquire the per-session state lock, it records
+`state_lock_unavailable` in the diagnostic log and skips that hook event instead
+of writing state without a lock. This favors avoiding corrupt session state over
+trying to enforce from a stale snapshot.
+
+For `Stop`, the hook can hydrate state from Claude Code-style transcript JSONL
+by pairing assistant `tool_use` records with successful user `tool_result`
+records. Failed tool results are ignored so an attempted but unsuccessful write
+does not create a false drift requirement.
 
 The hook also writes a lightweight JSONL diagnostic log by default:
 
@@ -77,7 +107,6 @@ Copy the hook:
 ```powershell
 New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js
-Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\package.json .opencode\hooks\sdd-drift-check\package.json
 ```
 
 Create `.opencode/plugin/oh-my-opencode.ts`:
@@ -310,8 +339,9 @@ opencode
 
 - Tracks OpenCode/Claude file tools only. Shell redirection is not visible to the
   hook.
-- Built-in peer rules are `proposal.md -> design.md + tasks.md`,
-  `design.md -> tasks.md`, and `tasks.md -> design.md`.
+- Built-in peer rules are `proposal.md -> design.md` as a soft stage reminder
+  only when `design.md` exists, `design.md -> tasks.md` only when `tasks.md`
+  exists, and independent `tasks.md -> design.md` only when `design.md` exists.
 - OpenCode Stop-only continuation is kept as compatible output, but should not
   be treated as reliable cascade enforcement until the OpenCode/oh-my bridge
   invokes it consistently.

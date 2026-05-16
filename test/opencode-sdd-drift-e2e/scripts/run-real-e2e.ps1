@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "design-no-peer", "proposal-no-peer")]
   [string]$Scenario = "design-cascade",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -277,12 +277,18 @@ if (Test-Path -LiteralPath $hookState) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+$proposalPath = Join-Path $workRoot "sdd\changes\test-feat\proposal.md"
 $designPath = Join-Path $workRoot "sdd\changes\test-feat\design.md"
 $tasksPath = Join-Path $workRoot "sdd\changes\test-feat\tasks.md"
 $appPath = Join-Path $workRoot "src\app.ts"
 $helperPath = Join-Path $workRoot "src\helper.ts"
-Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
-Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+Set-Content -LiteralPath $proposalPath -Value "# Proposal`n`nInitial proposal."
+if ($Scenario -ne "proposal-no-peer") {
+  Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
+}
+if ($Scenario -ne "proposal-no-peer" -and $Scenario -ne "design-no-peer") {
+  Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+}
 Set-Content -LiteralPath $appPath -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
 Set-Content -LiteralPath $helperPath -Value "export function helper() {`n  return `"helper`"`n}"
 
@@ -292,8 +298,13 @@ $env:OMO_SEND_ANONYMOUS_TELEMETRY = "0"
 $env:OMO_DISABLE_POSTHOG = "1"
 
 $isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade"
+$isNoPeerScenario = $Scenario -eq "design-no-peer" -or $Scenario -eq "proposal-no-peer"
 $marker = if ($isCodeScenario) {
   "Real $Provider code drift verification $runId"
+} elseif ($Scenario -eq "proposal-no-peer") {
+  "Real $Provider proposal no peer verification $runId"
+} elseif ($Scenario -eq "design-no-peer") {
+  "Real $Provider design no peer verification $runId"
 } else {
   "Real $Provider SDD drift verification $runId"
 }
@@ -333,6 +344,25 @@ $prompt = if ($isStopOnly -and $isCodeScenario) {
     "3. Then stop immediately with a brief final answer. Do not read or write sdd/changes/test-feat/tasks.md during the initial pass."
     "If a later hook continuation containing `"SDD drift stop enforcement`" asks you to synchronize peer documents, read sdd/changes/test-feat/tasks.md and write it so it contains this exact task line: - [x] $taskMarker."
     "Use only read and write tools."
+  ) -join " "
+} elseif ($Scenario -eq "proposal-no-peer") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Use this sequence: 1. Read sdd/changes/test-feat/proposal.md."
+    "2. Write sdd/changes/test-feat/proposal.md so it contains this exact section heading: ## $marker."
+    "3. Do not create, read, or write sdd/changes/test-feat/design.md."
+    "4. Do not create, read, or write sdd/changes/test-feat/tasks.md."
+    "Use only read and write tools. Finish after proposal.md is updated."
+  ) -join " "
+} elseif ($Scenario -eq "design-no-peer") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Use this sequence: 1. Read sdd/changes/test-feat/design.md."
+    "2. Write sdd/changes/test-feat/design.md so it contains this exact section heading: ## $marker."
+    "3. Do not create, read, or write sdd/changes/test-feat/tasks.md."
+    "Use only read and write tools. Finish after design.md is updated."
   ) -join " "
 } elseif ($Scenario -eq "multi-code-cascade") {
   @(
@@ -423,10 +453,24 @@ try {
 Write-Output "OPENCODE_EXIT=$opencodeExit"
 Write-Output "HOOK_MODE=$HookMode"
 Write-Output "WORKROOT=$workRoot"
+Write-Output "--- proposal.md ---"
+if (Test-Path -LiteralPath $proposalPath) {
+  Get-Content -LiteralPath $proposalPath
+} else {
+  Write-Output "<missing>"
+}
 Write-Output "--- design.md ---"
-Get-Content -LiteralPath $designPath
+if (Test-Path -LiteralPath $designPath) {
+  Get-Content -LiteralPath $designPath
+} else {
+  Write-Output "<missing>"
+}
 Write-Output "--- tasks.md ---"
-Get-Content -LiteralPath $tasksPath
+if (Test-Path -LiteralPath $tasksPath) {
+  Get-Content -LiteralPath $tasksPath
+} else {
+  Write-Output "<missing>"
+}
 Write-Output "--- src/app.ts ---"
 Get-Content -LiteralPath $appPath
 Write-Output "--- src/helper.ts ---"
@@ -450,15 +494,26 @@ if ($opencodeExit -ne 0) {
   exit $opencodeExit
 }
 
-$designText = Get-Content -LiteralPath $designPath -Raw
-$tasksText = Get-Content -LiteralPath $tasksPath -Raw
+$proposalText = if (Test-Path -LiteralPath $proposalPath) { Get-Content -LiteralPath $proposalPath -Raw } else { "" }
+$designText = if (Test-Path -LiteralPath $designPath) { Get-Content -LiteralPath $designPath -Raw } else { "" }
+$tasksText = if (Test-Path -LiteralPath $tasksPath) { Get-Content -LiteralPath $tasksPath -Raw } else { "" }
 $appText = Get-Content -LiteralPath $appPath -Raw
 $helperText = Get-Content -LiteralPath $helperPath -Raw
 $outText = if (Test-Path -LiteralPath $outLog) { Get-Content -LiteralPath $outLog -Raw } else { "" }
 $errText = if (Test-Path -LiteralPath $errLog) { Get-Content -LiteralPath $errLog -Raw } else { "" }
 $reportText = if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Raw } else { "" }
 
-if ($designText -notmatch [regex]::Escape($marker)) {
+if ($Scenario -eq "proposal-no-peer") {
+  if ($proposalText -notmatch [regex]::Escape($marker)) {
+    throw "expected proposal.md to contain real model marker"
+  }
+  if (Test-Path -LiteralPath $designPath) {
+    throw "expected design.md not to be created when proposal peer is absent"
+  }
+  if (Test-Path -LiteralPath $tasksPath) {
+    throw "expected tasks.md not to be created when proposal peer is absent"
+  }
+} elseif ($designText -notmatch [regex]::Escape($marker)) {
   throw "expected design.md to contain real model marker"
 }
 if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
@@ -467,7 +522,17 @@ if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
 if ($Scenario -eq "multi-code-cascade" -and $helperText -notmatch [regex]::Escape($helperMarker)) {
   throw "expected src/helper.ts to contain real model helper marker"
 }
-if ($HookMode -eq "stop-only") {
+if ($isNoPeerScenario) {
+  if ($outText -match "SDD drift tool result enforcement") {
+    throw "expected no peer enforcement when peer document is absent"
+  }
+  if ($outText -match "SDD proposal stage reminder") {
+    throw "expected no proposal stage reminder when design.md is absent"
+  }
+  if ($Scenario -eq "design-no-peer" -and (Test-Path -LiteralPath $tasksPath)) {
+    throw "expected tasks.md not to be created when it is absent"
+  }
+} elseif ($HookMode -eq "stop-only") {
   if ($errText -notmatch "Stop hook returned block with inject_prompt") {
     throw "expected Stop hook to block and inject a continuation prompt"
   }
@@ -483,7 +548,7 @@ if ($Scenario -eq "multi-code-cascade") {
     throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
   }
 }
-if ($tasksText -notmatch [regex]::Escape($taskMarker)) {
+if (!$isNoPeerScenario -and $tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain real model synchronization marker"
 }
 if ($errText -match "\[sdd-drift-check\]") {

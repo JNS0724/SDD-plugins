@@ -20,7 +20,6 @@ plugins/
   sdd-drift-check/
     sdd-drift-check-hook.js
     sdd-drift-check.md
-    package.json
 test/
   opencode-sdd-drift-e2e/
   claude-code-sdd-drift-e2e/

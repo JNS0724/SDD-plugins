@@ -21,7 +21,35 @@ const edit = (state, fp) => {
 
 try {
   {
-    const cwd = path.join(tmpRoot, "missing-peer")
+    const cwd = path.join(tmpRoot, "existing-peer")
+    const dir = path.join(cwd, "sdd", "changes", "alpha")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+
+    const state = hook.emptyState()
+    edit(state, design)
+
+    const gaps = hook.collectPeerGaps(cwd, state)
+    assert.strictEqual(gaps.length, 1)
+    assert.deepStrictEqual(gaps[0].absent, [])
+    assert.deepStrictEqual(gaps[0].unsynced, ["tasks.md"])
+    const enforcement = hook.buildToolEnforcement(gaps)
+    assert.match(enforcement, /sdd\/changes\/alpha\/tasks\.md/)
+    assert.match(enforcement, /unsynced in this session \[tasks\.md\]/)
+    assert.match(enforcement, /preserve its existing Markdown template/)
+    assert.match(enforcement, /Keep every existing heading line exactly as-is/)
+    assert.match(enforcement, /Do not replace the whole document/)
+    assert.match(enforcement, /Do not add a new section/)
+    assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
+    const compact = hook.buildToolEnforcement(gaps, { compact: true })
+    assert.match(compact, /SDD drift reminder/)
+    assert.doesNotMatch(compact, /This assistant turn is incomplete/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "absent-peer-stage")
     const design = path.join(cwd, "sdd", "changes", "alpha", "design.md")
     write(design, "# Design\n")
 
@@ -29,15 +57,9 @@ try {
     edit(state, design)
 
     const gaps = hook.collectPeerGaps(cwd, state)
-    assert.strictEqual(gaps.length, 1)
-    assert.deepStrictEqual(gaps[0].missing, ["tasks.md"])
-    const enforcement = hook.buildToolEnforcement(gaps)
-    assert.match(enforcement, /sdd\/changes\/alpha\/tasks\.md/)
-    assert.match(enforcement, /preserve its existing Markdown template/)
-    assert.match(enforcement, /Keep every existing heading line exactly as-is/)
-    assert.match(enforcement, /Do not replace the whole document/)
-    assert.match(enforcement, /Do not add a new section/)
-    assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
+    assert.strictEqual(gaps.length, 0)
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
+    assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
   }
 
   {
@@ -56,8 +78,11 @@ try {
 
     const gaps = hook.collectPeerGaps(cwd, state)
     assert.strictEqual(gaps.length, 1)
-    assert.deepStrictEqual(gaps[0].missing, ["design.md"])
-    assert.deepStrictEqual(gaps[0].stale, ["tasks.md"])
+    assert.strictEqual(gaps[0].stageOnly, false)
+    assert.deepStrictEqual(gaps[0].unsynced, ["design.md"])
+    assert.deepStrictEqual(gaps[0].stale, [])
+    assert.deepStrictEqual(gaps[0].required, ["design.md"])
+    assert.deepStrictEqual(gaps[0].sourceFiles, ["tasks.md"])
   }
 
   {
@@ -128,8 +153,53 @@ try {
     )
 
     const gaps = hook.collectPeerGaps(cwd, state)
+    assert.strictEqual(gaps.length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "design-before-tasks")
+    const dir = path.join(cwd, "sdd", "changes", "kappa-stage")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    write(design, "# Design\n")
+
+    const state = hook.emptyState()
+    edit(state, design)
+    assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+
+    write(tasks, "# Tasks\n")
+    edit(state, tasks)
+    assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+
+    edit(state, tasks)
+    assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+
+    edit(state, design)
+    const gaps = hook.collectPeerGaps(cwd, state)
     assert.strictEqual(gaps.length, 1)
-    assert.deepStrictEqual(gaps[0].missing, ["tasks.md"])
+    assert.deepStrictEqual(gaps[0].required, ["tasks.md"])
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "proposal-before-design")
+    const dir = path.join(cwd, "sdd", "changes", "delta-stage")
+    const proposal = path.join(dir, "proposal.md")
+    const design = path.join(dir, "design.md")
+    write(proposal, "# Proposal\n")
+
+    const state = hook.emptyState()
+    edit(state, proposal)
+    assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
+    assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
+
+    write(design, "# Design\n")
+    edit(state, proposal)
+    const gaps = hook.collectPeerGaps(cwd, state)
+    assert.strictEqual(gaps.length, 1)
+    assert.strictEqual(gaps[0].stageOnly, true)
+    assert.deepStrictEqual(gaps[0].required, ["design.md"])
+    assert.deepStrictEqual(gaps[0].unsynced, ["design.md"])
   }
 
   {
@@ -144,14 +214,77 @@ try {
 
     const state = hook.emptyState()
     edit(state, proposal)
-    assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].missing, [
-      "design.md",
-      "tasks.md",
-    ])
+    let gaps = hook.collectPeerGaps(cwd, state)
+    assert.strictEqual(gaps.length, 1)
+    assert.strictEqual(gaps[0].stageOnly, true)
+    assert.deepStrictEqual(gaps[0].unsynced, ["design.md"])
+    assert.deepStrictEqual(gaps[0].required, ["design.md"])
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state, { includeStageOnly: false }), null)
+    assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
+    const proposalReminder = hook.buildToolEnforcement(gaps)
+    assert.match(proposalReminder, /SDD proposal stage reminder/)
+    assert.doesNotMatch(proposalReminder, /This assistant turn is incomplete/)
+    assert.match(proposalReminder, /create or edit tasks\.md directly from proposal\.md/)
+
     edit(state, design)
-    assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].missing, ["tasks.md"])
+    gaps = hook.collectPeerGaps(cwd, state)
+    assert.strictEqual(gaps.length, 1)
+    assert.strictEqual(gaps[0].stageOnly, false)
+    assert.deepStrictEqual(gaps[0].unsynced, ["tasks.md"])
+    assert.deepStrictEqual(gaps[0].required, ["tasks.md"])
     edit(state, tasks)
     assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "proposal-stage-code")
+    const dir = path.join(cwd, "sdd", "changes", "delta-code")
+    const proposal = path.join(dir, "proposal.md")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "app.ts")
+    write(proposal, "# Proposal\n")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    const state = hook.emptyState()
+    edit(state, proposal)
+    hook.recordFile(state, code, true)
+
+    assert.strictEqual(hook.collectPeerGaps(cwd, state)[0].stageOnly, true)
+    const pending = hook.buildPendingEnforcement(cwd, state, { includeStageOnly: false })
+    assert.strictEqual(pending.type, "code")
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "proposal-stage-mixed")
+    const dir = path.join(cwd, "sdd", "changes", "delta-mixed")
+    const proposal = path.join(dir, "proposal.md")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    write(proposal, "# Proposal\n")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+
+    const state = hook.emptyState()
+    edit(state, design)
+    edit(state, proposal)
+
+    const hardGaps = hook.collectPeerGaps(cwd, state, { includeStageOnly: false })
+    assert.strictEqual(hardGaps.length, 1)
+    assert.strictEqual(hardGaps[0].stageOnly, false)
+    assert.deepStrictEqual(hardGaps[0].required, ["tasks.md"])
+
+    const stageGaps = hook.collectPeerGaps(cwd, state, { includeHard: false })
+    assert.strictEqual(stageGaps.length, 1)
+    assert.strictEqual(stageGaps[0].stageOnly, true)
+    assert.deepStrictEqual(stageGaps[0].required, ["design.md"])
+
+    const pending = hook.buildPendingEnforcement(cwd, state, { includeStageOnly: false })
+    assert.strictEqual(pending.type, "peer")
+    assert.match(pending.message, /tasks\.md/)
+    assert.doesNotMatch(pending.message, /Synchronize: .*design\.md/)
   }
 
   {
@@ -186,7 +319,7 @@ try {
 
     edit(state, readOnlyDesign)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 1)
-    assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].missing, ["tasks.md"])
+    assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].unsynced, ["tasks.md"])
     edit(state, tasks)
     assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
   }
@@ -354,7 +487,9 @@ try {
   {
     const cwd = path.join(tmpRoot, "stop")
     const design = path.join(cwd, "sdd", "changes", "theta", "design.md")
+    const tasks = path.join(cwd, "sdd", "changes", "theta", "tasks.md")
     write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
     const state = hook.emptyState()
     edit(state, design)
 
@@ -382,8 +517,10 @@ try {
   {
     const cwd = path.join(tmpRoot, "stop-transcript")
     const design = path.join(cwd, "sdd", "changes", "iota", "design.md")
+    const tasks = path.join(cwd, "sdd", "changes", "iota", "tasks.md")
     const transcript = path.join(cwd, ".home", ".claude", "transcripts", "session.jsonl")
     write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
     write(
       transcript,
       [
@@ -417,6 +554,142 @@ try {
     const pending = hook.buildPendingEnforcement(cwd, state)
     assert.strictEqual(pending.type, "peer")
     assert.match(pending.message, /sdd\/changes\/iota\/tasks\.md/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "claude-transcript")
+    const design = path.join(cwd, "sdd", "changes", "mu", "design.md")
+    const tasks = path.join(cwd, "sdd", "changes", "mu", "tasks.md")
+    const transcript = path.join(cwd, ".claude", "transcripts", "session.jsonl")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(
+      transcript,
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "read-design",
+                name: "Read",
+                input: { file_path: design },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "read-design",
+                content: "# Design\n",
+              },
+            ],
+          },
+          tool_use_result: {
+            type: "text",
+            filePath: design,
+            content: "# Design\n",
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "write-design",
+                name: "Write",
+                input: {
+                  file_path: design,
+                  content: "# Design\n\nUpdated.\n",
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "write-design",
+                content: "updated",
+              },
+            ],
+          },
+          tool_use_result: {
+            type: "update",
+            filePath: design,
+            content: "# Design\n\nUpdated.\n",
+          },
+        }),
+      ].join("\n")
+    )
+
+    const state = hook.emptyState()
+    assert.strictEqual(hook.hydrateStateFromTranscript(cwd, state, transcript), true)
+    assert.strictEqual(state.clock, 2)
+    const pending = hook.buildPendingEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "peer")
+    assert.match(pending.message, /unsynced in this session \[tasks\.md\]/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "failed-transcript-tool")
+    const design = path.join(cwd, "sdd", "changes", "nu", "design.md")
+    const transcript = path.join(cwd, ".claude", "transcripts", "session.jsonl")
+    write(design, "# Design\n")
+    write(
+      transcript,
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "failed-write",
+                name: "Write",
+                input: {
+                  file_path: design,
+                  content: "# Design\n\nShould not count.\n",
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "failed-write",
+                is_error: true,
+                content: "permission denied",
+              },
+            ],
+          },
+          tool_use_result: {
+            type: "update",
+            filePath: design,
+            is_error: true,
+            error: "permission denied",
+          },
+        }),
+      ].join("\n")
+    )
+
+    const state = hook.emptyState()
+    assert.strictEqual(hook.hydrateStateFromTranscript(cwd, state, transcript), false)
+    assert.strictEqual(state.clock, 0)
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
   }
 
   console.log("sdd-drift hook unit tests passed")
