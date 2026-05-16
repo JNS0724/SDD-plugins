@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read",
+      "Write",
+      "Edit",
+      "MultiEdit"
+    ],
+    "deny": [
+      "Bash",
+      "Task",
+      "WebFetch",
+      "WebSearch",
+      "Read(./.claude/providers/*.local.ps1)",
+      "Read(./.claude/providers/*.local.env)",
+      "Read(./.real-workspaces/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/sdd-drift-check.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/sdd-drift-check.js",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

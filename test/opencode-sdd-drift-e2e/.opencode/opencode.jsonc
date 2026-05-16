@@ -3,6 +3,7 @@
   "model": "fake/fake-model",
   "small_model": "fake/fake-model",
   "enabled_providers": ["fake"],
+  "default_agent": "sddtest",
   "autoupdate": false,
   "share": "disabled",
   "snapshot": false,
@@ -12,7 +13,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "Fake OpenAI-compatible provider",
       "options": {
-        "baseURL": "http://127.0.0.1:48127/v1",
+        "baseURL": "http://127.0.0.1:30973/v1",
         "apiKey": "test-key"
       },
       "models": {
@@ -29,6 +30,14 @@
     }
   },
   "agent": {
+    "sddtest": {
+      "model": "fake/fake-model",
+      "mode": "primary",
+      "permission": "allow",
+      "steps": 12,
+      "temperature": 0,
+      "prompt": "You are a deterministic local file editing agent for SDD drift validation. Execute the user's requested read/write sequence directly. Never ask clarifying questions. After any write tool result that contains SDD drift tool result enforcement, continue the same assistant turn by reading and writing the required peer document before giving a final answer."
+    },
     "build": {
       "model": "fake/fake-model",
       "permission": "allow",

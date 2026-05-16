@@ -1,11 +1,26 @@
 param(
   [ValidateSet("sdd-design", "sdd-cascade", "code")]
-  [string]$Scenario = "sdd-design"
+  [string]$Scenario = "sdd-design",
+
+  [ValidateSet("stop-only", "posttooluse-and-stop")]
+  [string]$HookMode = "posttooluse-and-stop"
 )
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
   $PSNativeCommandUseErrorActionPreference = $false
+}
+
+$nodeCommand = (Get-Command node -ErrorAction Stop).Source
+$npxCommand = (Get-Command npx.cmd -ErrorAction Stop).Source
+$processEnv = [Environment]::GetEnvironmentVariables("Process")
+if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
+  $pathValue = [string]$processEnv["Path"]
+  if (!$pathValue) {
+    $pathValue = [string]$processEnv["PATH"]
+  }
+  [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+  [Environment]::SetEnvironmentVariable("Path", $pathValue, "Process")
 }
 
 function Get-FreeTcpPort {
@@ -43,12 +58,17 @@ $configPath = Join-Path $root ".opencode\opencode.jsonc"
 $configBackupPath = Join-Path $root ".opencode\opencode.e2e-backup.tmp"
 $ohmyConfigPath = Join-Path $root ".opencode\oh-my-openagent.jsonc"
 $ohmyBackupPath = Join-Path $root ".opencode\oh-my-openagent.e2e-backup.tmp"
+$settingsPath = Join-Path $root ".claude\settings.json"
+$settingsBackupPath = Join-Path $root ".claude\settings.e2e-backup.tmp"
 $fakePort = Get-FreeTcpPort
 if (Test-Path -LiteralPath $configBackupPath) {
   throw "opencode e2e config backup already exists; another e2e run may be active: $configBackupPath"
 }
 if (Test-Path -LiteralPath $ohmyBackupPath) {
   throw "oh-my-opencode e2e config backup already exists; another e2e run may be active: $ohmyBackupPath"
+}
+if (Test-Path -LiteralPath $settingsBackupPath) {
+  throw "Claude-compatible hook settings e2e backup already exists; another e2e run may be active: $settingsBackupPath"
 }
 $configHadFile = Test-Path -LiteralPath $configPath
 $configBackup = if ($configHadFile) {
@@ -59,6 +79,12 @@ $configBackup = if ($configHadFile) {
 $ohmyHadFile = Test-Path -LiteralPath $ohmyConfigPath
 $ohmyBackup = if ($ohmyHadFile) {
   Get-Content -LiteralPath $ohmyConfigPath -Raw
+} else {
+  $null
+}
+$settingsHadFile = Test-Path -LiteralPath $settingsPath
+$settingsBackup = if ($settingsHadFile) {
+  Get-Content -LiteralPath $settingsPath -Raw
 } else {
   $null
 }
@@ -198,6 +224,55 @@ $ohmyConfig = @'
 }
 '@
 
+$hookCommand = "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.js"
+$hooksJson = if ($HookMode -eq "posttooluse-and-stop") {
+  @"
+    "PostToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hookCommand"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hookCommand"
+          }
+        ]
+      }
+    ]
+"@
+} else {
+  @"
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hookCommand"
+          }
+        ]
+      }
+    ]
+"@
+}
+$settings = @"
+{
+  "hooks": {
+$hooksJson
+  }
+}
+"@
+
 if (Test-Path -LiteralPath $report) {
   Clear-Content -LiteralPath $report -ErrorAction SilentlyContinue
 }
@@ -224,7 +299,9 @@ Set-Content -LiteralPath $configBackupPath -Value $configBackup -NoNewline
 Set-Content -LiteralPath $configPath -Value $fakeConfig -NoNewline
 Set-Content -LiteralPath $ohmyBackupPath -Value $ohmyBackup -NoNewline
 Set-Content -LiteralPath $ohmyConfigPath -Value $ohmyConfig -NoNewline
-$server = Start-Process node `
+Set-Content -LiteralPath $settingsBackupPath -Value $settingsBackup -NoNewline
+Set-Content -LiteralPath $settingsPath -Value $settings -NoNewline
+$server = Start-Process $nodeCommand `
   -ArgumentList ".\fake-openai-server.mjs" `
   -WorkingDirectory $root `
   -RedirectStandardOutput $serverOut `
@@ -251,7 +328,7 @@ try {
 
   $runArgs = @("opencode", "run", "--print-logs", "--log-level", "DEBUG", "--agent", "sddtest", "--format", "json", $prompt)
 
-  $opencode = Start-Process npx.cmd `
+  $opencode = Start-Process $npxCommand `
     -ArgumentList $runArgs `
     -WorkingDirectory $root `
     -RedirectStandardOutput $runOut `
@@ -273,6 +350,7 @@ try {
   }
 
   Write-Output "OPENCODE_EXIT=$opencodeExit"
+  Write-Output "HOOK_MODE=$HookMode"
 } finally {
   if ($server -and !$server.HasExited) {
     Stop-Process -Id $server.Id -Force
@@ -294,6 +372,15 @@ try {
       Remove-Item -LiteralPath $ohmyConfigPath -Force
     }
     Remove-Item -LiteralPath $ohmyBackupPath -Force -ErrorAction SilentlyContinue
+  }
+  if (Test-Path -LiteralPath $settingsBackupPath) {
+    if ($settingsHadFile) {
+      $restoreSettings = Get-Content -LiteralPath $settingsBackupPath -Raw
+      Set-Content -LiteralPath $settingsPath -Value $restoreSettings -NoNewline
+    } elseif (Test-Path -LiteralPath $settingsPath) {
+      Remove-Item -LiteralPath $settingsPath -Force
+    }
+    Remove-Item -LiteralPath $settingsBackupPath -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -407,7 +494,7 @@ if ($Scenario -eq "sdd-cascade") {
     throw "expected code edit to inject SDD drift tool result enforcement"
   }
   if ($fakeLogText -notmatch '"hasCodeEnforcement":true') {
-    throw "expected code edit to inject code drift design enforcement"
+    throw "expected code edit to inject code drift review enforcement"
   }
   $designText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md") -Raw
   if ($designText -notmatch "Synced by fake opencode model after code drift enforcement") {

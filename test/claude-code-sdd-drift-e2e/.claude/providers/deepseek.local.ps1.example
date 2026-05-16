@@ -1,0 +1,15 @@
+# Copy this file to deepseek.local.ps1 and fill the values.
+# The .local.ps1 file is ignored by git.
+
+$env:ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+$env:ANTHROPIC_AUTH_TOKEN = "YOUR_DEEPSEEK_API_KEY"
+$env:ANTHROPIC_MODEL = "deepseek-v4-flash"
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL = "deepseek-v4-flash"
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "deepseek-v4-flash"
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL = "deepseek-v4-flash"
+$env:CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash"
+$env:CLAUDE_CODE_EFFORT_LEVEL = "max"
+
+$env:ANTHROPIC_CUSTOM_MODEL_OPTION = $env:ANTHROPIC_MODEL
+$env:ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "DeepSeek V4 Pro"
+$env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "0"

@@ -1,57 +1,66 @@
-# SDD Drift Check - OpenCode and Claude Code hook
+# SDD Drift Check
 
-## Current behavior note
+OpenCode / Claude Code compatible hook for SDD drift checks.
 
-When an OpenCode `Write` / `Edit` tool changes a normal code file and the current
-session has not synchronized any `sdd/changes/**/design.md` after that code
-change, the hook now appends a model-visible `SDD drift tool result enforcement`
-to the tool result. The model is instructed to read and update the relevant
-`design.md` before giving a final answer. Once `design.md` is updated, the
-existing peer rule still applies: `design.md` then requires the same change
-directory's `tasks.md` to be synchronized.
+## Current Status
 
-The same hook entrypoint also supports Claude Code. When the hook input contains
-`hook_source: "opencode-plugin"` it emits plain stdout so `oh-my-opencode` can
-append the text to the OpenCode tool result. When that marker is absent, it emits
-Claude Code structured JSON:
-`{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"..."}}`.
-This lets Claude Code inject the enforcement as model-visible context next to the
-tool result without using `stderr` / `exit 2`. Set `SDD_DRIFT_OUTPUT=opencode` or
-`SDD_DRIFT_OUTPUT=claude` only if a wrapper needs an explicit override.
+`PostToolUse` is now optional. The checked-in default config only enables
+`Stop`, so the UI does not get tool-result enforcement text unless you opt in.
 
-这个插件用于在 OpenCode 的 SDD 工作流中检查文档漂移。当前推荐方式是安装
-`oh-my-opencode@3.17.2`，通过 Claude-compatible `PostToolUse` hook 把约束追加到
-OpenCode tool result 中，让下一次模型请求能看到并继续同步 peer 文档。
+Important OpenCode note: real testing with OpenCode 1.2.27 +
+`oh-my-opencode@3.17.2` showed that `Stop`-only did not trigger continuation in
+`opencode run`, even though the same transcript produced the correct block
+prompt when the hook was invoked directly. For reliable OpenCode cascade today,
+enable the optional `PostToolUse` hook below. Keep `Stop` enabled for
+Claude-compatible behavior and future OpenCode support.
 
-插件默认不使用 `console.error`、不依赖 `messages.transform`、不调用 `session.prompt`，也不通过抛错制造红字。
+The hook does not use `console.error`, `messages.transform`, or
+`session.prompt`. It is silent unless it has to return model-visible hook output.
 
-## 行为
+## Behavior
 
-| 场景 | 结果 |
+| Scenario | Result |
 | --- | --- |
-| 改了 `design.md`，但还没改同目录 `tasks.md` | `PostToolUse` 在本次 tool output 后追加 `SDD drift tool result enforcement`，要求先 read + edit/write `tasks.md` |
-| 改了 `tasks.md`，但还没改同目录 `design.md` | 同样追加 peer 同步约束 |
-| 改了 `proposal.md` | 要求后续同步同目录 `design.md` 和 `tasks.md` |
-| peer 文件不存在 | 仍会作为缺失 peer 提示模型创建并同步 |
-| peer 已在当前 session 后续同步 | 清除缺口，不再反向制造新的同步要求 |
-| 模型忽略约束并结束 | `.sdd-drift-report.md` 记录未同步缺口，供人工排查 |
-| 普通代码变更 | 不触发 design/tasks 级联约束；默认也不在 UI 输出警告 |
+| `design.md` changed but same-directory `tasks.md` not synced | Requires `tasks.md` sync |
+| `tasks.md` changed but same-directory `design.md` not synced | Requires `design.md` sync |
+| `proposal.md` changed | Requires same-directory `design.md` and `tasks.md` sync |
+| peer file missing | Reports it as missing and asks the model to create/update it |
+| peer file synced later in the same session | Clears the gap and does not create a reverse ping-pong requirement |
+| normal code changed without later SDD review | Emits deferred reminders to review relevant `design.md` and `tasks.md` before the final answer |
+| many code files changed in one turn | Keeps accumulating changed files and repeats compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
+| code only affects task progress | Allows a tasks-only update, or no document edit, after both `design.md` and `tasks.md` have been reviewed |
+| model ignores constraints and stops | Writes `.sdd-drift-report.md` for human review |
 
-状态文件优先写入最近 Git 仓库的 `.git/sdd-drift-hook-state/`，避免污染项目根目录。
-`.sdd-drift-report.md` 仍写在当前项目根目录，因为它是给人看的排查报告。
+State is stored under the nearest `.git/sdd-drift-hook-state/` when possible, so
+normal hook state does not pollute project status. `.sdd-drift-report.md` is kept
+in the project root because it is meant to be visible.
 
-## 安装到业务项目
+The hook also writes a lightweight JSONL diagnostic log by default:
 
-下面假设你在业务项目根目录安装，并把 hook 脚本复制到该项目的
-`.opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js`。
+```text
+<nearest .git>/sdd-drift-hook-state/sdd-drift-check.log.jsonl
+```
 
-### 1. 安装 oh-my-opencode
+If the hook is not using a Git state directory, the log follows the same fallback
+as state: `<cwd>/.sdd-drift-hook-state/` first, then `%TEMP%/sdd-drift-check/`.
+The log intentionally does not include file contents or API keys. It records hook
+entry, ignored events, emitted enforcement, Stop blocks, review-confirmation
+markers, and uncaught hook exceptions. If no new log line appears while you use
+OpenCode or Claude Code, the hook probably was not invoked.
+
+Logs are retained for the latest 3 days by default. Cleanup runs before each
+diagnostic append and prunes old JSONL records from the active log plus same-name
+numeric rotation files such as `sdd-drift-check.log.jsonl.1`.
+
+## Install In A Project
+
+Install `oh-my-opencode`:
 
 ```powershell
 npm install --save-dev oh-my-opencode@3.17.2
 ```
 
-### 2. 复制 hook 脚本
+Copy the hook:
 
 ```powershell
 New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
@@ -59,24 +68,14 @@ Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\package.json .opencode\hooks\sdd-drift-check\package.json
 ```
 
-### 3. 加载 oh-my-opencode 插件
-
-创建 `.opencode/plugin/oh-my-opencode.ts`：
+Create `.opencode/plugin/oh-my-opencode.ts`:
 
 ```powershell
 New-Item -ItemType Directory -Force .opencode\plugin
 Set-Content .opencode\plugin\oh-my-opencode.ts 'export { default } from "oh-my-opencode"'
 ```
 
-文件内容：
-
-```ts
-export { default } from "oh-my-opencode"
-```
-
-### 4. 配置 oh-my-openagent
-
-创建 `.opencode/oh-my-openagent.jsonc`：
+Create `.opencode/oh-my-openagent.jsonc`:
 
 ```jsonc
 {
@@ -93,25 +92,42 @@ export { default } from "oh-my-opencode"
 }
 ```
 
-如果只想启用 Claude-compatible hooks，可以参考
-`test/opencode-sdd-drift-e2e/.opencode/oh-my-openagent.jsonc`，它禁用了大部分 oh-my 内置 hook。
+## Hook Config
 
-### 5. 配置 Claude-compatible hooks
-
-创建 `.claude/settings.json`：
+Default Stop-only config, with no `PostToolUse`:
 
 ```powershell
 New-Item -ItemType Directory -Force .claude
 ```
 
-写入：
+`.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Reliable OpenCode cascade mode, with optional `PostToolUse` enabled:
 
 ```json
 {
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Read|Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
@@ -135,12 +151,39 @@ New-Item -ItemType Directory -Force .claude
 }
 ```
 
-`command` 相对业务项目根目录执行。业务项目安装时优先使用
-`node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js`，不要照抄本仓库测试工程里的相对路径。
+The hook treats `Edit`, `Write`, and Claude Code's common `MultiEdit` tool as
+edits. Add `Read` to the optional `PostToolUse` matcher so the hook can verify
+that SDD review actually happened. It deduplicates repeated `PostToolUse` calls
+by `tool_use_id`, so having a user-level and project-level hook config should
+not create duplicate enforcement or design/tasks ping-pong.
 
-### 6. 忽略运行产物
+Code-ahead-of-doc drift is batched at session level. The first code edit that
+gets ahead of SDD emits a full model-visible deferred review reminder. Later
+tool calls in the same unreviewed batch emit compact reminders, which makes the
+signal survive long tasks and context compaction. `Read` events are only treated
+as prerequisite evidence that the documents entered context; they do not by
+themselves clear the batch.
 
-建议加入业务项目 `.gitignore`：
+The batch clears after either:
+
+- the latest code change is followed by an actual SDD edit and peer rules are
+  satisfied; or
+- both relevant `design.md` and `tasks.md` have been read, then `Stop` records a
+  review-confirmation marker in hook state for the current code batch.
+
+The model should update only the documents that actually need changes; it may
+leave both documents unchanged if review shows they already match the code.
+When it does edit an SDD document, the injected prompt explicitly asks it to
+keep existing Markdown headings, preserve the top-level template title, avoid
+single-line summary replacement, and update the closest existing paragraph or
+task item instead of adding new sections.
+
+When the environment supports subagents and the current project allows them, the
+prompt suggests using a read-only subagent for SDD review. This is optional:
+without subagents, the main agent performs the same review with normal `Read`
+tools and remains responsible for any edits.
+
+Recommended `.gitignore` entries:
 
 ```gitignore
 .sdd-drift-report.md
@@ -148,19 +191,7 @@ New-Item -ItemType Directory -Force .claude
 .opencode/*.tmp
 ```
 
-如果项目在 Git 仓库内，状态默认会进入 `.git/sdd-drift-hook-state/`，不会出现在 `git status`。
-上面的 `.sdd-drift-hook-state/` 是给非 Git 目录或旧版本状态目录兜底。
-
-## 本仓库测试
-
-测试工程在 `test/opencode-sdd-drift-e2e`。它为了复用本仓库源码，`.claude/settings.json`
-中的 command 是：
-
-```json
-"command": "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.js"
-```
-
-运行：
+## Tests
 
 ```powershell
 cd test\opencode-sdd-drift-e2e
@@ -171,45 +202,104 @@ npm run e2e -- -Scenario sdd-cascade
 npm run e2e -- -Scenario code
 ```
 
-## 原理
+Real model checks:
 
-`oh-my-opencode@3.17.2` 会读取 `.claude/settings.json`，把 `PostToolUse` 映射到
-OpenCode 的 `tool.execute.after`。hook 的 stdout 会被追加回 OpenCode tool output；
-模型下一步请求会带着上一条 tool message，因此能看到 `SDD drift tool result enforcement`
-并继续修改缺失的 peer 文档。
+```powershell
+npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode stop-only
+npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider minimax -Scenario design-cascade -HookMode posttooluse-and-stop
+```
 
-本实现用 pending requirement 记录当前 session 内仍需同步的 peer 文件。比如 `design.md`
-写完后会登记 `tasks.md` 缺口；当后续 `tasks.md` 被 edit/write 后，缺口被清除，不会再要求
-回头改 `design.md`。
+Claude Code companion checks are under `test/claude-code-sdd-drift-e2e`.
+Provider keys are intentionally local-only:
 
-## 调试开关
+```powershell
+cd test\claude-code-sdd-drift-e2e
+Copy-Item .claude\providers\deepseek.local.ps1.example .claude\providers\deepseek.local.ps1
+Copy-Item .claude\providers\minimax.local.ps1.example .claude\providers\minimax.local.ps1
+```
 
-默认静默：不写 stderr、不显示红字、不追加旧式 `SDD DRIFT:` 警告。
+Fill the `.local.ps1` files with an Anthropic Messages compatible gateway, then
+run:
 
-如需查看非 peer 类 drift 警告：
+```powershell
+npm run e2e:real -- -Provider deepseek -Scenario multi-code-cascade
+npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
+```
+
+Run the same real-model scenario across both harnesses:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File test\run-sdd-drift-real-matrix.ps1 -Provider deepseek -Scenario multi-code-cascade -Target both
+```
+
+Observed on 2026-05-16:
+
+| Provider | Hook mode | Result |
+| --- | --- | --- |
+| DeepSeek | `stop-only` | Failed: OpenCode reached `session.idle`, but Stop continuation was not invoked |
+| DeepSeek | `posttooluse-and-stop` | Passed: `tasks.md` was synchronized, no report remained |
+| Minimax M2.7 | `posttooluse-and-stop` | Passed: `tasks.md` was synchronized, no report remained |
+
+## Debug Switches
+
+Disable diagnostic file logging:
+
+```powershell
+$env:SDD_DRIFT_LOG = "0"
+opencode
+```
+
+Write diagnostic logs to a specific file:
+
+```powershell
+$env:SDD_DRIFT_LOG_PATH = "E:\tmp\sdd-drift-check.log.jsonl"
+opencode
+```
+
+Change log rotation size, default `2097152` bytes:
+
+```powershell
+$env:SDD_DRIFT_LOG_MAX_BYTES = "5242880"
+opencode
+```
+
+Change diagnostic log retention, default `3` days. Set `0` to disable age-based
+cleanup temporarily:
+
+```powershell
+$env:SDD_DRIFT_LOG_RETENTION_DAYS = "7"
+opencode
+```
+
+Show non-peer warnings:
 
 ```powershell
 $env:SDD_DRIFT_SHOW_WARNINGS = "1"
 opencode
 ```
 
-如需模拟 Claude Code 式硬阻断，可显式开启严格模式。它会使用 stderr + exit 2，可能在 UI 中出现 warning：
+Strict blocking mode, which may show UI warnings because it uses `stderr` and
+exit code 2:
 
 ```powershell
 $env:SDD_DRIFT_STRICT = "1"
 opencode
 ```
 
-hook 自身异常默认不打断 agent。如需排查 hook bug：
+Hook bug diagnostics:
 
 ```powershell
 $env:SDD_DRIFT_DEBUG = "1"
 opencode
 ```
 
-## 边界
+## Boundaries
 
-- 只识别 OpenCode 的 `Edit` / `Write` 文件工具；通过 shell 重定向改文件不会触发。
-- 内置 peer 关系是 `proposal.md -> design.md + tasks.md`、`design.md -> tasks.md`、`tasks.md -> design.md`。
-- 不代发用户消息，不强制阻断模型停止；稳定性来自 tool result 注入。
-- 如果未来 OpenCode 提供真正的 Stop continuation 或 tool output injection API，可以替换为官方机制。
+- Tracks OpenCode/Claude file tools only. Shell redirection is not visible to the
+  hook.
+- Built-in peer rules are `proposal.md -> design.md + tasks.md`,
+  `design.md -> tasks.md`, and `tasks.md -> design.md`.
+- OpenCode Stop-only continuation is kept as compatible output, but should not
+  be treated as reliable cascade enforcement until the OpenCode/oh-my bridge
+  invokes it consistently.

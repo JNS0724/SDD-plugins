@@ -1,5 +1,18 @@
 {
   "$schema": "../node_modules/oh-my-opencode/schema.json",
+  "sisyphus_agent": {
+    "disabled": true
+  },
+  "experimental": {
+    "disable_omo_env": true
+  },
+  "disabled_agents": [
+    "sisyphus",
+    "hephaestus",
+    "prometheus",
+    "atlas",
+    "sisyphus-junior"
+  ],
   "disabled_hooks": [
     "atlas",
     "ralph-loop",

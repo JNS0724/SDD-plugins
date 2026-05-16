@@ -112,7 +112,10 @@ const server = http.createServer(async (request, response) => {
   const toolNames = (payload.tools || []).map((tool) => tool.function?.name || tool.name)
   const toolText = messageText((payload.messages || []).filter((message) => message.role === "tool"))
   const hasToolEnforcement = toolText.includes("SDD drift tool result enforcement")
-  const hasCodeEnforcement = toolText.includes("changed code")
+  const hasCodeEnforcement =
+    toolText.includes("changed code") ||
+    toolText.includes("code changed") ||
+    toolText.includes("changed implementation code")
   log({
     request: requestCount,
     scenario,

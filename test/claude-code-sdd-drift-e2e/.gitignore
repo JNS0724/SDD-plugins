@@ -1,0 +1,12 @@
+node_modules/
+.home*/
+*.log
+*.ready
+*.pid
+.real-workspaces/
+.sdd-drift-report.md
+.sdd-drift-hook-state/
+.claude/settings.local.json
+.claude/providers/*.local.ps1
+.claude/providers/*.local.env
+Microsoft/

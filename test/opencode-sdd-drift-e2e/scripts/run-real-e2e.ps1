@@ -2,8 +2,11 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade")]
-  [string]$Scenario = "design-cascade"
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade")]
+  [string]$Scenario = "design-cascade",
+
+  [ValidateSet("stop-only", "posttooluse-and-stop")]
+  [string]$HookMode = "stop-only"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +28,8 @@ $configBackupPath = Join-Path $root ".opencode\opencode.real-backup.tmp"
 $configTemplate = Join-Path $root ".opencode\opencode.$Provider.jsonc.example"
 $ohmyConfigPath = Join-Path $root ".opencode\oh-my-openagent.jsonc"
 $ohmyBackupPath = Join-Path $root ".opencode\oh-my-openagent.real-backup.tmp"
+$settingsPath = Join-Path $root ".claude\settings.json"
+$settingsBackupPath = Join-Path $root ".claude\settings.real-backup.tmp"
 $hookPath = (Join-Path $repoRoot "plugins\sdd-drift-check\sdd-drift-check-hook.js").Replace("\", "/")
 
 if (!(Test-Path -LiteralPath $configTemplate)) {
@@ -35,6 +40,9 @@ if (Test-Path -LiteralPath $configBackupPath) {
 }
 if (Test-Path -LiteralPath $ohmyBackupPath) {
   throw "oh-my-opencode real e2e config backup already exists; another run may be active: $ohmyBackupPath"
+}
+if (Test-Path -LiteralPath $settingsBackupPath) {
+  throw "Claude-compatible hook settings real e2e backup already exists; another run may be active: $settingsBackupPath"
 }
 
 if ($Provider -eq "deepseek" -and !$env:DEEPSEEK_API_KEY) {
@@ -79,6 +87,7 @@ if ($Provider -eq "minimax") {
 
 New-Item -ItemType Directory -Force (Join-Path $workRoot ".opencode\plugin") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $workRoot ".claude") | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $opencodeHome ".claude") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\test-feat") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $workRoot "src") | Out-Null
 
@@ -166,12 +175,11 @@ $ohmyConfig = @'
 '@
 Set-Content -LiteralPath (Join-Path $workRoot ".opencode\oh-my-openagent.jsonc") -Value $ohmyConfig -NoNewline
 
-$settings = @"
-{
-  "hooks": {
+$hooksJson = if ($HookMode -eq "posttooluse-and-stop") {
+  @"
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
+        "matcher": "Read|Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
@@ -191,6 +199,27 @@ $settings = @"
         ]
       }
     ]
+"@
+} else {
+  @"
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $hookPath"
+          }
+        ]
+      }
+    ]
+"@
+}
+
+$settings = @"
+{
+  "hooks": {
+$hooksJson
   }
 }
 "@
@@ -230,10 +259,18 @@ $ohmyBackup = if ($ohmyHadFile) {
 } else {
   $null
 }
+$settingsHadFile = Test-Path -LiteralPath $settingsPath
+$settingsBackup = if ($settingsHadFile) {
+  Get-Content -LiteralPath $settingsPath -Raw
+} else {
+  $null
+}
 Set-Content -LiteralPath $configBackupPath -Value $configBackup -NoNewline
 Set-Content -LiteralPath $configPath -Value $config -NoNewline
 Set-Content -LiteralPath $ohmyBackupPath -Value $ohmyBackup -NoNewline
 Set-Content -LiteralPath $ohmyConfigPath -Value $ohmyConfig -NoNewline
+Set-Content -LiteralPath $settingsBackupPath -Value $settingsBackup -NoNewline
+Set-Content -LiteralPath $settingsPath -Value $settings -NoNewline
 
 if (Test-Path -LiteralPath $hookState) {
   Get-ChildItem -LiteralPath $hookState -Force -ErrorAction SilentlyContinue |
@@ -243,27 +280,78 @@ if (Test-Path -LiteralPath $hookState) {
 $designPath = Join-Path $workRoot "sdd\changes\test-feat\design.md"
 $tasksPath = Join-Path $workRoot "sdd\changes\test-feat\tasks.md"
 $appPath = Join-Path $workRoot "src\app.ts"
+$helperPath = Join-Path $workRoot "src\helper.ts"
 Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
 Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
 Set-Content -LiteralPath $appPath -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
+Set-Content -LiteralPath $helperPath -Value "export function helper() {`n  return `"helper`"`n}"
 
 $env:HOME = $opencodeHome
 $env:USERPROFILE = $opencodeHome
 $env:OMO_SEND_ANONYMOUS_TELEMETRY = "0"
 $env:OMO_DISABLE_POSTHOG = "1"
 
-$marker = if ($Scenario -eq "code-cascade") {
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade"
+$marker = if ($isCodeScenario) {
   "Real $Provider code drift verification $runId"
 } else {
   "Real $Provider SDD drift verification $runId"
 }
-$taskMarker = if ($Scenario -eq "code-cascade") {
-  "Synchronized after $Provider code drift design update $runId"
+$isStopOnly = $HookMode -eq "stop-only"
+$taskMarker = if ($isCodeScenario) {
+  if ($isStopOnly) {
+    "Synchronized after $Provider stop enforcement completed code design sync $runId"
+  } else {
+    "Synchronized after $Provider code drift design update $runId"
+  }
 } else {
-  "Synchronized after $Provider saw SDD drift tool result enforcement $runId"
+  if ($isStopOnly) {
+    "Synchronized after $Provider saw SDD drift stop enforcement $runId"
+  } else {
+    "Synchronized after $Provider saw SDD drift tool result enforcement $runId"
+  }
 }
 $codeMarker = "hi-$Provider-$runId"
-$prompt = if ($Scenario -eq "code-cascade") {
+$helperMarker = "helper-$Provider-$runId"
+$prompt = if ($isStopOnly -and $isCodeScenario) {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Initial pass: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Then stop immediately with a brief final answer. Do not read or write any SDD document during the initial pass."
+    "If a later hook continuation containing `"SDD drift stop enforcement`" asks you to synchronize design.md, read sdd/changes/test-feat/design.md and write it so it contains this exact section heading: ## $marker."
+    "If a later hook continuation asks you to synchronize tasks.md, read sdd/changes/test-feat/tasks.md and write it so it contains this exact task line: - [x] $taskMarker."
+    "Use only read and write tools."
+  ) -join " "
+} elseif ($isStopOnly) {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Initial pass: 1. Read sdd/changes/test-feat/design.md."
+    "2. Write sdd/changes/test-feat/design.md so it contains this exact section heading: ## $marker."
+    "3. Then stop immediately with a brief final answer. Do not read or write sdd/changes/test-feat/tasks.md during the initial pass."
+    "If a later hook continuation containing `"SDD drift stop enforcement`" asks you to synchronize peer documents, read sdd/changes/test-feat/tasks.md and write it so it contains this exact task line: - [x] $taskMarker."
+    "Use only read and write tools."
+  ) -join " "
+} elseif ($Scenario -eq "multi-code-cascade") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Use this sequence exactly: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Wait for the src/app.ts write tool result, notice whether it contains `"SDD drift tool result enforcement`", but do not update any SDD document yet."
+    "4. Read src/helper.ts."
+    "5. Write src/helper.ts so it contains this exact string literal: `"$helperMarker`"."
+    "6. Wait for the src/helper.ts write tool result and inspect it."
+    "7. Now read sdd/changes/test-feat/design.md."
+    "8. Write sdd/changes/test-feat/design.md so it contains this exact section heading: ## $marker."
+    "9. Wait for the design.md write tool result and inspect that tool result text."
+    "10. If the design.md write tool result contains `"SDD drift tool result enforcement`", read sdd/changes/test-feat/tasks.md."
+    "11. Write sdd/changes/test-feat/tasks.md so it contains this exact task line: - [x] $taskMarker."
+    "Use only read and write tools. Finish only after app.ts, helper.ts, design.md, and tasks.md are synchronized."
+  ) -join " "
+} elseif ($Scenario -eq "code-cascade") {
   @(
     "Execute this exact local file-editing validation task now."
     "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
@@ -321,9 +409,19 @@ try {
     }
     Remove-Item -LiteralPath $ohmyBackupPath -Force -ErrorAction SilentlyContinue
   }
+  if (Test-Path -LiteralPath $settingsBackupPath) {
+    if ($settingsHadFile) {
+      $restoreSettings = Get-Content -LiteralPath $settingsBackupPath -Raw
+      Set-Content -LiteralPath $settingsPath -Value $restoreSettings -NoNewline
+    } elseif (Test-Path -LiteralPath $settingsPath) {
+      Remove-Item -LiteralPath $settingsPath -Force
+    }
+    Remove-Item -LiteralPath $settingsBackupPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 Write-Output "OPENCODE_EXIT=$opencodeExit"
+Write-Output "HOOK_MODE=$HookMode"
 Write-Output "WORKROOT=$workRoot"
 Write-Output "--- design.md ---"
 Get-Content -LiteralPath $designPath
@@ -331,6 +429,8 @@ Write-Output "--- tasks.md ---"
 Get-Content -LiteralPath $tasksPath
 Write-Output "--- src/app.ts ---"
 Get-Content -LiteralPath $appPath
+Write-Output "--- src/helper.ts ---"
+Get-Content -LiteralPath $helperPath
 Write-Output "--- .sdd-drift-report.md ---"
 if (Test-Path -LiteralPath $report) {
   Get-Content -LiteralPath $report
@@ -353,6 +453,7 @@ if ($opencodeExit -ne 0) {
 $designText = Get-Content -LiteralPath $designPath -Raw
 $tasksText = Get-Content -LiteralPath $tasksPath -Raw
 $appText = Get-Content -LiteralPath $appPath -Raw
+$helperText = Get-Content -LiteralPath $helperPath -Raw
 $outText = if (Test-Path -LiteralPath $outLog) { Get-Content -LiteralPath $outLog -Raw } else { "" }
 $errText = if (Test-Path -LiteralPath $errLog) { Get-Content -LiteralPath $errLog -Raw } else { "" }
 $reportText = if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Raw } else { "" }
@@ -360,11 +461,27 @@ $reportText = if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $re
 if ($designText -notmatch [regex]::Escape($marker)) {
   throw "expected design.md to contain real model marker"
 }
-if ($Scenario -eq "code-cascade" -and $appText -notmatch [regex]::Escape($codeMarker)) {
+if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
   throw "expected src/app.ts to contain real model code marker"
 }
-if ($outText -notmatch "SDD drift tool result enforcement") {
+if ($Scenario -eq "multi-code-cascade" -and $helperText -notmatch [regex]::Escape($helperMarker)) {
+  throw "expected src/helper.ts to contain real model helper marker"
+}
+if ($HookMode -eq "stop-only") {
+  if ($errText -notmatch "Stop hook returned block with inject_prompt") {
+    throw "expected Stop hook to block and inject a continuation prompt"
+  }
+} elseif ($outText -notmatch "SDD drift tool result enforcement") {
   throw "expected OpenCode output to include SDD drift tool result enforcement"
+}
+if ($Scenario -eq "multi-code-cascade") {
+  $codeEnforcementCount = [regex]::Matches(
+    $outText,
+    [regex]::Escape("SDD reconciliation review is now pending for this code-change batch")
+  ).Count
+  if ($codeEnforcementCount -ne 1) {
+    throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
+  }
 }
 if ($tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain real model synchronization marker"

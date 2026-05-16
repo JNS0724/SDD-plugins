@@ -1,0 +1,18 @@
+# Copy this file to minimax.local.ps1 and fill the values.
+# The .local.ps1 file is ignored by git.
+#
+# China endpoint: https://api.minimaxi.com/anthropic
+# International endpoint: https://api.minimax.io/anthropic
+
+$env:ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
+$env:ANTHROPIC_AUTH_TOKEN = "YOUR_MINIMAX_API_KEY"
+$env:API_TIMEOUT_MS = "3000000"
+$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+$env:ANTHROPIC_MODEL = "MiniMax-M2.7"
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL = "MiniMax-M2.7"
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "MiniMax-M2.7"
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL = "MiniMax-M2.7"
+
+$env:ANTHROPIC_CUSTOM_MODEL_OPTION = $env:ANTHROPIC_MODEL
+$env:ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "MiniMax M2.7"
+$env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "0"
