@@ -35,6 +35,18 @@ State is stored under the nearest `.git/sdd-drift-hook-state/` when possible, so
 normal hook state does not pollute project status. `.sdd-drift-report.md` is kept
 in the project root because it is meant to be visible.
 
+State updates are serialized with a short-lived lock per session. This matters
+when an agent emits parallel file writes: a `design.md` edit that asks for
+`tasks.md` synchronization and the follow-up `tasks.md` edit must be merged into
+one session state, otherwise one hook process can overwrite the other and create
+design/tasks ping-pong reminders.
+
+The hook also tracks peer-sync responses inside the session. If `tasks.md` is
+being edited to satisfy a pending `design.md -> tasks.md` requirement, immediate
+follow-up edits to that same `tasks.md` are treated as part of the same sync
+cycle rather than as a fresh `tasks.md -> design.md` requirement. A new source
+document edit or a clean `Stop` starts the next cycle.
+
 The hook also writes a lightweight JSONL diagnostic log by default:
 
 ```text

@@ -73,6 +73,10 @@ try {
     assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 1)
     edit(state, tasks)
     assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+    edit(state, tasks)
+    assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+    edit(state, design)
+    assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 1)
   }
 
   {
@@ -95,6 +99,18 @@ try {
       ),
       true
     )
+  }
+
+  {
+    const target = path.join(tmpRoot, "state-lock", "session.json")
+    const first = hook.acquireFileLock(target, { waitMs: 0 })
+    assert.ok(first)
+    const second = hook.acquireFileLock(target, { waitMs: 0 })
+    assert.strictEqual(second, null)
+    hook.releaseFileLock(first)
+    const third = hook.acquireFileLock(target, { waitMs: 0 })
+    assert.ok(third)
+    hook.releaseFileLock(third)
   }
 
   {

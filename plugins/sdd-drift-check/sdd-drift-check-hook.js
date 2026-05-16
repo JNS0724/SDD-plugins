@@ -161,6 +161,11 @@ const limitString = (value, max = 500) => {
 
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
+const sleepSync = (ms) => {
+  if (ms <= 0) return
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
 const summarizeInput = (input) => ({
   hook_event_name: input?.hook_event_name || null,
   hook_source: input?.hook_source || null,
@@ -269,32 +274,36 @@ const cleanupDiagnosticLogs = (target, now = Date.now()) => {
   } catch {}
 }
 
-const acquireDiagnosticLogLock = (target) => {
+const acquireFileLock = (target, options = {}) => {
+  const staleMs = options.staleMs || 5 * 60 * 1000
+  const waitMs = options.waitMs || 0
+  const retryMs = options.retryMs || 25
   const lockPath = `${target}.lock`
   const openLock = () => {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true })
     const fd = fs.openSync(lockPath, "wx")
     fs.writeFileSync(fd, `${process.pid}\n${new Date().toISOString()}\n`)
     return { fd, lockPath }
   }
 
-  try {
-    return openLock()
-  } catch (err) {
-    if (err?.code !== "EEXIST") return null
-  }
+  const deadline = Date.now() + waitMs
+  while (true) {
+    try {
+      return openLock()
+    } catch (err) {
+      if (err?.code !== "EEXIST") return null
+    }
 
-  try {
-    if (Date.now() - fs.statSync(lockPath).mtimeMs > 5 * 60 * 1000) fs.unlinkSync(lockPath)
-  } catch {}
+    try {
+      if (Date.now() - fs.statSync(lockPath).mtimeMs > staleMs) fs.unlinkSync(lockPath)
+    } catch {}
 
-  try {
-    return openLock()
-  } catch {
-    return null
+    if (Date.now() >= deadline) return null
+    sleepSync(retryMs)
   }
 }
 
-const releaseDiagnosticLogLock = (lock) => {
+const releaseFileLock = (lock) => {
   if (!lock) return
   try {
     fs.closeSync(lock.fd)
@@ -310,7 +319,7 @@ const writeDiagnosticLog = (cwd, event) => {
   try {
     const target = diagnosticLogPath(cwd || process.cwd())
     fs.mkdirSync(path.dirname(target), { recursive: true })
-    lock = acquireDiagnosticLogLock(target)
+    lock = acquireFileLock(target)
     if (!lock) return
     cleanupDiagnosticLogs(target)
     rotateDiagnosticLog(target)
@@ -324,7 +333,7 @@ const writeDiagnosticLog = (cwd, event) => {
     )
   } catch {
   } finally {
-    releaseDiagnosticLogLock(lock)
+    releaseFileLock(lock)
   }
 }
 
@@ -338,6 +347,7 @@ const emptyState = () => ({
   requirements: {},
   stopBlocks: {},
   toolEvents: {},
+  peerSyncs: {},
   codeDriftNotice: null,
   codeReviewConfirmations: {},
 })
@@ -362,6 +372,7 @@ const normalizeState = (parsed) => {
     parsed.requirements && typeof parsed.requirements === "object" ? parsed.requirements : {}
   state.stopBlocks = parsed.stopBlocks && typeof parsed.stopBlocks === "object" ? parsed.stopBlocks : {}
   state.toolEvents = parsed.toolEvents && typeof parsed.toolEvents === "object" ? parsed.toolEvents : {}
+  state.peerSyncs = parsed.peerSyncs && typeof parsed.peerSyncs === "object" ? parsed.peerSyncs : {}
   state.codeDriftNotice =
     parsed.codeDriftNotice && typeof parsed.codeDriftNotice === "object"
       ? parsed.codeDriftNotice
@@ -599,14 +610,68 @@ const cleanupRequirementBucket = (state, dir) => {
   if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.requirements[key]
 }
 
+const getPeerSyncBucket = (state, dir, create) => {
+  const key = normalizeKey(dir)
+  if (!state.peerSyncs[key] && create) {
+    state.peerSyncs[key] = { dir: path.normalize(dir), files: {} }
+  }
+  return state.peerSyncs[key]
+}
+
+const cleanupPeerSyncBucket = (state, dir) => {
+  const key = normalizeKey(dir)
+  const bucket = state.peerSyncs[key]
+  if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.peerSyncs[key]
+}
+
+const markPeerSyncResponse = (state, dir, file, sourceFile, sourceSeq, targetSeq) => {
+  if (!sourceFile) return
+  const bucket = getPeerSyncBucket(state, dir, true)
+  bucket.files[file] = { sourceFile, sourceSeq, targetSeq }
+}
+
+const isPeerSyncContinuation = (state, dir, file, seq) => {
+  const bucket = getPeerSyncBucket(state, dir, false)
+  const sync = bucket?.files?.[file]
+  if (!sync?.sourceFile) return false
+
+  const sourceSeq = editedSeq(state, path.join(dir, sync.sourceFile))
+  if (sourceSeq > sync.sourceSeq) {
+    delete bucket.files[file]
+    cleanupPeerSyncBucket(state, dir)
+    return false
+  }
+
+  if (seq > sync.targetSeq) sync.targetSeq = seq
+  return true
+}
+
+const clearPeerSyncsForSourceEdit = (state, dir, sourceFile, seq) => {
+  const bucket = getPeerSyncBucket(state, dir, false)
+  if (!bucket) return
+
+  for (const [file, sync] of Object.entries(bucket.files || {})) {
+    if (sync?.sourceFile === sourceFile && seq > sync.sourceSeq) delete bucket.files[file]
+  }
+  cleanupPeerSyncBucket(state, dir)
+}
+
+const clearPeerSyncs = (state) => {
+  state.peerSyncs = {}
+}
+
 const updateRequirementsForEdit = (state, dir, file, seq) => {
   const bucket = getRequirementBucket(state, dir, false)
   const pending = bucket?.files?.[file]
   if (pending && seq > pending.afterSeq) {
+    markPeerSyncResponse(state, dir, file, pending.sourceFile, pending.afterSeq, seq)
     delete bucket.files[file]
     cleanupRequirementBucket(state, dir)
     return
   }
+
+  if (isPeerSyncContinuation(state, dir, file, seq)) return
+  clearPeerSyncsForSourceEdit(state, dir, file, seq)
 
   let requiredPeers = CHANGE_DOC_REQUIREMENTS[file] || []
   if (file === TASKS_FILE) {
@@ -1068,11 +1133,20 @@ const main = async () => {
   const input = parseHookInput(await readStdin())
   const cwd = input.cwd || process.cwd()
   const sessionID = input.session_id || "default"
+  const currentStatePath = statePath(cwd, sessionID)
+  const stateLock = acquireFileLock(currentStatePath, {
+    staleMs: 30 * 1000,
+    waitMs: 5 * 1000,
+    retryMs: 20,
+  })
+
+  try {
   const state = loadState(cwd, sessionID)
   writeDiagnosticLog(cwd, {
     event: "hook_start",
     input: summarizeInput(input),
-    statePath: statePath(cwd, sessionID),
+    statePath: currentStatePath,
+    stateLockAcquired: Boolean(stateLock),
     outputMode: OUTPUT_MODE || "auto",
     strictBlock: STRICT_BLOCK,
   })
@@ -1083,6 +1157,7 @@ const main = async () => {
     const pending = buildPendingEnforcement(cwd, state)
     if (!pending) {
       state.stopBlocks = {}
+      clearPeerSyncs(state)
       refreshReport(cwd, state)
       saveState(cwd, sessionID, state)
       writeDiagnosticLog(cwd, {
@@ -1100,6 +1175,7 @@ const main = async () => {
       (pending.gaps || []).every((gap) => gap.needsConfirmation && gap.reviewReady)
     if (markStopCodeReviewConfirmation(state, pending)) {
       state.stopBlocks = {}
+      clearPeerSyncs(state)
       refreshReport(cwd, state)
       saveState(cwd, sessionID, state)
       writeDiagnosticLog(cwd, {
@@ -1242,6 +1318,9 @@ const main = async () => {
       ...summarizeGaps(cwd, peerGaps, codeGaps),
     })
   }
+  } finally {
+    releaseFileLock(stateLock)
+  }
 }
 
 if (require.main === module) {
@@ -1279,11 +1358,13 @@ if (require.main === module) {
     normalizeKey,
     parseHookInput,
     applyToolRecord,
+    acquireFileLock,
     getToolEventKey,
     markToolEvent,
     recordFile,
     resolveTranscriptPath,
     refreshReport,
+    releaseFileLock,
     saveState,
     writeDiagnosticLog,
     shouldEmitCodeDriftNotice,
