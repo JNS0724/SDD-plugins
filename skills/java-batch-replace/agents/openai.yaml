@@ -1,4 +1,0 @@
-interface:
-  display_name: "Java Batch Replace"
-  short_description: "Safely replace code across Java source trees."
-  default_prompt: "Use $java-batch-replace to replace a code snippet across all .java files under a target directory."
