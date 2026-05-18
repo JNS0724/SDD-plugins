@@ -7,6 +7,17 @@ OpenCode / Claude Code compatible hook for SDD drift checks.
 `PostToolUse` is now optional. The checked-in default config only enables
 `Stop`, so the UI does not get tool-result enforcement text unless you opt in.
 
+## Runtime Environment
+
+This hook must run inside a Claude Code-compatible hook environment:
+
+- Claude Code can run it directly through `.claude/settings.json`.
+- OpenCode must use `oh-my-opencode` hook bridging. Bare OpenCode plugin
+  loading is not sufficient for this implementation.
+
+The hook expects Claude Code-style `PostToolUse` and `Stop` events on stdin and
+returns Claude Code-compatible hook output.
+
 Important OpenCode note: real testing with OpenCode 1.2.27 +
 `oh-my-opencode@3.17.2` showed that `Stop`-only did not trigger continuation in
 `opencode run`, even though the same transcript produced the correct block

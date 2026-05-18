@@ -31,6 +31,16 @@ test/
 `sdd-drift-check` helps keep SDD change documents synchronized while an agent is
 editing code or SDD documents.
 
+### Runtime Environment
+
+Use this plugin in one of these hook-capable runtimes:
+
+- Claude Code with its native hook configuration.
+- OpenCode with `oh-my-opencode` installed and hook bridging enabled.
+
+Plain OpenCode without `oh-my-opencode` is not enough, because the plugin relies
+on Claude Code-style hook events such as `PostToolUse` and `Stop`.
+
 It supports:
 
 - OpenCode through `oh-my-opencode` hook bridging.
