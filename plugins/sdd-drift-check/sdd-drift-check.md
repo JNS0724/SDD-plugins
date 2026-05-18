@@ -21,6 +21,7 @@ The hook does not use `console.error`, `messages.transform`, or
 
 | Scenario | Result |
 | --- | --- |
+| project has no `sdd/` or `.sdd/` directory | Hook exits without state, reports, or model-visible reminders |
 | `design.md` changed but same-directory `tasks.md` not synced | Requires `tasks.md` sync |
 | `tasks.md` changed but same-directory `design.md` not synced | Requires `design.md` sync |
 | `proposal.md` changed | Emits a soft next-stage reminder only when `design.md` already exists; proposal-only turns may finish normally |
@@ -29,6 +30,7 @@ The hook does not use `console.error`, `messages.transform`, or
 | peer file synced later in the same session | Clears the gap and does not create a reverse ping-pong requirement |
 | normal code changed without later SDD review | Emits deferred reminders to review relevant `design.md` and `tasks.md` before the final answer |
 | many code files changed in one turn | Keeps accumulating changed files and repeats compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
+| DTS issue/ticket context | Skips code-ahead-of-doc review reminders; DTS context is inferred from hook-visible prompt/message/transcript text or forced with `SDD_DRIFT_DTS_CONTEXT=1` |
 | code only affects task progress | Allows a tasks-only update, or no document edit, after both `design.md` and `tasks.md` have been reviewed |
 | model ignores constraints and stops | Writes `.sdd-drift-report.md` for human review |
 
@@ -204,6 +206,18 @@ tool calls in the same unreviewed batch emit compact reminders until the listed
 SDD documents have both been read. This makes the signal survive long tasks and
 context compaction without looping after the model has already reviewed the
 documents.
+
+DTS issue fixes are treated as an operational exception to code-ahead-of-doc
+drift. Because DTS cannot be identified reliably from file paths, the hook only
+skips this review when the hook-visible context contains markers such as
+`DTS`, `DTS问题单`, `DTS issue`, or `DTS ticket`, or when
+`SDD_DRIFT_DTS_CONTEXT=1` is set for the session. In OpenCode through
+oh-my-opencode `PostToolUse`, current hook input can be limited to
+hook/session/tool metadata, so prompt-based DTS inference should be treated as
+best effort. For reliable OpenCode DTS handling, set `SDD_DRIFT_DTS_CONTEXT=1`
+on that run. Set `SDD_DRIFT_DTS_SKIP=0` to disable this exception entirely. The
+DTS exception does not disable peer synchronization after explicit SDD document
+edits.
 
 The batch clears after either:
 

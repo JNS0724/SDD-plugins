@@ -7,4 +7,5 @@ node_modules/
 .sdd-drift-hook-state/
 .real-workspaces/
 .opencode/*.tmp
+.claude/*.tmp
 Microsoft/

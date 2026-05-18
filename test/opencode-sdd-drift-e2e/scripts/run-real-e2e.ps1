@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "design-no-peer", "proposal-no-peer")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
   [string]$Scenario = "design-cascade",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -71,6 +71,36 @@ if (
   throw "$keyName still looks like a placeholder; configure a real provider key before running real e2e"
 }
 
+function Set-ContentWithRetry {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$LiteralPath,
+
+    [AllowNull()]
+    [string]$Value,
+
+    [switch]$NoNewline,
+
+    [int]$Retries = 20
+  )
+
+  for ($attempt = 0; $attempt -le $Retries; $attempt++) {
+    try {
+      if ($NoNewline) {
+        Set-Content -LiteralPath $LiteralPath -Value $Value -NoNewline
+      } else {
+        Set-Content -LiteralPath $LiteralPath -Value $Value
+      }
+      return
+    } catch [System.IO.IOException] {
+      if ($attempt -eq $Retries) {
+        throw
+      }
+      Start-Sleep -Milliseconds 250
+    }
+  }
+}
+
 $minimaxBaseUrl = $null
 if ($Provider -eq "minimax") {
   $minimaxBaseUrl = [Environment]::GetEnvironmentVariable("MINIMAX_BASE_URL", "Process")
@@ -88,8 +118,11 @@ if ($Provider -eq "minimax") {
 New-Item -ItemType Directory -Force (Join-Path $workRoot ".opencode\plugin") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $workRoot ".claude") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $opencodeHome ".claude") | Out-Null
-New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\test-feat") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $workRoot "src") | Out-Null
+$hasSddWorkspace = $Scenario -ne "no-sdd-code"
+if ($hasSddWorkspace) {
+  New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\test-feat") | Out-Null
+}
 
 Set-Content -LiteralPath (Join-Path $workRoot ".opencode\plugin\oh-my-opencode.ts") -Value 'export { default } from "oh-my-opencode"'
 
@@ -223,7 +256,7 @@ $hooksJson
   }
 }
 "@
-Set-Content -LiteralPath (Join-Path $workRoot ".claude\settings.json") -Value $settings -NoNewline
+Set-ContentWithRetry -LiteralPath (Join-Path $workRoot ".claude\settings.json") -Value $settings -NoNewline
 
 $config = Get-Content -LiteralPath $configTemplate -Raw
 if ($Provider -eq "minimax") {
@@ -265,12 +298,12 @@ $settingsBackup = if ($settingsHadFile) {
 } else {
   $null
 }
-Set-Content -LiteralPath $configBackupPath -Value $configBackup -NoNewline
-Set-Content -LiteralPath $configPath -Value $config -NoNewline
-Set-Content -LiteralPath $ohmyBackupPath -Value $ohmyBackup -NoNewline
-Set-Content -LiteralPath $ohmyConfigPath -Value $ohmyConfig -NoNewline
-Set-Content -LiteralPath $settingsBackupPath -Value $settingsBackup -NoNewline
-Set-Content -LiteralPath $settingsPath -Value $settings -NoNewline
+Set-ContentWithRetry -LiteralPath $configBackupPath -Value $configBackup -NoNewline
+Set-ContentWithRetry -LiteralPath $configPath -Value $config -NoNewline
+Set-ContentWithRetry -LiteralPath $ohmyBackupPath -Value $ohmyBackup -NoNewline
+Set-ContentWithRetry -LiteralPath $ohmyConfigPath -Value $ohmyConfig -NoNewline
+Set-ContentWithRetry -LiteralPath $settingsBackupPath -Value $settingsBackup -NoNewline
+Set-ContentWithRetry -LiteralPath $settingsPath -Value $settings -NoNewline
 
 if (Test-Path -LiteralPath $hookState) {
   Get-ChildItem -LiteralPath $hookState -Force -ErrorAction SilentlyContinue |
@@ -282,12 +315,14 @@ $designPath = Join-Path $workRoot "sdd\changes\test-feat\design.md"
 $tasksPath = Join-Path $workRoot "sdd\changes\test-feat\tasks.md"
 $appPath = Join-Path $workRoot "src\app.ts"
 $helperPath = Join-Path $workRoot "src\helper.ts"
-Set-Content -LiteralPath $proposalPath -Value "# Proposal`n`nInitial proposal."
-if ($Scenario -ne "proposal-no-peer") {
-  Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
-}
-if ($Scenario -ne "proposal-no-peer" -and $Scenario -ne "design-no-peer") {
-  Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+if ($hasSddWorkspace) {
+  Set-Content -LiteralPath $proposalPath -Value "# Proposal`n`nInitial proposal."
+  if ($Scenario -ne "proposal-no-peer") {
+    Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
+  }
+  if ($Scenario -ne "proposal-no-peer" -and $Scenario -ne "design-no-peer") {
+    Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+  }
 }
 Set-Content -LiteralPath $appPath -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
 Set-Content -LiteralPath $helperPath -Value "export function helper() {`n  return `"helper`"`n}"
@@ -296,8 +331,16 @@ $env:HOME = $opencodeHome
 $env:USERPROFILE = $opencodeHome
 $env:OMO_SEND_ANONYMOUS_TELEMETRY = "0"
 $env:OMO_DISABLE_POSTHOG = "1"
+$previousDtsContextExists = Test-Path Env:\SDD_DRIFT_DTS_CONTEXT
+$previousDtsContext = $env:SDD_DRIFT_DTS_CONTEXT
+if ($Scenario -eq "dts-code") {
+  $env:SDD_DRIFT_DTS_CONTEXT = "1"
+} else {
+  Remove-Item Env:\SDD_DRIFT_DTS_CONTEXT -ErrorAction SilentlyContinue
+}
 
-$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade"
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
+$isCodeNoDocScenario = $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isNoPeerScenario = $Scenario -eq "design-no-peer" -or $Scenario -eq "proposal-no-peer"
 $marker = if ($isCodeScenario) {
   "Real $Provider code drift verification $runId"
@@ -364,6 +407,27 @@ $prompt = if ($isStopOnly -and $isCodeScenario) {
     "3. Do not create, read, or write sdd/changes/test-feat/tasks.md."
     "Use only read and write tools. Finish after design.md is updated."
   ) -join " "
+} elseif ($Scenario -eq "no-sdd-code") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "This workspace intentionally has no sdd or .sdd directory."
+    "Use this sequence: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Do not create, read, or write any sdd or .sdd path."
+    "Use only read and write tools. Finish after src/app.ts is updated."
+  ) -join " "
+} elseif ($Scenario -eq "dts-code") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "This is a DTS问题单 / DTS issue fix. For this validation, only code should change and SDD documents should not be updated."
+    "Use this sequence: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Do not read or write sdd/changes/test-feat/design.md."
+    "4. Do not read or write sdd/changes/test-feat/tasks.md."
+    "Use only read and write tools. Finish after src/app.ts is updated."
+  ) -join " "
 } elseif ($Scenario -eq "multi-code-cascade") {
   @(
     "Execute this exact local file-editing validation task now."
@@ -421,10 +485,15 @@ try {
     Pop-Location
   }
 } finally {
+  if ($previousDtsContextExists) {
+    $env:SDD_DRIFT_DTS_CONTEXT = $previousDtsContext
+  } else {
+    Remove-Item Env:\SDD_DRIFT_DTS_CONTEXT -ErrorAction SilentlyContinue
+  }
   if (Test-Path -LiteralPath $configBackupPath) {
     if ($configHadFile) {
       $restoreConfig = Get-Content -LiteralPath $configBackupPath -Raw
-      Set-Content -LiteralPath $configPath -Value $restoreConfig -NoNewline
+      Set-ContentWithRetry -LiteralPath $configPath -Value $restoreConfig -NoNewline
     } elseif (Test-Path -LiteralPath $configPath) {
       Remove-Item -LiteralPath $configPath -Force
     }
@@ -433,7 +502,7 @@ try {
   if (Test-Path -LiteralPath $ohmyBackupPath) {
     if ($ohmyHadFile) {
       $restoreOhmyConfig = Get-Content -LiteralPath $ohmyBackupPath -Raw
-      Set-Content -LiteralPath $ohmyConfigPath -Value $restoreOhmyConfig -NoNewline
+      Set-ContentWithRetry -LiteralPath $ohmyConfigPath -Value $restoreOhmyConfig -NoNewline
     } elseif (Test-Path -LiteralPath $ohmyConfigPath) {
       Remove-Item -LiteralPath $ohmyConfigPath -Force
     }
@@ -442,7 +511,7 @@ try {
   if (Test-Path -LiteralPath $settingsBackupPath) {
     if ($settingsHadFile) {
       $restoreSettings = Get-Content -LiteralPath $settingsBackupPath -Raw
-      Set-Content -LiteralPath $settingsPath -Value $restoreSettings -NoNewline
+      Set-ContentWithRetry -LiteralPath $settingsPath -Value $restoreSettings -NoNewline
     } elseif (Test-Path -LiteralPath $settingsPath) {
       Remove-Item -LiteralPath $settingsPath -Force
     }
@@ -513,7 +582,7 @@ if ($Scenario -eq "proposal-no-peer") {
   if (Test-Path -LiteralPath $tasksPath) {
     throw "expected tasks.md not to be created when proposal peer is absent"
   }
-} elseif ($designText -notmatch [regex]::Escape($marker)) {
+} elseif (!$isCodeNoDocScenario -and $designText -notmatch [regex]::Escape($marker)) {
   throw "expected design.md to contain real model marker"
 }
 if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
@@ -532,6 +601,24 @@ if ($isNoPeerScenario) {
   if ($Scenario -eq "design-no-peer" -and (Test-Path -LiteralPath $tasksPath)) {
     throw "expected tasks.md not to be created when it is absent"
   }
+} elseif ($isCodeNoDocScenario) {
+  if ($outText -match "SDD drift tool result enforcement") {
+    throw "expected no SDD drift enforcement for $Scenario"
+  }
+  if ($outText -match "SDD reconciliation review is now pending") {
+    throw "expected no code-ahead-of-doc review for $Scenario"
+  }
+  if ($Scenario -eq "no-sdd-code" -and (Test-Path -LiteralPath (Join-Path $workRoot "sdd"))) {
+    throw "expected no sdd directory to be created"
+  }
+  if ($Scenario -eq "dts-code") {
+    if ($designText -match [regex]::Escape($marker)) {
+      throw "expected design.md not to be updated for DTS context"
+    }
+    if ($tasksText -match [regex]::Escape($taskMarker)) {
+      throw "expected tasks.md not to be updated for DTS context"
+    }
+  }
 } elseif ($HookMode -eq "stop-only") {
   if ($errText -notmatch "Stop hook returned block with inject_prompt") {
     throw "expected Stop hook to block and inject a continuation prompt"
@@ -548,7 +635,7 @@ if ($Scenario -eq "multi-code-cascade") {
     throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
   }
 }
-if (!$isNoPeerScenario -and $tasksText -notmatch [regex]::Escape($taskMarker)) {
+if (!$isNoPeerScenario -and !$isCodeNoDocScenario -and $tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain real model synchronization marker"
 }
 if ($errText -match "\[sdd-drift-check\]") {

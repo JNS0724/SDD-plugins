@@ -17,8 +17,11 @@ const DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
 const DIAGNOSTIC_LOG_RETENTION_DAYS = Number.parseFloat(
   process.env.SDD_DRIFT_LOG_RETENTION_DAYS || "3"
 )
+const DTS_CONTEXT_SKIP = process.env.SDD_DRIFT_DTS_SKIP !== "0"
+const DTS_CONTEXT_OVERRIDE = String(process.env.SDD_DRIFT_DTS_CONTEXT || "").toLowerCase()
 const TOOL_EVENT_CAP = 200
 const CODE_REVIEW_CONFIRMATION_CAP = 50
+const DTS_CONTEXT_TEXT_MAX_BYTES = 512 * 1024
 const DEFAULT_LOCK_STALE_MS = 5 * 60 * 1000
 const STATE_LOCK_STALE_MS = 30 * 1000
 const STATE_LOCK_WAIT_MS = 5 * 1000
@@ -45,6 +48,17 @@ const DOCUMENT_SYNC_RULES = [
 ]
 const SUBAGENT_REVIEW_RULE =
   "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits."
+const DTS_CONTEXT_PATTERNS = [
+  /\bDTS-\d+\b/,
+  /\bDTS\b/,
+  /dts\s*(问题单|单|工单|缺陷|bug|issue|ticket)/i,
+  /(问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,30}dts/i,
+]
+const DTS_CONTEXT_NEGATION_PATTERNS = [
+  /(不是|非|无需|不要|不属于)\s*DTS/i,
+  /DTS.{0,10}(不是|非|无需|不要|不属于)/i,
+  /\bnot\s+(?:a\s+)?DTS\b/i,
+]
 
 const toPosix = (fp) => fp.replace(/\\/g, "/")
 const isCaseInsensitiveFs = () =>
@@ -71,6 +85,15 @@ const isSddChangePath = (fp) => {
 }
 
 const isCodePath = (fp) => CODE_EXT.test(fp) && !isSddPath(fp)
+
+const hasSddWorkspace = (cwd) => {
+  for (const name of ["sdd", ".sdd"]) {
+    try {
+      if (fs.statSync(path.join(cwd, name)).isDirectory()) return true
+    } catch {}
+  }
+  return false
+}
 
 const readStdin = () =>
   new Promise((resolve, reject) => {
@@ -362,6 +385,7 @@ const emptyState = () => ({
   codeDriftNotice: null,
   peerDriftNotice: null,
   codeReviewConfirmations: {},
+  dtsContext: null,
 })
 
 const addPath = (items, item) => {
@@ -397,6 +421,8 @@ const normalizeState = (parsed) => {
     parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object"
       ? parsed.codeReviewConfirmations
       : {}
+  state.dtsContext =
+    parsed.dtsContext && typeof parsed.dtsContext === "object" ? parsed.dtsContext : null
 
   for (const fp of state.touched) {
     const key = normalizeKey(fp)
@@ -497,6 +523,146 @@ const resolveTranscriptPath = (input) => {
 
 const resolveFile = (cwd, fp) =>
   path.isAbsolute(fp) ? path.normalize(fp) : path.resolve(cwd, fp)
+
+const isDtsContextText = (text) => {
+  const value = String(text || "")
+  if (!value.trim()) return false
+  if (DTS_CONTEXT_NEGATION_PATTERNS.some((pattern) => pattern.test(value))) return false
+  return DTS_CONTEXT_PATTERNS.some((pattern) => pattern.test(value))
+}
+
+const dtsOverrideActive = () => {
+  if (!DTS_CONTEXT_SKIP) return false
+  if (["1", "true", "yes", "on"].includes(DTS_CONTEXT_OVERRIDE)) return true
+  if (["0", "false", "no", "off"].includes(DTS_CONTEXT_OVERRIDE)) return false
+  return null
+}
+
+const collectInputContextStrings = (value, key = "", depth = 0) => {
+  if (depth > 6 || value == null) return []
+  const normalizedKey = String(key || "").toLowerCase()
+  if (
+    ["tool_input", "toolinput", "old_string", "oldstring", "new_string", "newstring", "content"].includes(
+      normalizedKey
+    )
+  ) {
+    return []
+  }
+
+  if (typeof value === "string") {
+    if (
+      !normalizedKey ||
+      /prompt|message|context|instruction|request|description|summary|title|user|input/.test(
+        normalizedKey
+      )
+    ) {
+      return [value]
+    }
+    return []
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectInputContextStrings(item, key, depth + 1))
+  }
+
+  if (typeof value !== "object") return []
+
+  const strings = []
+  const userText =
+    value.role === "user"
+      ? contentText(value.content)
+      : value.type === "user"
+        ? contentText(value.content || value.message?.content)
+        : value.message?.role === "user"
+          ? contentText(value.message.content)
+          : ""
+  if (userText.trim()) strings.push(userText)
+  for (const [childKey, childValue] of Object.entries(value)) {
+    strings.push(...collectInputContextStrings(childValue, childKey, depth + 1))
+  }
+  return strings
+}
+
+const contentText = (content) => {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part
+      return part?.text || part?.content || part?.value || ""
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+const transcriptUserText = (entry) => {
+  if (!entry || typeof entry !== "object") return ""
+  if (entry.role === "user") return contentText(entry.content)
+  if (entry.type === "user") return contentText(entry.content || entry.message?.content)
+  if (entry.message?.role === "user") return contentText(entry.message.content)
+  return ""
+}
+
+const readLastTranscriptUserText = (transcriptPath) => {
+  if (!transcriptPath || typeof transcriptPath !== "string") return ""
+
+  let content = ""
+  try {
+    const stat = fs.statSync(transcriptPath)
+    const start = Math.max(0, stat.size - DTS_CONTEXT_TEXT_MAX_BYTES)
+    const fd = fs.openSync(transcriptPath, "r")
+    const buffer = Buffer.alloc(stat.size - start)
+    fs.readSync(fd, buffer, 0, buffer.length, start)
+    fs.closeSync(fd)
+    content = buffer.toString("utf8")
+  } catch {
+    return ""
+  }
+
+  let lastUserText = ""
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const text = transcriptUserText(JSON.parse(line))
+      if (text.trim()) lastUserText = text
+    } catch {}
+  }
+  return lastUserText
+}
+
+const setDtsContext = (state, source, text) => {
+  state.dtsContext = {
+    active: true,
+    source,
+    evidenceHash: hash(text),
+    detectedAt: new Date().toISOString(),
+  }
+  return true
+}
+
+const updateDtsContextFromInput = (state, input, transcriptPath) => {
+  if (!DTS_CONTEXT_SKIP) {
+    state.dtsContext = null
+    return false
+  }
+
+  const override = dtsOverrideActive()
+  if (override === true) return setDtsContext(state, "env", "SDD_DRIFT_DTS_CONTEXT")
+  if (override === false && DTS_CONTEXT_OVERRIDE) {
+    state.dtsContext = null
+    return false
+  }
+
+  const inputText = collectInputContextStrings(input).join("\n")
+  if (isDtsContextText(inputText)) return setDtsContext(state, "hook-input", inputText)
+
+  const transcriptText = readLastTranscriptUserText(transcriptPath)
+  if (isDtsContextText(transcriptText)) return setDtsContext(state, "transcript", transcriptText)
+
+  return Boolean(state.dtsContext?.active)
+}
+
+const isDtsContextActive = (state) => DTS_CONTEXT_SKIP && Boolean(state.dtsContext?.active)
 
 const findSdd = (fp) => {
   const parts = toPosix(path.resolve(fp)).split("/")
@@ -893,6 +1059,7 @@ const hasEditedSddChange = (state) =>
 const drift = (cwd, fp, state) => {
   const warn = []
   const doc = getChangeDoc(fp)
+  if (!hasSddWorkspace(cwd) || isDtsContextActive(state)) return warn
 
   if (doc?.root) {
     if (doc.rel.startsWith("specs/")) {
@@ -984,6 +1151,8 @@ const discoverChangeDirs = (cwd) => {
 }
 
 const collectReviewTargets = (cwd, state) => {
+  if (!hasSddWorkspace(cwd)) return []
+
   const dirs = [...(state.changeDirs || []), ...discoverChangeDirs(cwd)]
   const targets = []
 
@@ -1015,6 +1184,8 @@ const isCodeReviewConfirmed = (state, signature) =>
   Boolean(signature && state.codeReviewConfirmations?.[signature]?.confirmed)
 
 const collectCodeGaps = (cwd, state) => {
+  if (!hasSddWorkspace(cwd) || isDtsContextActive(state)) return []
+
   const codeFiles = Object.values(state.files || {})
     .filter((file) => file.editedSeq && isCodePath(file.path || ""))
     .sort((left, right) => (right.editedSeq || 0) - (left.editedSeq || 0))
@@ -1393,6 +1564,8 @@ const emitStopEnforcement = (input, message) => {
 const main = async () => {
   const input = parseHookInput(await readStdin())
   const cwd = input.cwd || process.cwd()
+  if (!hasSddWorkspace(cwd)) return
+
   const sessionID = input.session_id || "default"
   const currentStatePath = statePath(cwd, sessionID)
   const stateLock = acquireFileLock(currentStatePath, {
@@ -1412,6 +1585,8 @@ const main = async () => {
 
   try {
   const state = loadState(cwd, sessionID)
+  const transcriptPathForContext = resolveTranscriptPath(input)
+  const dtsContextActive = updateDtsContextFromInput(state, input, transcriptPathForContext)
   writeDiagnosticLog(cwd, {
     event: "hook_start",
     input: summarizeInput(input),
@@ -1419,10 +1594,11 @@ const main = async () => {
     stateLockAcquired: Boolean(stateLock),
     outputMode: OUTPUT_MODE || "auto",
     strictBlock: STRICT_BLOCK,
+    dtsContextActive,
   })
 
   if (input.hook_event_name === "Stop") {
-    const transcriptPath = resolveTranscriptPath(input)
+    const transcriptPath = transcriptPathForContext
     const hydrated = hydrateStateFromTranscript(cwd, state, transcriptPath)
     const pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false })
     if (!pending) {
@@ -1646,7 +1822,10 @@ if (require.main === module) {
     findSdd,
     getChangeDoc,
     hasEditedSddChange,
+    hasSddWorkspace,
     hydrateStateFromTranscript,
+    isDtsContextActive,
+    isDtsContextText,
     isOpenCodeHookInput,
     loadState,
     normalizeKey,
@@ -1661,6 +1840,7 @@ if (require.main === module) {
     releaseFileLock,
     saveState,
     writeDiagnosticLog,
+    updateDtsContextFromInput,
     shouldEmitCodeDriftNotice,
     markCodeDriftNoticeEmitted,
     markCodeReviewNoEditConfirmation,

@@ -288,6 +288,19 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "no-sdd-workspace")
+    const state = hook.emptyState()
+    const code = path.join(cwd, "src", "app.ts")
+    write(code, "export const value = 1\n")
+
+    hook.recordFile(state, code, true)
+    assert.strictEqual(hook.hasSddWorkspace(cwd), false)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    assert.deepStrictEqual(hook.drift(cwd, code, state), [])
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "code")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "epsilon")
@@ -322,6 +335,28 @@ try {
     assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].unsynced, ["tasks.md"])
     edit(state, tasks)
     assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "dts-context")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "rho")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "app.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    assert.strictEqual(
+      hook.updateDtsContextFromInput(state, { message: "这是 DTS 问题单修改，只修代码" }, null),
+      true
+    )
+    assert.strictEqual(hook.isDtsContextActive(state), true)
+    hook.recordFile(state, code, true)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    assert.deepStrictEqual(hook.drift(cwd, code, state), [])
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
   }
 
   {
