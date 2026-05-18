@@ -3,12 +3,16 @@ const fs = require("fs")
 const os = require("os")
 const path = require("path")
 
-const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i
+const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i
 const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
 const STRICT_BLOCK = process.env.SDD_DRIFT_STRICT === "1"
 const DEBUG = process.env.SDD_DRIFT_DEBUG === "1"
 const OUTPUT_MODE = String(process.env.SDD_DRIFT_OUTPUT || "").toLowerCase()
 const STOP_MAX_BLOCKS = Number.parseInt(process.env.SDD_DRIFT_STOP_MAX_BLOCKS || "2", 10)
+const CODE_REVIEW_STOP_MAX_BLOCKS = Number.parseInt(
+  process.env.SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS || "1",
+  10
+)
 const DIAGNOSTIC_LOG = process.env.SDD_DRIFT_LOG !== "0"
 const DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
   process.env.SDD_DRIFT_LOG_MAX_BYTES || String(2 * 1024 * 1024),
@@ -20,6 +24,10 @@ const DIAGNOSTIC_LOG_RETENTION_DAYS = Number.parseFloat(
 const DTS_CONTEXT_SKIP = process.env.SDD_DRIFT_DTS_SKIP !== "0"
 const DTS_CONTEXT_OVERRIDE = String(process.env.SDD_DRIFT_DTS_CONTEXT || "").toLowerCase()
 const TOOL_EVENT_CAP = 200
+const TRANSCRIPT_EVENT_CAP = Number.parseInt(
+  process.env.SDD_DRIFT_TRANSCRIPT_EVENT_CAP || "2000",
+  10
+)
 const CODE_REVIEW_CONFIRMATION_CAP = 50
 const DTS_CONTEXT_TEXT_MAX_BYTES = 512 * 1024
 const DEFAULT_LOCK_STALE_MS = 5 * 60 * 1000
@@ -385,6 +393,7 @@ const emptyState = () => ({
   codeDriftNotice: null,
   peerDriftNotice: null,
   codeReviewConfirmations: {},
+  transcriptEvents: {},
   dtsContext: null,
 })
 
@@ -420,6 +429,10 @@ const normalizeState = (parsed) => {
   state.codeReviewConfirmations =
     parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object"
       ? parsed.codeReviewConfirmations
+      : {}
+  state.transcriptEvents =
+    parsed.transcriptEvents && typeof parsed.transcriptEvents === "object"
+      ? parsed.transcriptEvents
       : {}
   state.dtsContext =
     parsed.dtsContext && typeof parsed.dtsContext === "object" ? parsed.dtsContext : null
@@ -740,6 +753,23 @@ const markToolEvent = (state, eventKey) => {
   return true
 }
 
+const markTranscriptEvent = (state, eventKey) => {
+  if (!eventKey) return true
+  if (state.transcriptEvents[eventKey]) return false
+
+  state.transcriptEvents[eventKey] = Date.now()
+  const entries = Object.entries(state.transcriptEvents)
+  if (entries.length > TRANSCRIPT_EVENT_CAP) {
+    entries
+      .sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0))
+      .slice(0, entries.length - TRANSCRIPT_EVENT_CAP)
+      .forEach(([key]) => {
+        delete state.transcriptEvents[key]
+      })
+  }
+  return true
+}
+
 const recordFile = (state, fp, edited) => {
   const abs = path.normalize(path.resolve(fp))
   const key = normalizeKey(abs)
@@ -858,6 +888,16 @@ const transcriptToolRecords = (entry) => {
     add(transcriptToolResultRecord(entry, null))
   }
   return records
+}
+
+const transcriptToolEventKey = (record, lineIndex, recordIndex) => {
+  if (record?.id) return `id:${record.id}`
+  return `pos:${lineIndex}:${recordIndex}:${hash(
+    JSON.stringify({
+      name: String(record?.name || "").toLowerCase(),
+      input: record?.input || {},
+    })
+  )}`
 }
 
 const getRequirementBucket = (state, dir, create) => {
@@ -1014,7 +1054,9 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
     return false
   }
 
-  for (const line of content.split(/\r?\n/)) {
+  const lines = content.split(/\r?\n/)
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex]
     if (!line.trim()) continue
 
     let entry
@@ -1024,7 +1066,9 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
       continue
     }
 
-    for (const record of transcriptToolRecords(entry)) {
+    const records = transcriptToolRecords(entry)
+    for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
+      const record = records[recordIndex]
       if (record.source === "tool_use" && record.id && !record.completed) {
         pendingToolUses.set(record.id, record)
         continue
@@ -1041,11 +1085,10 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
       if (finalRecord.failed) continue
       if (finalRecord.source === "tool_use" && !finalRecord.completed) continue
 
-      const key =
-        finalRecord.id ||
-        `${String(finalRecord.name || "").toLowerCase()}:${JSON.stringify(finalRecord.input || {})}`
+      const key = transcriptToolEventKey(finalRecord, lineIndex, recordIndex)
       if (seen.has(key)) continue
       seen.add(key)
+      if (!markTranscriptEvent(state, key)) continue
       if (applyToolRecord(cwd, state, finalRecord.name, finalRecord.input)) changed = true
     }
   }
@@ -1502,7 +1545,12 @@ const refreshReport = (cwd, state) => {
 
   if (lines.length) {
     try {
-      writeTextAtomic(reportPath, "## " + new Date().toISOString() + "\n" + lines.join("\n") + "\n")
+      const body = lines.join("\n") + "\n"
+      try {
+        const existing = fs.readFileSync(reportPath, "utf8")
+        if (existing.replace(/^## .*\r?\n/, "") === body) return
+      } catch {}
+      writeTextAtomic(reportPath, "## " + new Date().toISOString() + "\n" + body)
     } catch {}
     return
   }
@@ -1638,7 +1686,12 @@ const main = async () => {
 
     refreshReport(cwd, state)
 
-    const maxBlocks = Number.isFinite(STOP_MAX_BLOCKS) ? Math.max(0, STOP_MAX_BLOCKS) : 2
+    const configuredMaxBlocks = pending.type === "code" ? CODE_REVIEW_STOP_MAX_BLOCKS : STOP_MAX_BLOCKS
+    const maxBlocks = Number.isFinite(configuredMaxBlocks)
+      ? Math.max(0, configuredMaxBlocks)
+      : pending.type === "code"
+        ? 1
+        : 2
     const blockCount = state.stopBlocks[pending.signature] || 0
     if (blockCount >= maxBlocks) {
       saveState(cwd, sessionID, state)

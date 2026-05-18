@@ -6,6 +6,8 @@
     "test": "node ./scripts/test-hook.cjs",
     "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-e2e.ps1",
     "e2e:real": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-real-e2e.ps1",
+    "e2e:real:snake": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-snake-real.ps1",
+    "e2e:real:silent": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-silent-real.ps1",
     "fake-openai": "node ./fake-openai-server.mjs",
     "opencode": "opencode"
   },

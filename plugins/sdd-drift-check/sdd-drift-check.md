@@ -78,6 +78,12 @@ For `Stop`, the hook can hydrate state from Claude Code-style transcript JSONL
 by pairing assistant `tool_use` records with successful user `tool_result`
 records. Failed tool results are ignored so an attempted but unsuccessful write
 does not create a false drift requirement.
+Transcript hydration is persisted per session, so repeated `Stop` events do not
+replay the same historical tools and change the pending signature. Code-review
+Stop reminders default to one block via `SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS`
+because code-ahead-of-doc review is a human-confirmable checkpoint, not a hard
+peer-document synchronization requirement. Peer-document sync still uses
+`SDD_DRIFT_STOP_MAX_BLOCKS` and defaults to two blocks.
 
 The hook also writes a lightweight JSONL diagnostic log by default:
 
@@ -207,6 +213,11 @@ SDD documents have both been read. This makes the signal survive long tasks and
 context compaction without looping after the model has already reviewed the
 documents.
 
+Frontend entry files are treated as code too. This includes `html` and `css`
+alongside JavaScript, TypeScript, framework files, and common backend/source
+extensions, so single-file browser prototypes such as `index.html` still trigger
+the code-ahead-of-doc review checkpoint.
+
 DTS issue fixes are treated as an operational exception to code-ahead-of-doc
 drift. Because DTS cannot be identified reliably from file paths, the hook only
 skips this review when the hook-visible context contains markers such as
@@ -231,10 +242,18 @@ leave both documents unchanged if review shows they already match the code. That
 no-edit path is not hard-blocked: the hook allows the turn to finish and writes a
 `.sdd-drift-report.md` note asking the user to confirm whether documentation
 really should remain unchanged.
+If the report contents are unchanged on a later unrelated hook pass, the hook
+does not rewrite the report just to refresh the timestamp.
 When it does edit an SDD document, the injected prompt explicitly asks it to
 keep existing Markdown headings, preserve the top-level template title, avoid
 single-line summary replacement, and update the closest existing paragraph or
 task item instead of adding new sections.
+
+For unrelated files, "silent" means the hook may still append diagnostic log
+records such as `hook_start`, `posttooluse_no_output`, or
+`stop_allow_no_pending`, but it must not return model-visible enforcement or
+reminder text and must not rewrite `.sdd-drift-report.md` when the report body
+is unchanged.
 
 When the environment supports subagents and the current project allows them, the
 prompt suggests using a read-only subagent for SDD review. This is optional:
@@ -267,6 +286,13 @@ Real model checks:
 npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode stop-only
 npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode posttooluse-and-stop
 npm run e2e:real -- -Provider minimax -Scenario design-cascade -HookMode posttooluse-and-stop
+```
+
+Real OpenCode workflow and silent-regression checks:
+
+```powershell
+npm run e2e:real:snake -- -Provider deepseek
+npm run e2e:real:silent -- -Provider deepseek
 ```
 
 Claude Code companion checks are under `test/claude-code-sdd-drift-e2e`.

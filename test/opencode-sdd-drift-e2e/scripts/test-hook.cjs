@@ -338,6 +338,35 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "frontend-html-code")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "epsilon-html")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const html = path.join(cwd, "index.html")
+    const css = path.join(cwd, "src", "styles.css")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(html, "<!doctype html><script>console.log('snake')</script>\n")
+    write(css, "body { margin: 0; }\n")
+
+    hook.recordFile(state, html, true)
+    let codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    assert.match(hook.buildCodeEnforcement(cwd, codeGaps), /index\.html/)
+
+    hook.recordFile(state, design, false)
+    hook.recordFile(state, tasks, false)
+    assert.strictEqual(hook.markStopCodeReviewConfirmation(state, hook.buildPendingEnforcement(cwd, state)), true)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+
+    hook.recordFile(state, css, true)
+    codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    assert.match(hook.buildCodeEnforcement(cwd, codeGaps), /src\/styles\.css/)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "dts-context")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "rho")
@@ -387,6 +416,84 @@ try {
     assert.match(reportLines, /reviewed SDD document\(s\) after code change/)
     assert.match(reportLines, /User confirmation recommended/)
     assert.match(reportLines, /src\/app\.ts/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "report-idempotent")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "eta-report")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "app.ts")
+    const report = path.join(cwd, ".sdd-drift-report.md")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    hook.recordFile(state, code, true)
+    hook.recordFile(state, design, false)
+    hook.recordFile(state, tasks, false)
+    assert.strictEqual(hook.markStopCodeReviewConfirmation(state, hook.buildPendingEnforcement(cwd, state)), true)
+    hook.refreshReport(cwd, state)
+    const first = fs.readFileSync(report, "utf8")
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    hook.refreshReport(cwd, state)
+    assert.strictEqual(fs.readFileSync(report, "utf8"), first)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "transcript-hydration-idempotent")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "ticket")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "app.ts")
+    const transcript = path.join(cwd, "transcript.jsonl")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+    write(
+      transcript,
+      [
+        {
+          part: {
+            type: "tool",
+            id: "call-code-write",
+            name: "write",
+            state: { status: "completed", input: { filePath: code } },
+          },
+        },
+        {
+          part: {
+            type: "tool",
+            id: "call-design-read",
+            name: "read",
+            state: { status: "completed", input: { filePath: design } },
+          },
+        },
+        {
+          part: {
+            type: "tool",
+            id: "call-tasks-read",
+            name: "read",
+            state: { status: "completed", input: { filePath: tasks } },
+          },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n") + "\n"
+    )
+
+    assert.strictEqual(hook.hydrateStateFromTranscript(cwd, state, transcript), true)
+    const clockAfterFirstHydration = state.clock
+    const pending = hook.buildPendingEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "code")
+    assert.strictEqual(pending.gaps[0].needsConfirmation, true)
+    assert.strictEqual(hook.hydrateStateFromTranscript(cwd, state, transcript), false)
+    assert.strictEqual(state.clock, clockAfterFirstHydration)
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state).signature, pending.signature)
+    assert.strictEqual(hook.markStopCodeReviewConfirmation(state, pending), true)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
   }
 
   {

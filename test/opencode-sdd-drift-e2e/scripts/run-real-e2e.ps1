@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
   [string]$Scenario = "design-cascade",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -339,8 +339,9 @@ if ($Scenario -eq "dts-code") {
   Remove-Item Env:\SDD_DRIFT_DTS_CONTEXT -ErrorAction SilentlyContinue
 }
 
-$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeNoDocScenario = $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
+$isCodeReviewNoEditScenario = $Scenario -eq "code-no-doc-change"
 $isNoPeerScenario = $Scenario -eq "design-no-peer" -or $Scenario -eq "proposal-no-peer"
 $marker = if ($isCodeScenario) {
   "Real $Provider code drift verification $runId"
@@ -427,6 +428,26 @@ $prompt = if ($isStopOnly -and $isCodeScenario) {
     "3. Do not read or write sdd/changes/test-feat/design.md."
     "4. Do not read or write sdd/changes/test-feat/tasks.md."
     "Use only read and write tools. Finish after src/app.ts is updated."
+  ) -join " "
+} elseif ($Scenario -eq "code-no-doc-change") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Simulate a real development pass with multiple code-tool rounds before SDD review."
+    "Use this sequence exactly: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker-phase-1`"."
+    "3. Wait for the src/app.ts write tool result and inspect that tool result text, but do not review or edit SDD yet."
+    "4. Read src/helper.ts."
+    "5. Write src/helper.ts so it contains this exact string literal: `"$helperMarker`"."
+    "6. Wait for the src/helper.ts write tool result and inspect that tool result text, but still do not review or edit SDD yet."
+    "7. Read src/app.ts again."
+    "8. Write src/app.ts so it contains this exact string literal: `"$codeMarker-final`"."
+    "9. Wait for the final src/app.ts write tool result and inspect that tool result text."
+    "10. If any code write tool result contains `"SDD drift tool result enforcement`" or `"SDD drift reminder`", read sdd/changes/test-feat/design.md."
+    "11. Then read sdd/changes/test-feat/tasks.md."
+    "12. After reviewing both SDD files, do not edit any SDD document because this validation intentionally needs no document change."
+    "13. Finish with this exact sentence: SDD docs reviewed; no document edit needed."
+    "Use only read and write tools. Do not write proposal.md, design.md, or tasks.md."
   ) -join " "
 } elseif ($Scenario -eq "multi-code-cascade") {
   @(
@@ -582,13 +603,13 @@ if ($Scenario -eq "proposal-no-peer") {
   if (Test-Path -LiteralPath $tasksPath) {
     throw "expected tasks.md not to be created when proposal peer is absent"
   }
-} elseif (!$isCodeNoDocScenario -and $designText -notmatch [regex]::Escape($marker)) {
+} elseif (!$isCodeNoDocScenario -and !$isCodeReviewNoEditScenario -and $designText -notmatch [regex]::Escape($marker)) {
   throw "expected design.md to contain real model marker"
 }
 if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
   throw "expected src/app.ts to contain real model code marker"
 }
-if ($Scenario -eq "multi-code-cascade" -and $helperText -notmatch [regex]::Escape($helperMarker)) {
+if (($Scenario -eq "multi-code-cascade" -or $Scenario -eq "code-no-doc-change") -and $helperText -notmatch [regex]::Escape($helperMarker)) {
   throw "expected src/helper.ts to contain real model helper marker"
 }
 if ($isNoPeerScenario) {
@@ -635,12 +656,40 @@ if ($Scenario -eq "multi-code-cascade") {
     throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
   }
 }
-if (!$isNoPeerScenario -and !$isCodeNoDocScenario -and $tasksText -notmatch [regex]::Escape($taskMarker)) {
+if ($Scenario -eq "code-no-doc-change") {
+  $codeEnforcementCount = [regex]::Matches(
+    $outText,
+    [regex]::Escape("SDD reconciliation review is now pending for this code-change batch")
+  ).Count
+  if ($codeEnforcementCount -ne 1) {
+    throw "expected exactly one full code drift enforcement for no-doc-change, got $codeEnforcementCount"
+  }
+  $compactCodeReminderCount = [regex]::Matches(
+    $outText,
+    [regex]::Escape("implementation code still has pending SDD review for this code-change batch")
+  ).Count
+  if ($compactCodeReminderCount -lt 1) {
+    throw "expected compact code drift reminder after repeated code tool calls"
+  }
+  if ($designText -match [regex]::Escape($marker)) {
+    throw "expected design.md not to be updated when SDD review finds no document change is needed"
+  }
+  if ($tasksText -match [regex]::Escape($taskMarker)) {
+    throw "expected tasks.md not to be updated when SDD review finds no document change is needed"
+  }
+  if ($reportText -notmatch "User confirmation recommended") {
+    throw "expected no-edit SDD review to leave a human confirmation report"
+  }
+  if ($reportText -notmatch "src/app\.ts" -or $reportText -notmatch "src/helper\.ts") {
+    throw "expected no-edit confirmation report to include all changed code files"
+  }
+}
+if (!$isNoPeerScenario -and !$isCodeNoDocScenario -and !$isCodeReviewNoEditScenario -and $tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain real model synchronization marker"
 }
 if ($errText -match "\[sdd-drift-check\]") {
   throw "expected no hook stderr output by default"
 }
-if ($reportText.Trim().Length -gt 0) {
+if ($Scenario -ne "code-no-doc-change" -and $reportText.Trim().Length -gt 0) {
   throw "expected no drift report after successful real-model synchronization"
 }

@@ -65,6 +65,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\run-sdd-drift-real-matr
 The real matrix runs both OpenCode and Claude Code harnesses against DeepSeek
 and MiniMax when those providers are configured locally.
 
+OpenCode real-workflow validation:
+
+```powershell
+cd test\opencode-sdd-drift-e2e
+npm run e2e:real:snake -- -Provider deepseek
+npm run e2e:real:silent -- -Provider deepseek
+```
+
+The silent check reuses the latest generated Snake workroot and verifies that
+unrelated scratch-file reads/writes do not emit model-visible SDD reminders and
+do not rewrite an unchanged `.sdd-drift-report.md`.
+
 ## Local Secrets
 
 Provider keys and generated real-model workspaces are local-only. The test
