@@ -8,6 +8,7 @@ const logPath = path.resolve(process.env.FAKE_LOG_PATH || "fake-openai.log")
 const readyPath = path.resolve(process.env.FAKE_READY_PATH || "fake-openai.ready")
 let requestCount = 0
 let toolStage = 0
+const isCodeScenario = scenario === "code" || scenario === "code-no-doc-change"
 
 const messageText = (messages) =>
   (messages || [])
@@ -61,11 +62,11 @@ const completionChunk = (delta, finishReason = null) => ({
 })
 
 const target =
-  scenario === "code"
+  isCodeScenario
     ? "src/app.ts"
     : "sdd/changes/test-feat/design.md"
 const targetContent =
-  scenario === "code"
+  isCodeScenario
     ? "export function greet(name: string) {\n  return \"hi \" + name\n}\n"
     : "# Design\n\nEdited by fake opencode model.\n"
 const toolArguments = JSON.stringify({
@@ -110,8 +111,11 @@ const server = http.createServer(async (request, response) => {
   const payload = JSON.parse(body)
   requestCount += 1
   const toolNames = (payload.tools || []).map((tool) => tool.function?.name || tool.name)
-  const toolText = messageText((payload.messages || []).filter((message) => message.role === "tool"))
+  const toolMessages = (payload.messages || []).filter((message) => message.role === "tool")
+  const toolText = messageText(toolMessages)
+  const lastToolText = messageText(toolMessages.slice(-1))
   const hasToolEnforcement = toolText.includes("SDD drift tool result enforcement")
+  const lastToolHasToolEnforcement = lastToolText.includes("SDD drift tool result enforcement")
   const hasCodeEnforcement =
     toolText.includes("changed code") ||
     toolText.includes("code changed") ||
@@ -122,6 +126,7 @@ const server = http.createServer(async (request, response) => {
     stream: payload.stream,
     toolNames,
     hasToolEnforcement,
+    lastToolHasToolEnforcement,
     hasCodeEnforcement,
     messageRoles: (payload.messages || []).map((message) => message.role),
   })
@@ -199,7 +204,7 @@ const server = http.createServer(async (request, response) => {
     )
     sse(response, completionChunk({}, "tool_calls"))
   } else if (
-    scenario === "code" &&
+    isCodeScenario &&
     hasToolEnforcement &&
     toolNames.includes("write") &&
     toolStage === 2
@@ -230,6 +235,44 @@ const server = http.createServer(async (request, response) => {
             index: 0,
             function: {
               arguments: designArguments,
+            },
+          },
+        ],
+      }),
+    )
+    sse(response, completionChunk({}, "tool_calls"))
+  } else if (
+    scenario === "code-no-doc-change" &&
+    hasToolEnforcement &&
+    toolNames.includes("write") &&
+    toolStage === 3
+  ) {
+    toolStage += 1
+    sse(response, completionChunk({ role: "assistant" }))
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call_read_tasks_after_code",
+            type: "function",
+            function: {
+              name: "read",
+              arguments: "",
+            },
+          },
+        ],
+      }),
+    )
+    sse(
+      response,
+      completionChunk({
+        tool_calls: [
+          {
+            index: 0,
+            function: {
+              arguments: readTasksArguments,
             },
           },
         ],
@@ -359,6 +402,8 @@ const server = http.createServer(async (request, response) => {
           (scenario === "sdd-cascade" && toolStage >= 4) ||
           (scenario === "code" && toolStage >= 6)
             ? "Design and tasks files updated."
+            : scenario === "code-no-doc-change" && toolStage >= 4
+              ? "SDD docs reviewed; no document edit needed."
             : "Design file updated.",
       }),
     )

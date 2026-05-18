@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("sdd-design", "sdd-cascade", "code")]
+  [ValidateSet("sdd-design", "sdd-cascade", "code", "code-no-doc-change")]
   [string]$Scenario = "sdd-design",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -320,7 +320,7 @@ try {
 
   $env:HOME = $opencodeHome
   $env:USERPROFILE = $opencodeHome
-  $prompt = if ($Scenario -eq "code") {
+  $prompt = if ($Scenario -eq "code" -or $Scenario -eq "code-no-doc-change") {
     "Use the read tool, then the write tool, to update src/app.ts only."
   } else {
     "Use the read tool, then the write tool, to update sdd/changes/test-feat/design.md only."
@@ -483,7 +483,7 @@ if ($Scenario -eq "sdd-cascade") {
   if ($reportText -notmatch "unsynced in this session \[tasks.md\]") {
     throw "expected unresolved SDD drift report for unsynchronized tasks.md"
   }
-} elseif ($Scenario -eq "code") {
+} elseif ($Scenario -eq "code" -or $Scenario -eq "code-no-doc-change") {
   $fakeLogText = if (Test-Path -LiteralPath $fakeLog) {
     $content = Get-Content -LiteralPath $fakeLog -Raw
     if ($null -eq $content) { "" } else { $content }
@@ -495,6 +495,34 @@ if ($Scenario -eq "sdd-cascade") {
   }
   if ($fakeLogText -notmatch '"hasCodeEnforcement":true') {
     throw "expected code edit to inject code drift review enforcement"
+  }
+  $appText = Get-Content -LiteralPath (Join-Path $root "src\app.ts") -Raw
+  if ($appText -notmatch 'return "hi " \+ name') {
+    throw "expected code file to be updated"
+  }
+  if ($Scenario -eq "code-no-doc-change") {
+    $designText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md") -Raw
+    if ($designText -match "Synced by fake opencode model after code drift enforcement") {
+      throw "expected no design.md edit when review finds no SDD change is needed"
+    }
+    $tasksText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\tasks.md") -Raw
+    if ($tasksText -match "Synced by fake opencode model") {
+      throw "expected no tasks.md edit when review finds no SDD change is needed"
+    }
+    $enforcementCount = ([regex]::Matches($fakeLogText, '"lastToolHasToolEnforcement":true')).Count
+    if ($enforcementCount -ne 2) {
+      throw "expected code no-doc-change to stop reinjecting after both SDD docs are read, got $enforcementCount"
+    }
+    $reportText = if (Test-Path -LiteralPath $report) {
+      $content = Get-Content -LiteralPath $report -Raw
+      if ($null -eq $content) { "" } else { $content }
+    } else {
+      ""
+    }
+    if ($reportText -notmatch "User confirmation recommended") {
+      throw "expected no-edit SDD review to leave a human confirmation report"
+    }
+    return
   }
   $designText = Get-Content -LiteralPath (Join-Path $root "sdd\changes\test-feat\design.md") -Raw
   if ($designText -notmatch "Synced by fake opencode model after code drift enforcement") {

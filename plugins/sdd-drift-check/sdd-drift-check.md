@@ -200,20 +200,23 @@ not create duplicate enforcement or design/tasks ping-pong.
 
 Code-ahead-of-doc drift is batched at session level. The first code edit that
 gets ahead of SDD emits a full model-visible deferred review reminder. Later
-tool calls in the same unreviewed batch emit compact reminders, which makes the
-signal survive long tasks and context compaction. `Read` events are only treated
-as prerequisite evidence that the documents entered context; they do not by
-themselves clear the batch.
+tool calls in the same unreviewed batch emit compact reminders until the listed
+SDD documents have both been read. This makes the signal survive long tasks and
+context compaction without looping after the model has already reviewed the
+documents.
 
 The batch clears after either:
 
 - the latest code change is followed by an actual SDD edit and peer rules are
   satisfied; or
-- both relevant `design.md` and `tasks.md` have been read, then `Stop` records a
-  review-confirmation marker in hook state for the current code batch.
+- both relevant `design.md` and `tasks.md` have been read, then the hook records
+  a no-edit review-confirmation marker in hook state for the current code batch.
 
 The model should update only the documents that actually need changes; it may
-leave both documents unchanged if review shows they already match the code.
+leave both documents unchanged if review shows they already match the code. That
+no-edit path is not hard-blocked: the hook allows the turn to finish and writes a
+`.sdd-drift-report.md` note asking the user to confirm whether documentation
+really should remain unchanged.
 When it does edit an SDD document, the injected prompt explicitly asks it to
 keep existing Markdown headings, preserve the top-level template title, avoid
 single-line summary replacement, and update the closest existing paragraph or
@@ -241,6 +244,7 @@ npm test
 npm run e2e -- -Scenario sdd-design
 npm run e2e -- -Scenario sdd-cascade
 npm run e2e -- -Scenario code
+npm run e2e -- -Scenario code-no-doc-change
 ```
 
 Real model checks:

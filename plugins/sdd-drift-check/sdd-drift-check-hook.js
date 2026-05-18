@@ -18,6 +18,7 @@ const DIAGNOSTIC_LOG_RETENTION_DAYS = Number.parseFloat(
   process.env.SDD_DRIFT_LOG_RETENTION_DAYS || "3"
 )
 const TOOL_EVENT_CAP = 200
+const CODE_REVIEW_CONFIRMATION_CAP = 50
 const DEFAULT_LOCK_STALE_MS = 5 * 60 * 1000
 const STATE_LOCK_STALE_MS = 30 * 1000
 const STATE_LOCK_WAIT_MS = 5 * 1000
@@ -1122,7 +1123,7 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
       "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
       "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
       "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
-      "After both documents have been reviewed, the Stop hook records the review confirmation marker.",
+      "After both documents have been reviewed, you may finish normally; the hook records the no-edit review decision and leaves a human confirmation note.",
       SUBAGENT_REVIEW_RULE,
     ].join("\n")
   }
@@ -1136,7 +1137,7 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
     "Continue implementation work if more code changes are still required.",
     "When the implementation for this task is complete, and before any final answer, use the read tool to review the relevant design.md and tasks.md files.",
     "After review, update only the SDD document(s) that actually need changes. It is valid to leave design.md and/or tasks.md unchanged when the review shows they already match the code.",
-    "If no SDD document needs changes, do not create a no-op edit; continue to the final response after making that decision so the Stop hook can record the review confirmation marker.",
+    "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
     "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
     ...DOCUMENT_SYNC_RULES,
     "Do not create a no-op edit or add a new section just to satisfy this hook.",
@@ -1188,7 +1189,7 @@ const markPeerDriftNoticeEmitted = (state, peerGaps) => {
 }
 
 const shouldEmitCodeDriftNotice = (state, codeGaps) =>
-  codeGaps.length > 0
+  codeGaps.some((gap) => !gap.reviewReady)
 
 const markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
   if (!codeGaps.length) return
@@ -1198,6 +1199,52 @@ const markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
     signature: hash(JSON.stringify(codeGaps.map((gap) => serializableCodeGap(cwd, gap)))),
     emittedAt: new Date().toISOString(),
   }
+}
+
+const pruneCodeReviewConfirmations = (state) => {
+  const entries = Object.entries(state.codeReviewConfirmations || {})
+  if (entries.length <= CODE_REVIEW_CONFIRMATION_CAP) return
+
+  entries
+    .sort((left, right) => {
+      const leftAt = Date.parse(left[1]?.confirmedAt || left[1]?.requestedAt || 0) || 0
+      const rightAt = Date.parse(right[1]?.confirmedAt || right[1]?.requestedAt || 0) || 0
+      return leftAt - rightAt
+    })
+    .slice(0, entries.length - CODE_REVIEW_CONFIRMATION_CAP)
+    .forEach(([key]) => {
+      delete state.codeReviewConfirmations[key]
+    })
+}
+
+const markCodeReviewNoEditConfirmation = (state, gaps) => {
+  if (!gaps.length || !gaps.every((gap) => gap.needsConfirmation && gap.reviewReady)) return false
+
+  let confirmed = true
+  for (const gap of gaps) {
+    const signature = gap.reviewSignature
+    if (!signature) {
+      confirmed = false
+      continue
+    }
+
+    const existing = state.codeReviewConfirmations[signature] || {}
+    state.codeReviewConfirmations[signature] = {
+      ...existing,
+      requested: true,
+      requestedAt: existing.requestedAt || new Date().toISOString(),
+      confirmed: true,
+      confirmedAt: new Date().toISOString(),
+      codeSeq: gap.latestCodeSeq || 0,
+      codeFiles: (gap.codeFiles || []).map((file) => file.path || file),
+      reviewTargets: gap.reviewTargets || [],
+      noSddEdit: true,
+      userConfirmationRecommended: true,
+    }
+  }
+
+  pruneCodeReviewConfirmations(state)
+  return confirmed
 }
 
 const buildPendingEnforcement = (cwd, state, options = {}) => {
@@ -1227,36 +1274,7 @@ const buildPendingEnforcement = (cwd, state, options = {}) => {
 
 const markStopCodeReviewConfirmation = (state, pending) => {
   if (pending?.type !== "code") return false
-  const gaps = pending.gaps || []
-  if (!gaps.length || !gaps.every((gap) => gap.needsConfirmation && gap.reviewReady)) return false
-
-  let confirmed = true
-  for (const gap of gaps) {
-    const signature = gap.reviewSignature
-    if (!signature) {
-      confirmed = false
-      continue
-    }
-
-    const existing = state.codeReviewConfirmations[signature] || {}
-    if (existing.requested && !existing.confirmed) {
-      state.codeReviewConfirmations[signature] = {
-        ...existing,
-        confirmed: true,
-        confirmedAt: new Date().toISOString(),
-      }
-      continue
-    }
-
-    state.codeReviewConfirmations[signature] = {
-      requested: true,
-      requestedAt: new Date().toISOString(),
-      codeSeq: gap.latestCodeSeq || 0,
-    }
-    confirmed = false
-  }
-
-  return confirmed
+  return markCodeReviewNoEditConfirmation(state, pending.gaps || [])
 }
 
 const buildStopEnforcement = (pendingMessage) =>
@@ -1272,6 +1290,24 @@ const buildStopEnforcement = (pendingMessage) =>
     "For peer-sync gaps, use read, then edit or write, to synchronize the listed SDD document(s) before trying to stop again.",
   ].join("\n")
 
+const collectCodeReviewAdvisoryLines = (cwd, state) =>
+  Object.values(state.codeReviewConfirmations || {})
+    .filter((confirmation) => confirmation?.confirmed && confirmation?.userConfirmationRecommended)
+    .sort((left, right) => {
+      const leftSeq = Number(left.codeSeq || 0)
+      const rightSeq = Number(right.codeSeq || 0)
+      return rightSeq - leftSeq
+    })
+    .map((confirmation) => {
+      const codeList = (confirmation.codeFiles || [])
+        .map((file) => rel(cwd, file))
+        .join(", ")
+      const reviewList = (confirmation.reviewTargets || [])
+        .map((file) => rel(cwd, file))
+        .join(", ")
+      return `  - reviewed SDD document(s) after code change(s) [${codeList || "unknown"}] and made no SDD edits. User confirmation recommended for: ${reviewList || "design.md, tasks.md"}`
+    })
+
 const collectReportLines = (cwd, state) => {
   const lines = collectPeerGaps(cwd, state, { includeStageOnly: false }).map((gap) => `  - ${formatGap(gap)}`)
 
@@ -1285,6 +1321,7 @@ const collectReportLines = (cwd, state) => {
     )
   }
 
+  lines.push(...collectCodeReviewAdvisoryLines(cwd, state))
   return lines
 }
 
@@ -1503,7 +1540,12 @@ const main = async () => {
   const peerGaps = collectPeerGaps(cwd, state)
   const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
   const stagePeerGaps = collectPeerGaps(cwd, state, { includeHard: false })
-  const codeGaps = collectCodeGaps(cwd, state)
+  let codeGaps = collectCodeGaps(cwd, state)
+  const codeReviewNoEditConfirmed =
+    !hardPeerGaps.length && markCodeReviewNoEditConfirmation(state, codeGaps)
+  if (codeReviewNoEditConfirmed) {
+    codeGaps = collectCodeGaps(cwd, state)
+  }
   const noticePeerGaps = hardPeerGaps.length ? hardPeerGaps : stagePeerGaps
   clearPeerDriftNoticeIfResolved(state, noticePeerGaps)
   clearCodeDriftNoticeIfResolved(state, codeGaps)
@@ -1560,7 +1602,9 @@ const main = async () => {
     emitEnforcement(input, warnings.join("\n"))
   } else {
     writeDiagnosticLog(cwd, {
-      event: "posttooluse_no_output",
+      event: codeReviewNoEditConfirmed
+        ? "posttooluse_code_review_no_edit_confirmed"
+        : "posttooluse_no_output",
       input: summarizeInput(input),
       file: rel(cwd, abs),
       tool,
@@ -1619,6 +1663,7 @@ if (require.main === module) {
     writeDiagnosticLog,
     shouldEmitCodeDriftNotice,
     markCodeDriftNoticeEmitted,
+    markCodeReviewNoEditConfirmation,
     markStopCodeReviewConfirmation,
     updateRequirementsForEdit,
   }
