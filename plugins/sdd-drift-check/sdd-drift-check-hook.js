@@ -55,6 +55,8 @@ const DOCUMENT_SYNC_RULES = [
   "Keep every existing heading line exactly as-is, including the top-level title such as # Design or # Tasks, and keep the original heading order.",
   "Do not replace the whole document with a summary, marker, or single-line result.",
   "Do not add a new section or rewrite the template just to satisfy this enforcement.",
+  "For existing SDD documents, prefer Edit or MultiEdit. If Write is necessary, write the full document including all existing headings and template text.",
+  "Do not edit design.md and tasks.md in the same parallel tool batch; update one SDD document, wait for its tool result and hook feedback, then update the required peer.",
   "Find the most appropriate existing heading, paragraph, list item, or task item, and make the smallest needed update there.",
   "For tasks.md, preserve the task-list format and update the relevant existing checklist item when possible.",
 ]

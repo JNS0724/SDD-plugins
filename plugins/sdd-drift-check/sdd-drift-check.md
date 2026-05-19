@@ -4,8 +4,9 @@ OpenCode / Claude Code compatible hook for SDD drift checks.
 
 ## Current Status
 
-`PostToolUse` is now optional. The checked-in default config only enables
-`Stop`, so the UI does not get tool-result enforcement text unless you opt in.
+`PostToolUse` is now optional. The checked-in default config enables
+`UserPromptSubmit` for silent context capture and `Stop` for final checks, so
+the UI does not get tool-result enforcement text unless you opt in.
 
 ## Runtime Environment
 
@@ -51,7 +52,7 @@ The hook does not use `console.error`, `messages.transform`, or
 | peer file synced later in the same session | Clears the gap and does not create a reverse ping-pong requirement |
 | normal code changed without later SDD review | Emits deferred reminders to review relevant `design.md` and `tasks.md` before the final answer |
 | many code files changed in one turn | Keeps accumulating changed files and emits bounded compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
-| DTS / issue-ticket context | Skips code-ahead-of-doc review reminders; issue context is inferred from hook-visible prompt/message/transcript text or forced with `SDD_DRIFT_DTS_CONTEXT=1` |
+| DTS / issue-ticket context | Skips code-ahead-of-doc review reminders; Claude Code captures prompt context through `UserPromptSubmit`, native OpenCode captures it through `chat.message`, and any runtime can force it with `SDD_DRIFT_DTS_CONTEXT=1` |
 | code only affects task progress | Allows a tasks-only update, or no document edit, after both `design.md` and `tasks.md` have been reviewed |
 | model ignores constraints and stops | Writes `.sdd-drift-report.md` for human review |
 
@@ -201,7 +202,8 @@ Create `.opencode/oh-my-openagent.jsonc`:
 
 ### Claude Code Or Claude-Compatible Hook Config
 
-Default Stop-only config, with no `PostToolUse`:
+Default Stop-only config, with `UserPromptSubmit` context capture and no
+`PostToolUse`:
 
 ```powershell
 New-Item -ItemType Directory -Force .claude
@@ -212,6 +214,16 @@ New-Item -ItemType Directory -Force .claude
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "matcher": "*",
@@ -232,6 +244,16 @@ Reliable OpenCode cascade mode, with optional `PostToolUse` enabled:
 ```json
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Read|Edit|Write|MultiEdit",
@@ -283,15 +305,17 @@ DTS / issue-ticket fixes are treated as an operational exception to
 code-ahead-of-doc drift. Because issue-ticket work cannot be identified reliably
 from file paths, the hook only skips this review when hook-visible context
 contains markers such as `DTS`, `DTS问题单`, `issue ticket`, `bug fix`, `问题单修改`,
-or when `SDD_DRIFT_DTS_CONTEXT=1` is set for the session. In OpenCode native
-plugin mode, the adapter captures user messages through `chat.message` before
-later `tool.execute.after` events, so the issue-ticket marker can be persisted
-in hook state. In OpenCode through oh-my-opencode `PostToolUse`, current hook
-input can still be limited to hook/session/tool metadata, so prompt-based issue
-inference remains best effort there. For reliable OpenCode issue-ticket
-handling, set `SDD_DRIFT_DTS_CONTEXT=1` on that run. Set
-`SDD_DRIFT_DTS_SKIP=0` to disable this exception entirely. The exception does
-not disable peer synchronization after explicit SDD document edits.
+or when `SDD_DRIFT_DTS_CONTEXT=1` is set for the session. In Claude Code, enable
+the `UserPromptSubmit` hook so the original user request is captured before
+later `PostToolUse` events. In OpenCode native plugin mode, the adapter captures
+user messages through `chat.message` before later `tool.execute.after` events,
+so the issue-ticket marker can be persisted in hook state. In OpenCode through
+oh-my-opencode `PostToolUse`, current hook input can still be limited to
+hook/session/tool metadata, so prompt-based issue inference remains best effort
+there. For reliable OpenCode issue-ticket handling, set
+`SDD_DRIFT_DTS_CONTEXT=1` on that run. Set `SDD_DRIFT_DTS_SKIP=0` to disable this
+exception entirely. The exception does not disable peer synchronization after
+explicit SDD document edits.
 
 The batch clears after either:
 

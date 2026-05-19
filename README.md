@@ -51,6 +51,7 @@ It supports:
 - OpenCode native plugin hooks through `tool.execute.after` and `session.idle`.
 - OpenCode through `oh-my-opencode` hook bridging.
 - Claude Code compatible hook settings.
+- `UserPromptSubmit` context capture for Claude Code issue-ticket detection.
 - `PostToolUse` model-visible reminders for reliable OpenCode cascades.
 - `Stop` hook checks for Claude-compatible final review behavior.
 - Session-level batching for code changes before SDD reconciliation.

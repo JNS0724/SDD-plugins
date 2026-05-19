@@ -137,6 +137,17 @@ $settingsObject = [ordered]@{
     )
   }
   hooks = [ordered]@{
+    UserPromptSubmit = @(
+      [ordered]@{
+        hooks = @(
+          [ordered]@{
+            type = "command"
+            command = "node .claude/hooks/sdd-drift-check.js"
+            timeout = 10
+          }
+        )
+      }
+    )
     PostToolUse = @(
       [ordered]@{
         matcher = "Read|Edit|Write|MultiEdit"
@@ -191,10 +202,17 @@ $taskMarker = if ($isCodeScenario) {
 }
 $codeMarker = "claude-hi-$Provider-$runId"
 $helperMarker = "claude-helper-$Provider-$runId"
+$sddEditRules = @(
+  "Use one file-editing tool call at a time and wait for its tool result before the next write/edit."
+  "For existing SDD documents, preserve the top-level heading and template. design.md must keep '# Design'; tasks.md must keep '# Tasks'."
+  "Do not replace an SDD document with a single marker line."
+  "Do not edit design.md and tasks.md in the same parallel tool batch; update design.md, wait for hook feedback, then update tasks.md if requested."
+) -join " "
 
 $prompt = if ($Scenario -eq "multi-code-cascade") {
   @(
     "Execute this exact local file-editing validation task now."
+    $sddEditRules
     "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
     "Use this sequence exactly: 1. Read src/app.ts."
     "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
@@ -210,6 +228,7 @@ $prompt = if ($Scenario -eq "multi-code-cascade") {
 } elseif ($Scenario -eq "code-cascade") {
   @(
     "Execute this exact local file-editing validation task now."
+    $sddEditRules
     "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
     "Use this sequence: 1. Read src/app.ts."
     "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
@@ -222,6 +241,7 @@ $prompt = if ($Scenario -eq "multi-code-cascade") {
 } else {
   @(
     "Execute this exact local file-editing validation task now."
+    $sddEditRules
     "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
     "Use this sequence: 1. Read sdd/changes/test-feat/design.md."
     "2. Update the existing design.md content so it contains this exact text: $marker."
@@ -286,6 +306,9 @@ $combinedText = "$outText`n$errText"
 if ($designText -notmatch [regex]::Escape($marker)) {
   throw "expected design.md to contain real model marker"
 }
+if ($designText -notmatch "(?m)^#\s+Design\b") {
+  throw "expected design.md to preserve the # Design heading"
+}
 if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
   throw "expected src/app.ts to contain real model code marker"
 }
@@ -305,6 +328,9 @@ if ($Scenario -eq "multi-code-cascade") {
 }
 if ($tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain real model synchronization marker"
+}
+if ($tasksText -notmatch "(?m)^#\s+Tasks\b") {
+  throw "expected tasks.md to preserve the # Tasks heading"
 }
 if ($errText -match "\[sdd-drift-check\]") {
   throw "expected no hook stderr output by default"

@@ -57,8 +57,9 @@ The script uses Claude Code print mode with project settings only:
 claude --print --output-format stream-json --include-hook-events --setting-sources project
 ```
 
-The checked-in `.claude/settings.json` enables both `PostToolUse` and `Stop`.
-`PostToolUse` includes `Read` so the hook can verify SDD review, not just file
-edits. For Claude Code, `PostToolUse` returns `additionalContext`, and `Stop`
-returns `{"decision":"block","reason":"..."}` when synchronization or review is
-still missing.
+The checked-in `.claude/settings.json` enables `UserPromptSubmit`, `PostToolUse`,
+and `Stop`. `UserPromptSubmit` lets the hook persist issue-ticket context before
+later tool events. `PostToolUse` includes `Read` so the hook can verify SDD
+review, not just file edits. For Claude Code, `PostToolUse` returns
+`additionalContext`, and `Stop` returns `{"decision":"block","reason":"..."}`
+when synchronization or review is still missing.

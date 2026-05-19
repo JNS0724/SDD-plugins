@@ -409,6 +409,40 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "claude-user-prompt-submit-context")
+    const sessionID = "claude-issue-ticket"
+    const dir = path.join(cwd, "sdd", "changes", "rho-ticket-command")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "ticket-fix.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    const promptState = hook.emptyState()
+    assert.strictEqual(
+      hook.updateDtsContextFromInput(
+        promptState,
+        {
+          hook_event_name: "UserPromptSubmit",
+          session_id: sessionID,
+          cwd,
+          prompt: "Please fix this issue ticket by changing code only.",
+        },
+        null
+      ),
+      true
+    )
+    hook.saveState(cwd, sessionID, promptState)
+
+    const state = hook.loadState(cwd, sessionID)
+    assert.strictEqual(hook.isDtsContextActive(state), true)
+    hook.recordFile(state, code, true)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "code-review-only")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "eta")
