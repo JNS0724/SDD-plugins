@@ -389,6 +389,26 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "issue-ticket-context")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "rho-ticket")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "ticket-fix.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    assert.strictEqual(
+      hook.updateDtsContextFromInput(state, { message: "Please fix this issue ticket by changing code only." }, null),
+      true
+    )
+    assert.strictEqual(hook.isDtsContextActive(state), true)
+    hook.recordFile(state, code, true)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "code-review-only")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "eta")
@@ -537,8 +557,8 @@ try {
     hook.recordFile(state, secondCode, true)
     codeGaps = hook.collectCodeGaps(cwd, state)
     assert.strictEqual(codeGaps.length, 1)
-    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), true)
-    assert.match(hook.buildCodeEnforcement(cwd, codeGaps, { compact: true }), /SDD drift reminder/)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
+    assert.strictEqual(hook.isCodeDriftNoticeSuppressed(state, codeGaps), true)
 
     hook.recordFile(state, design, false)
     hook.recordFile(state, tasks, false)
@@ -554,6 +574,37 @@ try {
     hook.recordFile(state, thirdCode, true)
     codeGaps = hook.collectCodeGaps(cwd, state)
     assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), true)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "code-notice-limit")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "limit")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const firstCode = path.join(cwd, "src", "first.ts")
+    const secondCode = path.join(cwd, "src", "second.ts")
+    const thirdCode = path.join(cwd, "src", "third.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(firstCode, "export const first = 1\n")
+    write(secondCode, "export const second = 1\n")
+    write(thirdCode, "export const third = 1\n")
+
+    hook.recordFile(state, firstCode, true)
+    let codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), true)
+    hook.markCodeDriftNoticeEmitted(cwd, state, codeGaps)
+
+    hook.recordFile(state, secondCode, true)
+    codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
+    assert.strictEqual(hook.isCodeDriftNoticeSuppressed(state, codeGaps), true)
+
+    hook.recordFile(state, thirdCode, true)
+    codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
+    assert.strictEqual(hook.isCodeDriftNoticeSuppressed(state, codeGaps), true)
   }
 
   {

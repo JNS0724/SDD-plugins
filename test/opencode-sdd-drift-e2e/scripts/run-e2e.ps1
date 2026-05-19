@@ -510,7 +510,7 @@ if ($Scenario -eq "sdd-cascade") {
       throw "expected no tasks.md edit when review finds no SDD change is needed"
     }
     $enforcementCount = ([regex]::Matches($fakeLogText, '"lastToolHasToolEnforcement":true')).Count
-    if ($enforcementCount -ne 2) {
+    if ($enforcementCount -ne 1) {
       throw "expected code no-doc-change to stop reinjecting after both SDD docs are read, got $enforcementCount"
     }
     $reportText = if (Test-Path -LiteralPath $report) {

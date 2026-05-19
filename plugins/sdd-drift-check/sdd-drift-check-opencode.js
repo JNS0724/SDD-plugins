@@ -171,6 +171,31 @@ const buildStopInput = (ctx, sessionID) => ({
   cwd: normalizeCwd(ctx),
 })
 
+const partText = (parts) =>
+  Array.isArray(parts)
+    ? parts
+        .map((part) =>
+          typeof part === "string"
+            ? part
+            : part?.text || part?.content || part?.value || ""
+        )
+        .filter(Boolean)
+        .join("\n")
+    : ""
+
+const buildChatMessageInput = (ctx, input, output) => ({
+  hook_source: "opencode-plugin",
+  hook_event_name: "ChatMessage",
+  session_id: input?.sessionID || "default",
+  message_id: input?.messageID || null,
+  agent: input?.agent || null,
+  model: input?.model || null,
+  message: output?.message || null,
+  parts: output?.parts || [],
+  message_text: partText(output?.parts),
+  cwd: normalizeCwd(ctx),
+})
+
 exports.SddDriftCheckOpenCode = async (ctx) => {
   const hookScript = resolveHookScript(ctx)
   const hookRunner =
@@ -179,6 +204,19 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       : runCommandHook
 
   return {
+    "chat.message": async (input, output) => {
+      const result = await hookRunner(hookScript, buildChatMessageInput(ctx, input, output))
+      if (result.error || result.timedOut) {
+        await logPluginIssue(ctx.client, "warn", "chat message context capture did not complete", {
+          hookScript,
+          sessionID: input?.sessionID,
+          timedOut: Boolean(result.timedOut),
+          error: compactText(result.error?.message || ""),
+          stderr: compactText(result.stderr),
+        })
+      }
+    },
+
     "tool.execute.after": async (input, output) => {
       const tool = normalizeToolName(input.tool)
       if (!SUPPORTED_TOOL_NAMES.has(tool)) return
@@ -225,10 +263,12 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
 }
 
 exports._private = {
+  buildChatMessageInput,
   buildPostToolUseInput,
   buildStopInput,
   normalizeToolName,
   normalizeToolArgs,
+  partText,
   resolveHookScript,
   runCommandHook,
 }

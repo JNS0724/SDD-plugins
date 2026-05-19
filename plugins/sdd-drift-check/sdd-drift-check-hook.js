@@ -13,6 +13,10 @@ const CODE_REVIEW_STOP_MAX_BLOCKS = Number.parseInt(
   process.env.SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS || "1",
   10
 )
+const CODE_REVIEW_TOOL_MAX_REMINDERS = Number.parseInt(
+  process.env.SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS || "1",
+  10
+)
 const DIAGNOSTIC_LOG = process.env.SDD_DRIFT_LOG !== "0"
 const DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
   process.env.SDD_DRIFT_LOG_MAX_BYTES || String(2 * 1024 * 1024),
@@ -59,10 +63,17 @@ const SUBAGENT_REVIEW_RULE =
 const DTS_CONTEXT_PATTERNS = [
   /\bDTS-\d+\b/,
   /\bDTS\b/,
+  /dts\s*(问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
+  /(问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,30}dts/i,
+  /(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,40}(修复|修改|处理|解决|fix|resolve|repair|patch|handle|address)/i,
+  /(修复|修改|处理|解决|fix|resolve|repair|patch|handle|address).{0,40}(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
   /dts\s*(问题单|单|工单|缺陷|bug|issue|ticket)/i,
   /(问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,30}dts/i,
 ]
 const DTS_CONTEXT_NEGATION_PATTERNS = [
+  /(不是|非|无需|不要|不属于)\s*(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
+  /(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,10}(不是|非|无需|不要|不属于)/i,
+  /\bnot\s+(?:a\s+)?(?:DTS|issue|ticket|bug)\b/i,
   /(不是|非|无需|不要|不属于)\s*DTS/i,
   /DTS.{0,10}(不是|非|无需|不要|不属于)/i,
   /\bnot\s+(?:a\s+)?DTS\b/i,
@@ -1402,16 +1413,41 @@ const markPeerDriftNoticeEmitted = (state, peerGaps) => {
   }
 }
 
-const shouldEmitCodeDriftNotice = (state, codeGaps) =>
-  codeGaps.some((gap) => !gap.reviewReady)
+const codeReviewToolMaxReminders = () => {
+  if (!Number.isFinite(CODE_REVIEW_TOOL_MAX_REMINDERS)) return 1
+  return Math.max(0, CODE_REVIEW_TOOL_MAX_REMINDERS)
+}
+
+const codeDriftNoticeEmissionCount = (state) =>
+  Math.max(0, Number(state.codeDriftNotice?.emissionCount || 0))
+
+const hasPendingCodeReview = (codeGaps) => codeGaps.some((gap) => !gap.reviewReady)
+
+const shouldEmitCodeDriftNotice = (state, codeGaps) => {
+  if (!hasPendingCodeReview(codeGaps)) return false
+  const maxReminders = codeReviewToolMaxReminders()
+  if (maxReminders === 0) return false
+  if (!state.codeDriftNotice?.active) return true
+  return codeDriftNoticeEmissionCount(state) < maxReminders
+}
+
+const isCodeDriftNoticeSuppressed = (state, codeGaps) =>
+  hasPendingCodeReview(codeGaps) &&
+  Boolean(state.codeDriftNotice?.active) &&
+  codeDriftNoticeEmissionCount(state) >= codeReviewToolMaxReminders()
 
 const markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
   if (!codeGaps.length) return
+  const existing = state.codeDriftNotice || {}
   state.codeDriftNotice = {
+    ...existing,
     active: true,
-    firstCodeSeq: codeGaps[0].latestCodeSeq || 0,
+    firstCodeSeq: existing.firstCodeSeq || codeGaps[0].latestCodeSeq || 0,
+    latestCodeSeq: codeGaps[0].latestCodeSeq || existing.latestCodeSeq || 0,
     signature: hash(JSON.stringify(codeGaps.map((gap) => serializableCodeGap(cwd, gap)))),
-    emittedAt: new Date().toISOString(),
+    emittedAt: existing.emittedAt || new Date().toISOString(),
+    lastEmittedAt: new Date().toISOString(),
+    emissionCount: codeDriftNoticeEmissionCount(state) + 1,
   }
 }
 
@@ -1722,6 +1758,8 @@ const main = async () => {
   }
 
   if (input.hook_event_name !== "PostToolUse") {
+    saveState(cwd, sessionID, state)
+    refreshReport(cwd, state)
     writeDiagnosticLog(cwd, {
       event: "ignored_event",
       input: summarizeInput(input),
@@ -1779,6 +1817,7 @@ const main = async () => {
   clearPeerDriftNoticeIfResolved(state, noticePeerGaps)
   clearCodeDriftNoticeIfResolved(state, codeGaps)
   const emitCodeGap = !hardPeerGaps.length && shouldEmitCodeDriftNotice(state, codeGaps)
+  const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && isCodeDriftNoticeSuppressed(state, codeGaps)
   const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
   const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : []
   const peerSignature = emitPeerGaps.length ? peerDriftSignature(emitPeerGaps) : null
@@ -1790,7 +1829,7 @@ const main = async () => {
   if (emitPeerGaps.length) {
     markPeerDriftNoticeEmitted(state, emitPeerGaps)
   }
-  if (emitCodeGap && !state.codeDriftNotice?.active) {
+  if (emitCodeGap) {
     markCodeDriftNoticeEmitted(cwd, state, codeGaps)
   }
 
@@ -1833,11 +1872,19 @@ const main = async () => {
     writeDiagnosticLog(cwd, {
       event: codeReviewNoEditConfirmed
         ? "posttooluse_code_review_no_edit_confirmed"
-        : "posttooluse_no_output",
+        : suppressCodeGap
+          ? "posttooluse_code_review_reminder_suppressed"
+          : "posttooluse_no_output",
       input: summarizeInput(input),
       file: rel(cwd, abs),
       tool,
       isEdit,
+      ...(suppressCodeGap
+        ? {
+            codeReviewToolReminderCount: codeDriftNoticeEmissionCount(state),
+            codeReviewToolMaxReminders: codeReviewToolMaxReminders(),
+          }
+        : {}),
       ...summarizeGaps(cwd, peerGaps, codeGaps),
     })
   }
@@ -1877,6 +1924,7 @@ if (require.main === module) {
     hasEditedSddChange,
     hasSddWorkspace,
     hydrateStateFromTranscript,
+    isCodeDriftNoticeSuppressed,
     isDtsContextActive,
     isDtsContextText,
     isOpenCodeHookInput,

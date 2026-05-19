@@ -668,8 +668,8 @@ if ($Scenario -eq "code-no-doc-change") {
     $outText,
     [regex]::Escape("implementation code still has pending SDD review for this code-change batch")
   ).Count
-  if ($compactCodeReminderCount -lt 1) {
-    throw "expected compact code drift reminder after repeated code tool calls"
+  if ($compactCodeReminderCount -ne 0) {
+    throw "expected no compact code drift reminder with default single-reminder cap, got $compactCodeReminderCount"
   }
   if ($designText -match [regex]::Escape($marker)) {
     throw "expected design.md not to be updated when SDD review finds no document change is needed"

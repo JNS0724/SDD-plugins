@@ -17,9 +17,11 @@ This package has two entrypoints:
   you want OpenCode to load the plugin directly from `.opencode/plugins/`.
 
 Both entrypoints share the same drift rules, state files, reports, and
-diagnostic logs. The native OpenCode adapter listens to `tool.execute.after` and
-`session.idle`, converts them into the shared hook input shape, and appends
-model-visible reminders to the tool result when drift is detected.
+diagnostic logs. The native OpenCode adapter listens to `chat.message`,
+`tool.execute.after`, and `session.idle`. It captures user-message context for
+issue-ticket detection, converts tool/idle events into the shared hook input
+shape, and appends model-visible reminders to the tool result when drift is
+detected.
 
 Native OpenCode caveat: `session.idle` is an event, not a mutable Stop hook
 response. The native adapter can refresh reports/logs at idle time, but current
@@ -48,8 +50,8 @@ The hook does not use `console.error`, `messages.transform`, or
 | peer file exists but was not synced in this session | Reports it as unsynced and asks the model to read/update it |
 | peer file synced later in the same session | Clears the gap and does not create a reverse ping-pong requirement |
 | normal code changed without later SDD review | Emits deferred reminders to review relevant `design.md` and `tasks.md` before the final answer |
-| many code files changed in one turn | Keeps accumulating changed files and repeats compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
-| DTS issue/ticket context | Skips code-ahead-of-doc review reminders; DTS context is inferred from hook-visible prompt/message/transcript text or forced with `SDD_DRIFT_DTS_CONTEXT=1` |
+| many code files changed in one turn | Keeps accumulating changed files and emits bounded compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
+| DTS / issue-ticket context | Skips code-ahead-of-doc review reminders; issue context is inferred from hook-visible prompt/message/transcript text or forced with `SDD_DRIFT_DTS_CONTEXT=1` |
 | code only affects task progress | Allows a tasks-only update, or no document edit, after both `design.md` and `tasks.md` have been reviewed |
 | model ignores constraints and stops | Writes `.sdd-drift-report.md` for human review |
 
@@ -264,27 +266,32 @@ not create duplicate enforcement or design/tasks ping-pong.
 
 Code-ahead-of-doc drift is batched at session level. The first code edit that
 gets ahead of SDD emits a full model-visible deferred review reminder. Later
-tool calls in the same unreviewed batch emit compact reminders until the listed
-SDD documents have both been read. This makes the signal survive long tasks and
-context compaction without looping after the model has already reviewed the
-documents.
+tool calls in the same unreviewed batch may emit compact reminders until the
+listed SDD documents have both been read. To avoid issue-ticket or rate-limit
+loops when context inference fails, tool-result reminders are capped by
+`SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS`, default `1` total reminder per
+unreviewed code batch. After the cap, the hook stays silent for tool results and
+keeps the unresolved review visible in the diagnostic log/report instead of
+continuing to inject model-visible text.
 
 Frontend entry files are treated as code too. This includes `html` and `css`
 alongside JavaScript, TypeScript, framework files, and common backend/source
 extensions, so single-file browser prototypes such as `index.html` still trigger
 the code-ahead-of-doc review checkpoint.
 
-DTS issue fixes are treated as an operational exception to code-ahead-of-doc
-drift. Because DTS cannot be identified reliably from file paths, the hook only
-skips this review when the hook-visible context contains markers such as
-`DTS`, `DTS问题单`, `DTS issue`, or `DTS ticket`, or when
-`SDD_DRIFT_DTS_CONTEXT=1` is set for the session. In OpenCode through
-oh-my-opencode `PostToolUse`, current hook input can be limited to
-hook/session/tool metadata, so prompt-based DTS inference should be treated as
-best effort. For reliable OpenCode DTS handling, set `SDD_DRIFT_DTS_CONTEXT=1`
-on that run. Set `SDD_DRIFT_DTS_SKIP=0` to disable this exception entirely. The
-DTS exception does not disable peer synchronization after explicit SDD document
-edits.
+DTS / issue-ticket fixes are treated as an operational exception to
+code-ahead-of-doc drift. Because issue-ticket work cannot be identified reliably
+from file paths, the hook only skips this review when hook-visible context
+contains markers such as `DTS`, `DTS问题单`, `issue ticket`, `bug fix`, `问题单修改`,
+or when `SDD_DRIFT_DTS_CONTEXT=1` is set for the session. In OpenCode native
+plugin mode, the adapter captures user messages through `chat.message` before
+later `tool.execute.after` events, so the issue-ticket marker can be persisted
+in hook state. In OpenCode through oh-my-opencode `PostToolUse`, current hook
+input can still be limited to hook/session/tool metadata, so prompt-based issue
+inference remains best effort there. For reliable OpenCode issue-ticket
+handling, set `SDD_DRIFT_DTS_CONTEXT=1` on that run. Set
+`SDD_DRIFT_DTS_SKIP=0` to disable this exception entirely. The exception does
+not disable peer synchronization after explicit SDD document edits.
 
 The batch clears after either:
 
@@ -409,6 +416,16 @@ Change log rotation size, default `2097152` bytes:
 
 ```powershell
 $env:SDD_DRIFT_LOG_MAX_BYTES = "5242880"
+opencode
+```
+
+Change the maximum number of model-visible tool-result reminders for one
+unreviewed code batch, default `1`. Set `2` if you prefer one compact follow-up
+reminder; set `0` to disable tool-result reminders for code-ahead-of-doc review
+while keeping peer SDD synchronization active:
+
+```powershell
+$env:SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS = "2"
 opencode
 ```
 

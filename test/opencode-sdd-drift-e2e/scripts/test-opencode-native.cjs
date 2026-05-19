@@ -72,6 +72,54 @@ const run = async () => {
   }
 
   {
+    const cwd = path.join(tmpRoot, "native-chat-message")
+    const calls = []
+    write(path.join(cwd, "sdd", "changes", "ticket", "design.md"), "# Design\n")
+
+    const hooks = await native.SddDriftCheckOpenCode({
+      directory: cwd,
+      worktree: cwd,
+      client: makeClient(),
+      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+        calls.push(hookInput)
+        return {
+          status: 0,
+          stdout: "",
+          stderr: "",
+        }
+      }),
+    })
+
+    await hooks["chat.message"](
+      {
+        sessionID: "session-native-chat",
+        messageID: "message-1",
+        agent: "build",
+      },
+      {
+        message: {
+          role: "user",
+          content: "Please fix this issue ticket by changing code only.",
+        },
+        parts: [
+          {
+            type: "text",
+            text: "Please fix this issue ticket by changing code only.",
+          },
+        ],
+      }
+    )
+
+    assert.strictEqual(calls.length, 1)
+    assert.strictEqual(calls[0].hook_source, "opencode-plugin")
+    assert.strictEqual(calls[0].hook_event_name, "ChatMessage")
+    assert.strictEqual(calls[0].session_id, "session-native-chat")
+    assert.strictEqual(calls[0].message_id, "message-1")
+    assert.match(calls[0].parts[0].text, /issue ticket/)
+    assert.match(calls[0].message_text, /issue ticket/)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "native-no-sdd")
     write(path.join(cwd, "notes.md"), "# Notes\n")
 

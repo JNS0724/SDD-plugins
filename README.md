@@ -54,6 +54,8 @@ It supports:
 - `PostToolUse` model-visible reminders for reliable OpenCode cascades.
 - `Stop` hook checks for Claude-compatible final review behavior.
 - Session-level batching for code changes before SDD reconciliation.
+- Issue-ticket/DTS context suppression for code-ahead-of-doc reminders.
+- Bounded code-review reminders to avoid repeated tool-result injection loops.
 - Diagnostic JSONL logs with default 3-day retention.
 
 See the plugin documentation for installation and behavior details:
