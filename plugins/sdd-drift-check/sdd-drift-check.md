@@ -9,14 +9,22 @@ OpenCode / Claude Code compatible hook for SDD drift checks.
 
 ## Runtime Environment
 
-This hook must run inside a Claude Code-compatible hook environment:
+This package has two entrypoints:
 
-- Claude Code can run it directly through `.claude/settings.json`.
-- OpenCode must use `oh-my-opencode` hook bridging. Bare OpenCode plugin
-  loading is not sufficient for this implementation.
+- `sdd-drift-check-hook.js`: Claude Code-compatible command hook. Use this with
+  Claude Code or with OpenCode through `oh-my-opencode` hook bridging.
+- `sdd-drift-check-opencode.js`: native OpenCode plugin adapter. Use this when
+  you want OpenCode to load the plugin directly from `.opencode/plugins/`.
 
-The hook expects Claude Code-style `PostToolUse` and `Stop` events on stdin and
-returns Claude Code-compatible hook output.
+Both entrypoints share the same drift rules, state files, reports, and
+diagnostic logs. The native OpenCode adapter listens to `tool.execute.after` and
+`session.idle`, converts them into the shared hook input shape, and appends
+model-visible reminders to the tool result when drift is detected.
+
+Native OpenCode caveat: `session.idle` is an event, not a mutable Stop hook
+response. The native adapter can refresh reports/logs at idle time, but current
+OpenCode plugin hooks do not provide a direct Stop-continuation output channel.
+For reliable continuation in OpenCode, keep `tool.execute.after` enabled.
 
 Important OpenCode note: real testing with OpenCode 1.2.27 +
 `oh-my-opencode@3.17.2` showed that `Stop`-only did not trigger continuation in
@@ -115,6 +123,43 @@ numeric rotation files such as `sdd-drift-check.log.jsonl.1`.
 
 ## Install In A Project
 
+### OpenCode Native Plugin
+
+Copy both files: the native adapter goes under `.opencode/plugins/`, while the
+shared command hook stays outside that directory so OpenCode does not try to load
+it as a second plugin.
+
+```powershell
+New-Item -ItemType Directory -Force .opencode\plugins
+New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js .opencode\plugins\sdd-drift-check-opencode.js
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js
+```
+
+OpenCode automatically loads local plugins from `.opencode/plugins/`.
+The adapter finds the shared hook at:
+
+```text
+.opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js
+```
+
+Override the path if needed:
+
+```powershell
+$env:SDD_DRIFT_HOOK_SCRIPT = "E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js"
+opencode
+```
+
+The native adapter runs the shared hook with `node`. If `node` is not on `PATH`,
+set:
+
+```powershell
+$env:SDD_DRIFT_NODE = "C:\Program Files\nodejs\node.exe"
+opencode
+```
+
+### OpenCode With oh-my-opencode
+
 Install `oh-my-opencode`:
 
 ```powershell
@@ -152,7 +197,7 @@ Create `.opencode/oh-my-openagent.jsonc`:
 }
 ```
 
-## Hook Config
+### Claude Code Or Claude-Compatible Hook Config
 
 Default Stop-only config, with no `PostToolUse`:
 
@@ -304,6 +349,13 @@ Real OpenCode workflow and silent-regression checks:
 ```powershell
 npm run e2e:real:snake -- -Provider deepseek
 npm run e2e:real:silent -- -Provider deepseek
+```
+
+Native OpenCode plugin check:
+
+```powershell
+npm run e2e:real:native -- -Provider deepseek
+npm run e2e:real:native -- -Provider minimax
 ```
 
 Claude Code companion checks are under `test/claude-code-sdd-drift-e2e`.

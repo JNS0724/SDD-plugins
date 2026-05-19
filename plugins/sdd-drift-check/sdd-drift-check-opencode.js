@@ -1,0 +1,234 @@
+const fs = require("node:fs")
+const path = require("node:path")
+const { spawn } = require("node:child_process")
+
+const PLUGIN_NAME = "sdd-drift-check-opencode"
+const DEFAULT_HOOK_RELATIVE_PATH = path.join(
+  ".opencode",
+  "hooks",
+  "sdd-drift-check",
+  "sdd-drift-check-hook.js"
+)
+const SUPPORTED_TOOL_NAMES = new Set(["read", "edit", "write", "multiedit"])
+
+const ownDir = __dirname
+
+const fileExists = (fp) => {
+  try {
+    return fs.statSync(fp).isFile()
+  } catch {
+    return false
+  }
+}
+
+const normalizeCwd = (ctx) => path.resolve(ctx?.worktree || ctx?.directory || process.cwd())
+
+const resolveHookScript = (ctx) => {
+  const configured = process.env.SDD_DRIFT_HOOK_SCRIPT
+  if (configured) {
+    return path.resolve(normalizeCwd(ctx), configured)
+  }
+
+  const cwd = normalizeCwd(ctx)
+  const candidates = [
+    path.join(cwd, DEFAULT_HOOK_RELATIVE_PATH),
+    path.join(ownDir, "sdd-drift-check-hook.js"),
+    path.join(cwd, ".opencode", "plugins", "sdd-drift-check-hook.js"),
+  ]
+  return candidates.find(fileExists) || candidates[0]
+}
+
+const getToolFilePath = (args) =>
+  args?.file_path || args?.filePath || args?.path || args?.file
+
+const normalizeToolName = (tool) => {
+  const name = String(tool || "").toLowerCase()
+  if (name === "multi_edit" || name === "multi-edit") return "multiedit"
+  return name
+}
+
+const normalizeToolArgs = (args) => {
+  const copy = { ...(args || {}) }
+  const fp = getToolFilePath(copy)
+  if (fp && !copy.file_path) copy.file_path = fp
+  return copy
+}
+
+const compactText = (value, max = 1000) => {
+  const text = String(value || "")
+  return text.length > max ? `${text.slice(0, max)}...` : text
+}
+
+const logPluginIssue = async (client, level, message, extra = {}) => {
+  try {
+    await client?.app?.log?.({
+      body: {
+        service: PLUGIN_NAME,
+        level,
+        message,
+        extra,
+      },
+    })
+  } catch {
+    // Keep the plugin silent if OpenCode logging is unavailable.
+  }
+}
+
+const runCommandHook = (hookScript, hookInput, options = {}) =>
+  new Promise((resolve) => {
+    const node = process.env.SDD_DRIFT_NODE || "node"
+    const env = {
+      ...process.env,
+      SDD_DRIFT_OUTPUT: process.env.SDD_DRIFT_OUTPUT || "opencode",
+    }
+    const child = spawn(node, [hookScript], {
+      cwd: hookInput.cwd,
+      env,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+
+    let stdout = ""
+    let stderr = ""
+    let settled = false
+    const timeoutMs = Number.parseInt(process.env.SDD_DRIFT_NATIVE_TIMEOUT_MS || "10000", 10)
+    const timeout =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? setTimeout(() => {
+            if (settled) return
+            settled = true
+            try {
+              child.kill()
+            } catch {}
+            resolve({
+              status: null,
+              stdout,
+              stderr,
+              timedOut: true,
+            })
+          }, timeoutMs)
+        : null
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8")
+    })
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8")
+    })
+    child.on("error", (error) => {
+      if (settled) return
+      settled = true
+      if (timeout) clearTimeout(timeout)
+      resolve({
+        status: null,
+        stdout,
+        stderr,
+        error,
+      })
+    })
+    child.on("close", (status) => {
+      if (settled) return
+      settled = true
+      if (timeout) clearTimeout(timeout)
+      resolve({
+        status,
+        stdout,
+        stderr,
+      })
+    })
+    child.stdin.end(JSON.stringify(hookInput))
+  })
+
+const appendToolOutput = (output, message) => {
+  const text = String(message || "").trim()
+  if (!text) return false
+
+  const current = String(output.output || "")
+  output.output = current ? `${current}\n\n${text}` : text
+  output.metadata = {
+    ...(output.metadata || {}),
+    sddDriftCheck: {
+      injected: true,
+    },
+  }
+  return true
+}
+
+const buildPostToolUseInput = (ctx, input) => ({
+  hook_source: "opencode-plugin",
+  hook_event_name: "PostToolUse",
+  session_id: input.sessionID || "default",
+  tool_use_id: input.callID || null,
+  tool_name: normalizeToolName(input.tool),
+  tool_input: normalizeToolArgs(input.args || {}),
+  cwd: normalizeCwd(ctx),
+})
+
+const buildStopInput = (ctx, sessionID) => ({
+  hook_source: "opencode-plugin",
+  hook_event_name: "Stop",
+  session_id: sessionID || "default",
+  cwd: normalizeCwd(ctx),
+})
+
+exports.SddDriftCheckOpenCode = async (ctx) => {
+  const hookScript = resolveHookScript(ctx)
+  const hookRunner =
+    typeof ctx?.__sddDriftRunCommandHook === "function"
+      ? ctx.__sddDriftRunCommandHook
+      : runCommandHook
+
+  return {
+    "tool.execute.after": async (input, output) => {
+      const tool = normalizeToolName(input.tool)
+      if (!SUPPORTED_TOOL_NAMES.has(tool)) return
+      if (!getToolFilePath(input.args || {})) return
+
+      const result = await hookRunner(hookScript, buildPostToolUseInput(ctx, input))
+      if (result.error || result.timedOut) {
+        await logPluginIssue(ctx.client, "warn", "command hook did not complete", {
+          hookScript,
+          timedOut: Boolean(result.timedOut),
+          error: compactText(result.error?.message || ""),
+          stderr: compactText(result.stderr),
+        })
+        return
+      }
+
+      const message =
+        result.stdout ||
+        (process.env.SDD_DRIFT_NATIVE_APPEND_STDERR === "1" ? result.stderr : "")
+      if (appendToolOutput(output, message)) {
+        await logPluginIssue(ctx.client, "info", "injected SDD drift reminder", {
+          tool,
+          sessionID: input.sessionID,
+          callID: input.callID,
+        })
+      }
+    },
+
+    event: async ({ event }) => {
+      if (event?.type !== "session.idle") return
+      const sessionID = event?.properties?.sessionID
+      const result = await hookRunner(hookScript, buildStopInput(ctx, sessionID))
+      if (result.error || result.timedOut) {
+        await logPluginIssue(ctx.client, "warn", "idle check did not complete", {
+          hookScript,
+          sessionID,
+          timedOut: Boolean(result.timedOut),
+          error: compactText(result.error?.message || ""),
+          stderr: compactText(result.stderr),
+        })
+      }
+    },
+  }
+}
+
+exports._private = {
+  buildPostToolUseInput,
+  buildStopInput,
+  normalizeToolName,
+  normalizeToolArgs,
+  resolveHookScript,
+  runCommandHook,
+}

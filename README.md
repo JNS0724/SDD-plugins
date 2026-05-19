@@ -11,7 +11,7 @@ test harnesses under `test/`.
 
 | Plugin | Status | Purpose |
 | --- | --- | --- |
-| `plugins/sdd-drift-check` | Active | OpenCode and Claude Code compatible hook that detects SDD drift and asks the model to reconcile related `proposal.md`, `design.md`, and `tasks.md` files. |
+| `plugins/sdd-drift-check` | Active | OpenCode native plugin and Claude Code compatible hook that detects SDD drift and asks the model to reconcile related `proposal.md`, `design.md`, and `tasks.md` files. |
 
 ## Repository Layout
 
@@ -19,6 +19,7 @@ test harnesses under `test/`.
 plugins/
   sdd-drift-check/
     sdd-drift-check-hook.js
+    sdd-drift-check-opencode.js
     sdd-drift-check.md
 test/
   opencode-sdd-drift-e2e/
@@ -36,13 +37,18 @@ editing code or SDD documents.
 Use this plugin in one of these hook-capable runtimes:
 
 - Claude Code with its native hook configuration.
-- OpenCode with `oh-my-opencode` installed and hook bridging enabled.
+- OpenCode with the native OpenCode plugin entrypoint.
+- OpenCode with `oh-my-opencode` installed and Claude Code hook bridging
+  enabled.
 
-Plain OpenCode without `oh-my-opencode` is not enough, because the plugin relies
-on Claude Code-style hook events such as `PostToolUse` and `Stop`.
+The shared hook implementation is `sdd-drift-check-hook.js`. Claude Code and
+`oh-my-opencode` call it as a command hook. Native OpenCode uses
+`sdd-drift-check-opencode.js`, which adapts OpenCode plugin events to the shared
+hook implementation.
 
 It supports:
 
+- OpenCode native plugin hooks through `tool.execute.after` and `session.idle`.
 - OpenCode through `oh-my-opencode` hook bridging.
 - Claude Code compatible hook settings.
 - `PostToolUse` model-visible reminders for reliable OpenCode cascades.
