@@ -42,6 +42,7 @@ try {
     assert.match(enforcement, /Keep every existing heading line exactly as-is/)
     assert.match(enforcement, /Do not replace the whole document/)
     assert.match(enforcement, /Do not add a new section/)
+    assert.match(enforcement, /Do not remove unrelated existing paragraphs/)
     assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
     const compact = hook.buildToolEnforcement(gaps, { compact: true })
     assert.match(compact, /SDD drift reminder/)
@@ -331,9 +332,65 @@ try {
     assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
 
     edit(state, readOnlyDesign)
-    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    const afterDesignEditCodeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(afterDesignEditCodeGaps.length, 1)
+    assert.deepStrictEqual(afterDesignEditCodeGaps[0].pendingReviewTargets.map((file) => path.basename(file)), [
+      "tasks.md",
+    ])
     assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].unsynced, ["tasks.md"])
     edit(state, tasks)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "multi-active-change-review")
+    const state = hook.emptyState()
+    const activeA = path.join(cwd, "sdd", "changes", "active-a")
+    const activeB = path.join(cwd, "sdd", "changes", "active-b")
+    const archived = path.join(cwd, "sdd", "changes", "done-c")
+    const code = path.join(cwd, "src", "app.ts")
+
+    for (const dir of [activeA, activeB, archived]) {
+      write(path.join(dir, "design.md"), "# Design\n")
+      write(path.join(dir, "tasks.md"), "# Tasks\n")
+    }
+    write(path.join(archived, ".archived"), "")
+    write(code, "export const value = 1\n")
+
+    hook.recordFile(state, code, true)
+    const reviewTargets = hook.collectReviewTargets(cwd, state).map((file) => hook.normalizeKey(file))
+    assert.strictEqual(reviewTargets.length, 4)
+    assert.ok(reviewTargets.some((file) => file.includes("active-a/design.md")))
+    assert.ok(reviewTargets.some((file) => file.includes("active-a/tasks.md")))
+    assert.ok(reviewTargets.some((file) => file.includes("active-b/design.md")))
+    assert.ok(reviewTargets.some((file) => file.includes("active-b/tasks.md")))
+    assert.strictEqual(reviewTargets.some((file) => file.includes("done-c")), false)
+
+    let codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    assert.strictEqual(codeGaps[0].pendingReviewTargets.length, 4)
+
+    hook.recordFile(state, path.join(activeA, "design.md"), false)
+    hook.recordFile(state, path.join(activeA, "tasks.md"), false)
+    codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    assert.deepStrictEqual(
+      codeGaps[0].pendingReviewTargets.map((file) => hook.normalizeKey(file).split("changes/")[1]).sort(),
+      ["active-b/design.md", "active-b/tasks.md"]
+    )
+
+    hook.recordFile(state, path.join(activeB, "design.md"), false)
+    hook.recordFile(state, path.join(activeB, "tasks.md"), false)
+    codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    assert.strictEqual(codeGaps[0].reviewReady, true)
+    assert.strictEqual(hook.markCodeReviewNoEditConfirmation(state, codeGaps), true)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    assert.match(hook.collectReportLines(cwd, state).join("\n"), /User confirmation recommended/)
+
+    edit(state, path.join(activeA, "design.md"))
+    edit(state, path.join(activeA, "tasks.md"))
     assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
   }
 
@@ -600,9 +657,12 @@ try {
 
     hook.recordFile(state, code, true)
     edit(state, tasks)
-    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    const codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    assert.deepStrictEqual(codeGaps[0].pendingReviewTargets.map((file) => path.basename(file)), ["design.md"])
     assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].unsynced, ["design.md"])
     edit(state, design)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
     assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
   }
 

@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "multi-change-review", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
   [string]$Scenario = "design-cascade",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -122,6 +122,10 @@ New-Item -ItemType Directory -Force (Join-Path $workRoot "src") | Out-Null
 $hasSddWorkspace = $Scenario -ne "no-sdd-code"
 if ($hasSddWorkspace) {
   New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\test-feat") | Out-Null
+  if ($Scenario -eq "multi-change-review") {
+    New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\parallel-feat") | Out-Null
+    New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\archived-feat") | Out-Null
+  }
 }
 
 Set-Content -LiteralPath (Join-Path $workRoot ".opencode\plugin\oh-my-opencode.ts") -Value 'export { default } from "oh-my-opencode"'
@@ -313,6 +317,13 @@ if (Test-Path -LiteralPath $hookState) {
 $proposalPath = Join-Path $workRoot "sdd\changes\test-feat\proposal.md"
 $designPath = Join-Path $workRoot "sdd\changes\test-feat\design.md"
 $tasksPath = Join-Path $workRoot "sdd\changes\test-feat\tasks.md"
+$parallelProposalPath = Join-Path $workRoot "sdd\changes\parallel-feat\proposal.md"
+$parallelDesignPath = Join-Path $workRoot "sdd\changes\parallel-feat\design.md"
+$parallelTasksPath = Join-Path $workRoot "sdd\changes\parallel-feat\tasks.md"
+$archivedProposalPath = Join-Path $workRoot "sdd\changes\archived-feat\proposal.md"
+$archivedDesignPath = Join-Path $workRoot "sdd\changes\archived-feat\design.md"
+$archivedTasksPath = Join-Path $workRoot "sdd\changes\archived-feat\tasks.md"
+$archivedMarkerPath = Join-Path $workRoot "sdd\changes\archived-feat\.archived"
 $appPath = Join-Path $workRoot "src\app.ts"
 $helperPath = Join-Path $workRoot "src\helper.ts"
 if ($hasSddWorkspace) {
@@ -322,6 +333,15 @@ if ($hasSddWorkspace) {
   }
   if ($Scenario -ne "proposal-no-peer" -and $Scenario -ne "design-no-peer") {
     Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+  }
+  if ($Scenario -eq "multi-change-review") {
+    Set-Content -LiteralPath $parallelProposalPath -Value "# Proposal`n`nParallel proposal."
+    Set-Content -LiteralPath $parallelDesignPath -Value "# Design`n`nParallel design."
+    Set-Content -LiteralPath $parallelTasksPath -Value "# Tasks`n`n- [ ] Keep this parallel file unchanged until SDD drift enforcement asks for synchronization."
+    Set-Content -LiteralPath $archivedProposalPath -Value "# Proposal`n`nArchived proposal."
+    Set-Content -LiteralPath $archivedDesignPath -Value "# Design`n`nArchived design should stay unchanged."
+    Set-Content -LiteralPath $archivedTasksPath -Value "# Tasks`n`n- [ ] Archived tasks should stay unchanged."
+    Set-Content -LiteralPath $archivedMarkerPath -Value ""
   }
 }
 Set-Content -LiteralPath $appPath -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
@@ -339,7 +359,7 @@ if ($Scenario -eq "dts-code") {
   Remove-Item Env:\SDD_DRIFT_DTS_CONTEXT -ErrorAction SilentlyContinue
 }
 
-$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "multi-change-review" -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeNoDocScenario = $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeReviewNoEditScenario = $Scenario -eq "code-no-doc-change"
 $isNoPeerScenario = $Scenario -eq "design-no-peer" -or $Scenario -eq "proposal-no-peer"
@@ -368,7 +388,25 @@ $taskMarker = if ($isCodeScenario) {
 }
 $codeMarker = "hi-$Provider-$runId"
 $helperMarker = "helper-$Provider-$runId"
-$prompt = if ($isStopOnly -and $isCodeScenario) {
+$parallelMarker = "Real $Provider parallel SDD review $runId"
+$parallelTaskMarker = "Synchronized parallel change after $Provider code drift review $runId"
+$prompt = if ($isStopOnly -and $Scenario -eq "multi-change-review") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Initial pass: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Then stop immediately with a brief final answer. Do not read or write any SDD document during the initial pass."
+    "If a later hook continuation containing `"SDD drift stop enforcement`" asks you to review SDD documents, read sdd/changes/test-feat/design.md, sdd/changes/test-feat/tasks.md, sdd/changes/parallel-feat/design.md, and sdd/changes/parallel-feat/tasks.md."
+    "When writing design.md files, preserve all existing non-empty body text such as Initial design. and Parallel design.; append the requested heading after the existing body."
+    "Then write sdd/changes/test-feat/design.md so it contains this exact section heading: ## $marker."
+    "Then write sdd/changes/test-feat/tasks.md so it contains this exact task line: - [x] $taskMarker."
+    "Then write sdd/changes/parallel-feat/design.md so it contains this exact section heading: ## $parallelMarker."
+    "Then write sdd/changes/parallel-feat/tasks.md so it contains this exact task line: - [x] $parallelTaskMarker."
+    "Do not read or write any file under sdd/changes/archived-feat."
+    "Use only read and write tools."
+  ) -join " "
+} elseif ($isStopOnly -and $isCodeScenario) {
   @(
     "Execute this exact local file-editing validation task now."
     "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
@@ -428,6 +466,26 @@ $prompt = if ($isStopOnly -and $isCodeScenario) {
     "3. Do not read or write sdd/changes/test-feat/design.md."
     "4. Do not read or write sdd/changes/test-feat/tasks.md."
     "Use only read and write tools. Finish after src/app.ts is updated."
+  ) -join " "
+} elseif ($Scenario -eq "multi-change-review") {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "This workspace has two active SDD changes and one archived SDD change."
+    "Use this sequence exactly: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Wait for the src/app.ts write tool result and inspect that tool result text."
+    "4. If the src/app.ts write tool result contains `"SDD drift tool result enforcement`" or `"SDD reconciliation review`", read sdd/changes/test-feat/design.md."
+    "5. Read sdd/changes/test-feat/tasks.md."
+    "6. Read sdd/changes/parallel-feat/design.md."
+    "7. Read sdd/changes/parallel-feat/tasks.md."
+    "Before writing design.md files, preserve all existing non-empty body text such as Initial design. and Parallel design.; append the requested heading after the existing body."
+    "8. Write sdd/changes/test-feat/design.md so it contains this exact section heading: ## $marker."
+    "9. Write sdd/changes/test-feat/tasks.md so it contains this exact task line: - [x] $taskMarker."
+    "10. Write sdd/changes/parallel-feat/design.md so it contains this exact section heading: ## $parallelMarker."
+    "11. Write sdd/changes/parallel-feat/tasks.md so it contains this exact task line: - [x] $parallelTaskMarker."
+    "12. Do not read or write any file under sdd/changes/archived-feat."
+    "Use only read and write tools. Finish only after src/app.ts and all active design.md/tasks.md documents are synchronized."
   ) -join " "
 } elseif ($Scenario -eq "code-no-doc-change") {
   @(
@@ -561,6 +619,16 @@ if (Test-Path -LiteralPath $tasksPath) {
 } else {
   Write-Output "<missing>"
 }
+if ($Scenario -eq "multi-change-review") {
+  Write-Output "--- parallel design.md ---"
+  Get-Content -LiteralPath $parallelDesignPath
+  Write-Output "--- parallel tasks.md ---"
+  Get-Content -LiteralPath $parallelTasksPath
+  Write-Output "--- archived design.md ---"
+  Get-Content -LiteralPath $archivedDesignPath
+  Write-Output "--- archived tasks.md ---"
+  Get-Content -LiteralPath $archivedTasksPath
+}
 Write-Output "--- src/app.ts ---"
 Get-Content -LiteralPath $appPath
 Write-Output "--- src/helper.ts ---"
@@ -587,6 +655,10 @@ if ($opencodeExit -ne 0) {
 $proposalText = if (Test-Path -LiteralPath $proposalPath) { Get-Content -LiteralPath $proposalPath -Raw } else { "" }
 $designText = if (Test-Path -LiteralPath $designPath) { Get-Content -LiteralPath $designPath -Raw } else { "" }
 $tasksText = if (Test-Path -LiteralPath $tasksPath) { Get-Content -LiteralPath $tasksPath -Raw } else { "" }
+$parallelDesignText = if (Test-Path -LiteralPath $parallelDesignPath) { Get-Content -LiteralPath $parallelDesignPath -Raw } else { "" }
+$parallelTasksText = if (Test-Path -LiteralPath $parallelTasksPath) { Get-Content -LiteralPath $parallelTasksPath -Raw } else { "" }
+$archivedDesignText = if (Test-Path -LiteralPath $archivedDesignPath) { Get-Content -LiteralPath $archivedDesignPath -Raw } else { "" }
+$archivedTasksText = if (Test-Path -LiteralPath $archivedTasksPath) { Get-Content -LiteralPath $archivedTasksPath -Raw } else { "" }
 $appText = Get-Content -LiteralPath $appPath -Raw
 $helperText = Get-Content -LiteralPath $helperPath -Raw
 $outText = if (Test-Path -LiteralPath $outLog) { Get-Content -LiteralPath $outLog -Raw } else { "" }
@@ -654,6 +726,32 @@ if ($Scenario -eq "multi-code-cascade") {
   ).Count
   if ($codeEnforcementCount -ne 1) {
     throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
+  }
+}
+if ($Scenario -eq "multi-change-review") {
+  if ($designText -notmatch "Initial design\.") {
+    throw "expected test-feat/design.md to preserve existing design body text"
+  }
+  if ($parallelDesignText -notmatch "Parallel design\.") {
+    throw "expected parallel-feat/design.md to preserve existing design body text"
+  }
+  if ($parallelDesignText -notmatch [regex]::Escape($parallelMarker)) {
+    throw "expected parallel-feat/design.md to contain real model review marker"
+  }
+  if ($parallelTasksText -notmatch [regex]::Escape($parallelTaskMarker)) {
+    throw "expected parallel-feat/tasks.md to contain real model review marker"
+  }
+  if ($archivedDesignText -notmatch "Archived design should stay unchanged") {
+    throw "expected archived-feat/design.md to remain unchanged"
+  }
+  if ($archivedTasksText -notmatch "Archived tasks should stay unchanged") {
+    throw "expected archived-feat/tasks.md to remain unchanged"
+  }
+  if ($archivedDesignText -match [regex]::Escape($marker) -or $archivedDesignText -match [regex]::Escape($parallelMarker)) {
+    throw "expected archived-feat/design.md not to receive active review markers"
+  }
+  if ($archivedTasksText -match [regex]::Escape($taskMarker) -or $archivedTasksText -match [regex]::Escape($parallelTaskMarker)) {
+    throw "expected archived-feat/tasks.md not to receive active review markers"
   }
 }
 if ($Scenario -eq "code-no-doc-change") {

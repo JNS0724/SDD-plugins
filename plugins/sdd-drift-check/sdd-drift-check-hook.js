@@ -45,6 +45,9 @@ const PROPOSAL_FILE = "proposal.md"
 const DESIGN_FILE = "design.md"
 const TASKS_FILE = "tasks.md"
 const REVIEW_FILES = [DESIGN_FILE, TASKS_FILE]
+const ARCHIVED_CHANGE_DIR_NAMES = new Set(["archive", "archives", "archived", ".archive", ".archived", "已归档"])
+const ARCHIVE_MARKER_FILES = [".archived", ".archive", "ARCHIVED", "archived.md", "archive.md", "已归档.md"]
+const ARCHIVE_STATUS_FILES = ["status.md", "state.md", "metadata.md", ".status"]
 const SUBAGENT_CHECKPOINT_TOOLS = new Set([
   "background_output",
   "call_omo_agent",
@@ -61,7 +64,8 @@ const DOCUMENT_SYNC_RULES = [
   "Keep every existing heading line exactly as-is, including the top-level title such as # Design or # Tasks, and keep the original heading order.",
   "Do not replace the whole document with a summary, marker, or single-line result.",
   "Do not add a new section or rewrite the template just to satisfy this enforcement.",
-  "For existing SDD documents, prefer Edit or MultiEdit. If Write is necessary, write the full document including all existing headings and template text.",
+  "Do not remove unrelated existing paragraphs, checklist items, examples, requirements, or notes while synchronizing drift.",
+  "For existing SDD documents, prefer Edit or MultiEdit. If Write is necessary, copy the original file content first and write the full document including all existing headings, template text, paragraphs, and checklist items.",
   "Do not edit design.md and tasks.md in the same parallel tool batch; update one SDD document, wait for its tool result and hook feedback, then update the required peer.",
   "Find the most appropriate existing heading, paragraph, list item, or task item, and make the smallest needed update there.",
   "For tasks.md, preserve the task-list format and update the relevant existing checklist item when possible.",
@@ -1146,6 +1150,41 @@ const drift = (cwd, fp, state) => {
   return warn
 }
 
+const isArchivedChangeDirName = (dir) => {
+  const name = path.basename(path.normalize(dir)).toLowerCase()
+  return (
+    ARCHIVED_CHANGE_DIR_NAMES.has(name) ||
+    /(^|[-_.])(archived|已归档)($|[-_.])/.test(name)
+  )
+}
+
+const isArchiveStatusText = (text) =>
+  /^\s*(status|state)\s*[:：]\s*(archived|archive|closed)\s*$/im.test(text || "") ||
+  /^\s*(状态|阶段)\s*[:：]\s*(已归档|归档)\s*$/im.test(text || "")
+
+const readSmallText = (fp) => {
+  try {
+    return fs.readFileSync(fp, "utf8").slice(0, 4096)
+  } catch {
+    return ""
+  }
+}
+
+const isArchivedChangeDir = (dir) => {
+  if (!dir || isArchivedChangeDirName(dir)) return true
+
+  for (const marker of ARCHIVE_MARKER_FILES) {
+    if (fs.existsSync(path.join(dir, marker))) return true
+  }
+
+  for (const statusFile of ARCHIVE_STATUS_FILES) {
+    const text = readSmallText(path.join(dir, statusFile))
+    if (text && isArchiveStatusText(text)) return true
+  }
+
+  return false
+}
+
 const collectPeerGaps = (cwd, state, options = {}) => {
   const includeStageOnly = options.includeStageOnly !== false
   const includeHard = options.includeHard !== false
@@ -1153,6 +1192,8 @@ const collectPeerGaps = (cwd, state, options = {}) => {
 
   for (const bucket of Object.values(state.requirements || {})) {
     const dir = bucket.dir
+    if (isArchivedChangeDir(dir)) continue
+
     const absent = []
     const unsynced = []
     const stale = []
@@ -1217,22 +1258,37 @@ const discoverChangeDirs = (cwd) => {
   return dirs
 }
 
+const collectActiveChangeDirs = (cwd, state) => {
+  const dirs = [...(state.changeDirs || []), ...discoverChangeDirs(cwd)]
+  const active = []
+
+  for (const dir of dirs) {
+    const normalized = path.normalize(dir)
+    if (isArchivedChangeDir(normalized)) continue
+    if (!active.some((existing) => samePath(existing, normalized))) active.push(normalized)
+  }
+
+  return active
+}
+
 const collectReviewTargets = (cwd, state) => {
   if (!hasSddWorkspace(cwd)) return []
 
-  const dirs = [...(state.changeDirs || []), ...discoverChangeDirs(cwd)]
+  const discoveredDirs = [...(state.changeDirs || []), ...discoverChangeDirs(cwd)]
+  const dirs = collectActiveChangeDirs(cwd, state)
   const targets = []
 
   for (const dir of dirs) {
     for (const file of REVIEW_FILES) {
       const target = path.join(dir, file)
+      if (!fs.existsSync(target)) continue
       if (!targets.some((existing) => samePath(existing, target))) {
         targets.push(path.normalize(target))
       }
     }
   }
 
-  if (targets.length) return targets
+  if (targets.length || dirs.length || discoveredDirs.length) return targets
 
   const fallbackRoot = fs.existsSync(path.join(cwd, ".sdd")) ? ".sdd" : "sdd"
   return REVIEW_FILES.map((file) => path.join(cwd, fallbackRoot, "changes", "<change-id>", file))
@@ -1271,10 +1327,8 @@ const collectCodeGaps = (cwd, state) => {
   const reviewSignature = codeReviewSignature(cwd, baseGap)
   const hasReviewEdit = editedSddSeqAfter(state, reviewTargets, latestCodeSeq)
 
-  if (hasReviewEdit) return []
-
   const reviewReady = pendingReviewTargets.length === 0
-  if (reviewReady && isCodeReviewConfirmed(state, reviewSignature)) return []
+  if (reviewReady && (hasReviewEdit || isCodeReviewConfirmed(state, reviewSignature))) return []
 
   return [
     {
@@ -1614,9 +1668,13 @@ const buildStopEnforcement = (pendingMessage) =>
     "For peer-sync gaps, use read, then edit or write, to synchronize the listed SDD document(s) before trying to stop again.",
   ].join("\n")
 
+const confirmationStillNeedsHumanReview = (state, confirmation) =>
+  !editedSddSeqAfter(state, confirmation?.reviewTargets || [], Number(confirmation?.codeSeq || 0))
+
 const collectCodeReviewAdvisoryLines = (cwd, state) =>
   Object.values(state.codeReviewConfirmations || {})
     .filter((confirmation) => confirmation?.confirmed && confirmation?.userConfirmationRecommended)
+    .filter((confirmation) => confirmationStillNeedsHumanReview(state, confirmation))
     .sort((left, right) => {
       const leftSeq = Number(left.codeSeq || 0)
       const rightSeq = Number(right.codeSeq || 0)
@@ -2014,9 +2072,11 @@ if (require.main === module) {
     clearCodeDriftNoticeIfResolved,
     clearSubagentCheckpointNoticeIfResolved,
     cleanupDiagnosticLogs,
+    collectActiveChangeDirs,
     collectCodeGaps,
     collectPeerGaps,
     collectReportLines,
+    collectReviewTargets,
     codeReviewSignature,
     diagnosticLogPath,
     drift,
@@ -2030,6 +2090,7 @@ if (require.main === module) {
     isDtsContextActive,
     isDtsContextText,
     isOpenCodeHookInput,
+    isArchivedChangeDir,
     isSubagentCheckpointTool,
     loadState,
     normalizeKey,

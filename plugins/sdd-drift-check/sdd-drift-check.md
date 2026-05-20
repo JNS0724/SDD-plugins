@@ -294,10 +294,15 @@ as review evidence. It deduplicates repeated file-tool `PostToolUse` calls by
 create duplicate enforcement or design/tasks ping-pong.
 
 Code-ahead-of-doc drift is batched at session level. The first code edit that
-gets ahead of SDD emits a full model-visible deferred review reminder. Later
-tool calls in the same unreviewed batch may emit compact reminders until the
-listed SDD documents have both been read. To avoid issue-ticket or rate-limit
-loops when context inference fails, tool-result reminders are capped by
+gets ahead of SDD emits a full model-visible deferred review reminder. The
+review target set is every existing `design.md` and `tasks.md` under active
+root-level `sdd/changes/*` and `.sdd/changes/*` directories. This covers
+multiple change proposals in progress at the same time instead of only the
+change directory touched in the current turn. Archived change directories are
+excluded. Later tool calls in the same unreviewed batch may emit compact
+reminders until the listed SDD documents have been reviewed. To avoid
+issue-ticket or rate-limit loops when context inference fails, tool-result
+reminders are capped by
 `SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS`, default `1` total reminder per
 unreviewed code batch. After the cap, the hook stays silent for tool results and
 keeps the unresolved review visible in the diagnostic log/report instead of
@@ -326,12 +331,19 @@ explicit SDD document edits.
 
 The batch clears after either:
 
-- the latest code change is followed by an actual SDD edit and peer rules are
-  satisfied. The code-review reminder is cleared as soon as an SDD document is
-  actually edited; any remaining design/tasks peer sync is handled by the
-  separate peer-sync rule instead of re-asking for a generic SDD review; or
-- both relevant `design.md` and `tasks.md` have been read, then the hook records
-  a no-edit review-confirmation marker in hook state for the current code batch.
+- every active `sdd/changes/*/{design.md,tasks.md}` review target has been
+  touched after the latest code change, and at least one reviewed SDD document
+  was actually edited; any remaining design/tasks peer sync is handled by the
+  separate peer-sync rule; or
+- every active review target has been read, then the hook records a no-edit
+  review-confirmation marker in hook state for the current code batch.
+
+A change directory is treated as archived, and therefore skipped, when its
+directory name is `archive`, `archives`, `archived`, `.archive`, `.archived`, or
+`已归档`; when its name is explicitly suffixed/prefixed with `archived` or
+`已归档`; when it contains marker files such as `.archived`, `.archive`,
+`ARCHIVED`, `archived.md`, `archive.md`, or `已归档.md`; or when a small status
+file such as `status.md` contains `status: archived` or `状态: 已归档`.
 
 The model should update only the documents that actually need changes; it may
 leave both documents unchanged if review shows they already match the code. That
@@ -342,8 +354,9 @@ If the report contents are unchanged on a later unrelated hook pass, the hook
 does not rewrite the report just to refresh the timestamp.
 When it does edit an SDD document, the injected prompt explicitly asks it to
 keep existing Markdown headings, preserve the top-level template title, avoid
-single-line summary replacement, and update the closest existing paragraph or
-task item instead of adding new sections.
+single-line summary replacement, keep unrelated existing paragraphs and task
+items, and update the closest existing paragraph or task item instead of adding
+new sections.
 
 For unrelated files, "silent" means the hook may still append diagnostic log
 records such as `hook_start`, `posttooluse_no_output`, or
