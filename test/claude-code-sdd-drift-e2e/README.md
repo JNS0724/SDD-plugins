@@ -59,7 +59,9 @@ claude --print --output-format stream-json --include-hook-events --setting-sourc
 
 The checked-in `.claude/settings.json` enables `UserPromptSubmit`, `PostToolUse`,
 and `Stop`. `UserPromptSubmit` lets the hook persist issue-ticket context before
-later tool events. `PostToolUse` includes `Read` so the hook can verify SDD
-review, not just file edits. For Claude Code, `PostToolUse` returns
+later tool events. `PostToolUse` uses an explicit matcher for file tools and
+subagent result checkpoints, avoiding the broad `matcher: "*"` shape that can
+make OpenCode/oh-my-opencode run the hook for unrelated tools. For Claude Code,
+`PostToolUse` returns
 `additionalContext`, and `Stop` returns `{"decision":"block","reason":"..."}`
 when synchronization or review is still missing.

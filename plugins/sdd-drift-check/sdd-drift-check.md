@@ -256,7 +256,7 @@ Reliable OpenCode cascade mode, with optional `PostToolUse` enabled:
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task",
         "hooks": [
           {
             "type": "command",
@@ -280,11 +280,18 @@ Reliable OpenCode cascade mode, with optional `PostToolUse` enabled:
 }
 ```
 
-The hook treats `Edit`, `Write`, and Claude Code's common `MultiEdit` tool as
-edits. Add `Read` to the optional `PostToolUse` matcher so the hook can verify
-that SDD review actually happened. It deduplicates repeated `PostToolUse` calls
-by `tool_use_id`, so having a user-level and project-level hook config should
-not create duplicate enforcement or design/tasks ping-pong.
+Use an explicit `PostToolUse` matcher for OpenCode through oh-my-opencode:
+include file tools plus subagent result tools such as `Task`, `task`,
+`call_omo_agent`, `background_output`, and `delegate_task`. Avoid `matcher: "*"`
+unless you are debugging, because it makes every tool result run the command hook
+and can amplify oh-my-opencode/Bun instability in long sessions. File tools let
+the hook record actual Read/Edit/Write state, and subagent result tools provide a
+checkpoint where unresolved SDD drift can be re-shown to the main agent. Other
+tools stay silent unless there is already an unresolved SDD gap. The hook treats
+`Edit`, `Write`, and Claude Code's common `MultiEdit` tool as edits, and `Read`
+as review evidence. It deduplicates repeated file-tool `PostToolUse` calls by
+`tool_use_id`, so having a user-level and project-level hook config should not
+create duplicate enforcement or design/tasks ping-pong.
 
 Code-ahead-of-doc drift is batched at session level. The first code edit that
 gets ahead of SDD emits a full model-visible deferred review reminder. Later
@@ -320,7 +327,9 @@ explicit SDD document edits.
 The batch clears after either:
 
 - the latest code change is followed by an actual SDD edit and peer rules are
-  satisfied; or
+  satisfied. The code-review reminder is cleared as soon as an SDD document is
+  actually edited; any remaining design/tasks peer sync is handled by the
+  separate peer-sync rule instead of re-asking for a generic SDD review; or
 - both relevant `design.md` and `tasks.md` have been read, then the hook records
   a no-edit review-confirmation marker in hook state for the current code batch.
 
@@ -345,7 +354,10 @@ is unchanged.
 When the environment supports subagents and the current project allows them, the
 prompt suggests using a read-only subagent for SDD review. This is optional:
 without subagents, the main agent performs the same review with normal `Read`
-tools and remains responsible for any edits.
+tools and remains responsible for any edits. In OpenCode through oh-my-opencode,
+the `PostToolUse` matcher must include the subagent result tools listed above;
+otherwise those tools do not invoke the hook, and the main agent may miss the
+pending SDD reminder after a subagent analysis returns.
 
 Recommended `.gitignore` entries:
 

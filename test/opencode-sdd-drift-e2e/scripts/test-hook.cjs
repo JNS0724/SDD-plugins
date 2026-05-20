@@ -331,10 +331,47 @@ try {
     assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
 
     edit(state, readOnlyDesign)
-    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 1)
+    assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
     assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].unsynced, ["tasks.md"])
     edit(state, tasks)
     assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "subagent-checkpoint")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "subagent")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "feature.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const feature = true\n")
+
+    hook.recordFile(state, code, true)
+    const codeGaps = hook.collectCodeGaps(cwd, state)
+    assert.strictEqual(codeGaps.length, 1)
+    hook.markCodeDriftNoticeEmitted(cwd, state, codeGaps)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
+    assert.strictEqual(hook.isSubagentCheckpointTool("background_output"), true)
+    assert.strictEqual(
+      hook.isSubagentCheckpointTool("call_omo_agent", { run_in_background: true }),
+      false
+    )
+
+    const pending = hook.buildSubagentCheckpointEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "code")
+    assert.match(pending.message, /pending SDD review/)
+    assert.match(pending.message, /read-only review subagent/)
+    assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), true)
+    hook.markSubagentCheckpointNoticeEmitted(state, pending, "background_output")
+    assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), false)
+
+    hook.recordFile(state, design, false)
+    hook.recordFile(state, tasks, false)
+    assert.strictEqual(hook.buildSubagentCheckpointEnforcement(cwd, state), null)
+    hook.clearSubagentCheckpointNoticeIfResolved(state, null)
+    assert.strictEqual(state.subagentCheckpointNotice, null)
   }
 
   {
@@ -562,9 +599,10 @@ try {
     write(code, "export const value = 1\n")
 
     hook.recordFile(state, code, true)
-    hook.recordFile(state, design, false)
     edit(state, tasks)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+    assert.deepStrictEqual(hook.collectPeerGaps(cwd, state)[0].unsynced, ["design.md"])
+    edit(state, design)
     assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
   }
 

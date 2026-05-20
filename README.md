@@ -53,6 +53,7 @@ It supports:
 - Claude Code compatible hook settings.
 - `UserPromptSubmit` context capture for Claude Code issue-ticket detection.
 - `PostToolUse` model-visible reminders for reliable OpenCode cascades.
+- Subagent result checkpoints for OpenCode + `oh-my-opencode`.
 - `Stop` hook checks for Claude-compatible final review behavior.
 - Session-level batching for code changes before SDD reconciliation.
 - Issue-ticket/DTS context suppression for code-ahead-of-doc reminders.

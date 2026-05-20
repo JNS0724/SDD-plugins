@@ -9,7 +9,13 @@ const DEFAULT_HOOK_RELATIVE_PATH = path.join(
   "sdd-drift-check",
   "sdd-drift-check-hook.js"
 )
-const SUPPORTED_TOOL_NAMES = new Set(["read", "edit", "write", "multiedit"])
+const FILE_TOOL_NAMES = new Set(["read", "edit", "write", "multiedit"])
+const SUBAGENT_CHECKPOINT_TOOL_NAMES = new Set([
+  "background_output",
+  "call_omo_agent",
+  "delegate_task",
+  "task",
+])
 
 const ownDir = __dirname
 
@@ -42,9 +48,19 @@ const getToolFilePath = (args) =>
   args?.file_path || args?.filePath || args?.path || args?.file
 
 const normalizeToolName = (tool) => {
-  const name = String(tool || "").toLowerCase()
+  const name = String(tool || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s.]+/g, "_")
   if (name === "multi_edit" || name === "multi-edit") return "multiedit"
   return name
+}
+
+const isSupportedToolEvent = (tool, args) => {
+  if (FILE_TOOL_NAMES.has(tool) && getToolFilePath(args || {})) return true
+  if (tool === "background_task") return false
+  if (tool === "call_omo_agent" && args?.run_in_background === true) return false
+  return SUBAGENT_CHECKPOINT_TOOL_NAMES.has(tool)
 }
 
 const normalizeToolArgs = (args) => {
@@ -219,8 +235,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
 
     "tool.execute.after": async (input, output) => {
       const tool = normalizeToolName(input.tool)
-      if (!SUPPORTED_TOOL_NAMES.has(tool)) return
-      if (!getToolFilePath(input.args || {})) return
+      if (!isSupportedToolEvent(tool, input.args || {})) return
 
       const result = await hookRunner(hookScript, buildPostToolUseInput(ctx, input))
       if (result.error || result.timedOut) {
@@ -266,6 +281,7 @@ exports._private = {
   buildChatMessageInput,
   buildPostToolUseInput,
   buildStopInput,
+  isSupportedToolEvent,
   normalizeToolName,
   normalizeToolArgs,
   partText,

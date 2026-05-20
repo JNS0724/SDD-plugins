@@ -72,6 +72,53 @@ const run = async () => {
   }
 
   {
+    const cwd = path.join(tmpRoot, "native-subagent-checkpoint")
+    write(path.join(cwd, "sdd", "changes", "alpha", "design.md"), "# Design\n")
+    write(path.join(cwd, "sdd", "changes", "alpha", "tasks.md"), "# Tasks\n")
+
+    const calls = []
+    const hooks = await native.SddDriftCheckOpenCode({
+      directory: cwd,
+      worktree: cwd,
+      client: makeClient(),
+      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+        calls.push(hookInput)
+        assert.strictEqual(hookInput.hook_source, "opencode-plugin")
+        assert.strictEqual(hookInput.hook_event_name, "PostToolUse")
+        assert.strictEqual(hookInput.session_id, "session-native-subagent")
+        assert.strictEqual(hookInput.tool_name, "background_output")
+        assert.deepStrictEqual(hookInput.tool_input, { task_id: "task-1" })
+        return {
+          status: 0,
+          stdout: "SDD drift reminder: review design.md and tasks.md after subagent analysis",
+          stderr: "",
+        }
+      }),
+    })
+    const output = {
+      title: "background output",
+      output: "subagent says docs need review",
+      metadata: {},
+    }
+    await hooks["tool.execute.after"](
+      {
+        tool: "background_output",
+        sessionID: "session-native-subagent",
+        callID: "call-subagent",
+        args: {
+          task_id: "task-1",
+        },
+      },
+      output
+    )
+
+    assert.strictEqual(calls.length, 1)
+    assert.match(output.output, /subagent says docs need review/)
+    assert.match(output.output, /SDD drift reminder/)
+    assert.strictEqual(output.metadata.sddDriftCheck.injected, true)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "native-chat-message")
     const calls = []
     write(path.join(cwd, "sdd", "changes", "ticket", "design.md"), "# Design\n")

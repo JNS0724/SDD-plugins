@@ -45,6 +45,12 @@ const PROPOSAL_FILE = "proposal.md"
 const DESIGN_FILE = "design.md"
 const TASKS_FILE = "tasks.md"
 const REVIEW_FILES = [DESIGN_FILE, TASKS_FILE]
+const SUBAGENT_CHECKPOINT_TOOLS = new Set([
+  "background_output",
+  "call_omo_agent",
+  "delegate_task",
+  "task",
+])
 const CHANGE_DOC_REQUIREMENTS = {
   [PROPOSAL_FILE]: [DESIGN_FILE],
   [DESIGN_FILE]: [TASKS_FILE],
@@ -405,6 +411,7 @@ const emptyState = () => ({
   peerSyncs: {},
   codeDriftNotice: null,
   peerDriftNotice: null,
+  subagentCheckpointNotice: null,
   codeReviewConfirmations: {},
   transcriptEvents: {},
   dtsContext: null,
@@ -438,6 +445,10 @@ const normalizeState = (parsed) => {
   state.peerDriftNotice =
     parsed.peerDriftNotice && typeof parsed.peerDriftNotice === "object"
       ? parsed.peerDriftNotice
+      : null
+  state.subagentCheckpointNotice =
+    parsed.subagentCheckpointNotice && typeof parsed.subagentCheckpointNotice === "object"
+      ? parsed.subagentCheckpointNotice
       : null
   state.codeReviewConfirmations =
     parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object"
@@ -1258,10 +1269,12 @@ const collectCodeGaps = (cwd, state) => {
     pendingReviewTargets,
   }
   const reviewSignature = codeReviewSignature(cwd, baseGap)
-  const reviewReady = pendingReviewTargets.length === 0
   const hasReviewEdit = editedSddSeqAfter(state, reviewTargets, latestCodeSeq)
 
-  if (reviewReady && (hasReviewEdit || isCodeReviewConfirmed(state, reviewSignature))) return []
+  if (hasReviewEdit) return []
+
+  const reviewReady = pendingReviewTargets.length === 0
+  if (reviewReady && isCodeReviewConfirmed(state, reviewSignature)) return []
 
   return [
     {
@@ -1403,6 +1416,11 @@ const clearPeerDriftNoticeIfResolved = (state, peerGaps) => {
   state.peerDriftNotice = null
 }
 
+const clearSubagentCheckpointNoticeIfResolved = (state, pending) => {
+  if (pending) return
+  state.subagentCheckpointNotice = null
+}
+
 const peerDriftSignature = (peerGaps) =>
   hash(JSON.stringify({ type: "peer", gaps: peerGaps.map(serializablePeerGap) }))
 
@@ -1450,6 +1468,60 @@ const markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
     emittedAt: existing.emittedAt || new Date().toISOString(),
     lastEmittedAt: new Date().toISOString(),
     emissionCount: codeDriftNoticeEmissionCount(state) + 1,
+  }
+}
+
+const normalizeCheckpointToolName = (tool) =>
+  String(tool || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s.]+/g, "_")
+
+const isSubagentCheckpointTool = (tool, toolInput = {}) => {
+  const normalized = normalizeCheckpointToolName(tool)
+  if (normalized === "background_task") return false
+  if (normalized === "call_omo_agent" && toolInput?.run_in_background === true) return false
+  return SUBAGENT_CHECKPOINT_TOOLS.has(normalized)
+}
+
+const buildSubagentCheckpointEnforcement = (cwd, state) => {
+  const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
+  if (hardPeerGaps.length) {
+    return {
+      type: "peer",
+      signature: hash(JSON.stringify({ type: "subagent-peer", gaps: hardPeerGaps.map(serializablePeerGap) })),
+      message: buildToolEnforcement(hardPeerGaps, { compact: true }),
+    }
+  }
+
+  const pendingCodeGaps = collectCodeGaps(cwd, state).filter((gap) => !gap.reviewReady)
+  if (pendingCodeGaps.length) {
+    return {
+      type: "code",
+      signature: hash(
+        JSON.stringify({
+          type: "subagent-code",
+          gaps: pendingCodeGaps.map((gap) => serializableCodeGap(cwd, gap)),
+        })
+      ),
+      message: buildCodeEnforcement(cwd, pendingCodeGaps, { compact: true }),
+    }
+  }
+
+  return null
+}
+
+const shouldEmitSubagentCheckpointNotice = (state, pending) =>
+  Boolean(pending?.signature) && state.subagentCheckpointNotice?.signature !== pending.signature
+
+const markSubagentCheckpointNoticeEmitted = (state, pending, tool) => {
+  if (!pending?.signature) return
+  state.subagentCheckpointNotice = {
+    active: true,
+    signature: pending.signature,
+    type: pending.type,
+    tool: normalizeCheckpointToolName(tool),
+    emittedAt: new Date().toISOString(),
   }
 }
 
@@ -1773,9 +1845,34 @@ const main = async () => {
   const toolInput = input.tool_input || {}
   const fp = getToolFilePath(toolInput)
   if (!fp || typeof fp !== "string") {
+    const pending = isSubagentCheckpointTool(tool, toolInput)
+      ? buildSubagentCheckpointEnforcement(cwd, state)
+      : null
+    clearSubagentCheckpointNoticeIfResolved(state, pending)
+    if (pending && shouldEmitSubagentCheckpointNotice(state, pending)) {
+      markSubagentCheckpointNoticeEmitted(state, pending, tool)
+      saveState(cwd, sessionID, state)
+      refreshReport(cwd, state)
+      writeDiagnosticLog(cwd, {
+        event: "emit_subagent_checkpoint_enforcement",
+        input: summarizeInput(input),
+        tool,
+        pendingType: pending.type,
+        pendingSignature: pending.signature,
+        messagePreview: limitString(pending.message, 800),
+      })
+      emitEnforcement(input, pending.message)
+      return
+    }
+
+    saveState(cwd, sessionID, state)
+    refreshReport(cwd, state)
     writeDiagnosticLog(cwd, {
       event: "ignored_no_file_path",
       input: summarizeInput(input),
+      tool,
+      subagentCheckpoint: isSubagentCheckpointTool(tool, toolInput),
+      pendingSubagentCheckpoint: Boolean(pending),
     })
     return
   }
@@ -1818,6 +1915,7 @@ const main = async () => {
   const noticePeerGaps = hardPeerGaps.length ? hardPeerGaps : stagePeerGaps
   clearPeerDriftNoticeIfResolved(state, noticePeerGaps)
   clearCodeDriftNoticeIfResolved(state, codeGaps)
+  clearSubagentCheckpointNoticeIfResolved(state, buildSubagentCheckpointEnforcement(cwd, state))
   const emitCodeGap = !hardPeerGaps.length && shouldEmitCodeDriftNotice(state, codeGaps)
   const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && isCodeDriftNoticeSuppressed(state, codeGaps)
   const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
@@ -1912,7 +2010,9 @@ if (require.main === module) {
     buildPendingEnforcement,
     buildStopEnforcement,
     buildStopOutput,
+    buildSubagentCheckpointEnforcement,
     clearCodeDriftNoticeIfResolved,
+    clearSubagentCheckpointNoticeIfResolved,
     cleanupDiagnosticLogs,
     collectCodeGaps,
     collectPeerGaps,
@@ -1930,6 +2030,7 @@ if (require.main === module) {
     isDtsContextActive,
     isDtsContextText,
     isOpenCodeHookInput,
+    isSubagentCheckpointTool,
     loadState,
     normalizeKey,
     parseHookInput,
@@ -1945,7 +2046,9 @@ if (require.main === module) {
     writeDiagnosticLog,
     updateDtsContextFromInput,
     shouldEmitCodeDriftNotice,
+    shouldEmitSubagentCheckpointNotice,
     markCodeDriftNoticeEmitted,
+    markSubagentCheckpointNoticeEmitted,
     markCodeReviewNoEditConfirmation,
     markStopCodeReviewConfirmation,
     updateRequirementsForEdit,

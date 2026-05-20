@@ -208,7 +208,7 @@ $settings = @"
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task",
         "hooks": [
           {
             "type": "command",
