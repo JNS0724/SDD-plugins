@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "multi-change-review", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "multi-change-review", "optimization-doc-required", "behavior-doc-required", "api-contract-doc-required", "error-handling-doc-required", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
   [string]$Scenario = "design-cascade",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -326,13 +326,79 @@ $archivedTasksPath = Join-Path $workRoot "sdd\changes\archived-feat\tasks.md"
 $archivedMarkerPath = Join-Path $workRoot "sdd\changes\archived-feat\.archived"
 $appPath = Join-Path $workRoot "src\app.ts"
 $helperPath = Join-Path $workRoot "src\helper.ts"
+$docRequiredConfig = switch ($Scenario) {
+  "optimization-doc-required" {
+    @{
+      InitialDesign = "Current implementation uses linear lookup only. Cache optimization is not implemented yet."
+      InitialTask = "- [ ] Add cached lookup optimization and update the design once implemented."
+      SddFact = "The active SDD currently says src/app.ts uses linear lookup only and that cached lookup optimization is still pending."
+      CodeInstruction = "implements a cached lookup optimization"
+      WhyDocRequired = "Because this optimization changes performance strategy and the active SDD is now behind the implemented code, do not claim the documents need no update."
+      StalePhrase = "linear lookup only; Cache optimization is not implemented yet"
+      StalePattern = "linear lookup only|Cache optimization is not implemented yet"
+      UpdatedPattern = "cached|cache"
+      UpdatedExpectation = "describe cached lookup optimization"
+    }
+  }
+  "behavior-doc-required" {
+    @{
+      InitialDesign = "Greeting response is plain lowercase text. Enthusiastic greeting is not implemented yet."
+      InitialTask = "- [ ] Add enthusiastic greeting behavior and update the design once implemented."
+      SddFact = "The active SDD currently says src/app.ts returns a plain lowercase greeting and that enthusiastic greeting behavior is still pending."
+      CodeInstruction = "returns an enthusiastic greeting with an exclamation"
+      WhyDocRequired = "Because this behavior change alters user-visible output and the active SDD is now behind the implemented code, do not claim the documents need no update."
+      StalePhrase = "plain lowercase text; Enthusiastic greeting is not implemented yet"
+      StalePattern = "plain lowercase text|Enthusiastic greeting is not implemented yet"
+      UpdatedPattern = "enthusiastic|exclamation|excited"
+      UpdatedExpectation = "describe the enthusiastic greeting behavior"
+    }
+  }
+  "api-contract-doc-required" {
+    @{
+      InitialDesign = "The greet API accepts only name: string. Options parameter is not supported yet."
+      InitialTask = "- [ ] Add the greet options parameter contract and update the design once implemented."
+      SddFact = "The active SDD currently says greet accepts only name: string and that an options parameter is not supported yet."
+      CodeInstruction = "changes greet to accept an optional options object with an excited boolean"
+      WhyDocRequired = "Because this API contract change alters the public function signature and the active SDD is now behind the implemented code, do not claim the documents need no update."
+      StalePhrase = "accepts only name: string; Options parameter is not supported yet"
+      StalePattern = "accepts only name: string|Options parameter is not supported yet"
+      UpdatedPattern = "options|excited"
+      UpdatedExpectation = "describe the options parameter contract"
+    }
+  }
+  "error-handling-doc-required" {
+    @{
+      InitialDesign = "Empty name input is not validated. Empty-name fallback is not implemented yet."
+      InitialTask = "- [ ] Add empty-name fallback behavior and update the design once implemented."
+      SddFact = "The active SDD currently says empty name input is not validated and that empty-name fallback behavior is still pending."
+      CodeInstruction = "adds validation and fallback behavior for empty names"
+      WhyDocRequired = "Because this error-handling change alters edge-case behavior and the active SDD is now behind the implemented code, do not claim the documents need no update."
+      StalePhrase = "not validated; Empty-name fallback is not implemented yet"
+      StalePattern = "not validated|Empty-name fallback is not implemented yet"
+      UpdatedPattern = "empty|fallback|validation"
+      UpdatedExpectation = "describe empty-name validation or fallback behavior"
+    }
+  }
+  default {
+    $null
+  }
+}
+$isDocRequiredScenario = $null -ne $docRequiredConfig
 if ($hasSddWorkspace) {
   Set-Content -LiteralPath $proposalPath -Value "# Proposal`n`nInitial proposal."
   if ($Scenario -ne "proposal-no-peer") {
-    Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
+    if ($isDocRequiredScenario) {
+      Set-Content -LiteralPath $designPath -Value "# Design`n`n$($docRequiredConfig["InitialDesign"])"
+    } else {
+      Set-Content -LiteralPath $designPath -Value "# Design`n`nInitial design."
+    }
   }
   if ($Scenario -ne "proposal-no-peer" -and $Scenario -ne "design-no-peer") {
-    Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+    if ($isDocRequiredScenario) {
+      Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n$($docRequiredConfig["InitialTask"])"
+    } else {
+      Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unchanged until SDD drift enforcement asks for synchronization."
+    }
   }
   if ($Scenario -eq "multi-change-review") {
     Set-Content -LiteralPath $parallelProposalPath -Value "# Proposal`n`nParallel proposal."
@@ -359,7 +425,7 @@ if ($Scenario -eq "dts-code") {
   Remove-Item Env:\SDD_DRIFT_DTS_CONTEXT -ErrorAction SilentlyContinue
 }
 
-$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "multi-change-review" -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "multi-change-review" -or $isDocRequiredScenario -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeNoDocScenario = $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeReviewNoEditScenario = $Scenario -eq "code-no-doc-change"
 $isNoPeerScenario = $Scenario -eq "design-no-peer" -or $Scenario -eq "proposal-no-peer"
@@ -466,6 +532,20 @@ $prompt = if ($isStopOnly -and $Scenario -eq "multi-change-review") {
     "3. Do not read or write sdd/changes/test-feat/design.md."
     "4. Do not read or write sdd/changes/test-feat/tasks.md."
     "Use only read and write tools. Finish after src/app.ts is updated."
+  ) -join " "
+} elseif ($isDocRequiredScenario) {
+  @(
+    "Execute this exact local SDD alignment validation task now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    $docRequiredConfig["SddFact"]
+    "Use this sequence: 1. Read src/app.ts."
+    "2. Write src/app.ts so it $($docRequiredConfig["CodeInstruction"]) and contains this exact string literal: `"$codeMarker`"."
+    "3. Wait for the src/app.ts write tool result and inspect that tool result text."
+    "4. If the tool result contains `"SDD drift tool result enforcement`" or `"SDD reconciliation review`", follow that hook instruction. Read sdd/changes/test-feat/design.md and sdd/changes/test-feat/tasks.md."
+    "5. $($docRequiredConfig["WhyDocRequired"])"
+    "6. Update sdd/changes/test-feat/design.md with the smallest edit that removes or rewrites all of these stale facts: $($docRequiredConfig["StalePhrase"]). Do not leave old wording that contradicts the new code. The design update must include this exact phrase: $marker."
+    "7. Update sdd/changes/test-feat/tasks.md with the smallest edit that preserves the task-list format and includes this exact completed task line: - [x] $taskMarker."
+    "Use only read, edit, and write tools. Finish only after src/app.ts, design.md, and tasks.md are aligned."
   ) -join " "
 } elseif ($Scenario -eq "multi-change-review") {
   @(
@@ -752,6 +832,20 @@ if ($Scenario -eq "multi-change-review") {
   }
   if ($archivedTasksText -match [regex]::Escape($taskMarker) -or $archivedTasksText -match [regex]::Escape($parallelTaskMarker)) {
     throw "expected archived-feat/tasks.md not to receive active review markers"
+  }
+}
+if ($isDocRequiredScenario) {
+  if ($outText -notmatch "Active SDD documents are live planning records") {
+    throw "expected hook output to include active SDD alignment rules"
+  }
+  if ($designText -match $docRequiredConfig["StalePattern"]) {
+    throw "expected design.md to remove or rewrite stale wording: $($docRequiredConfig["StalePhrase"])"
+  }
+  if ($designText -notmatch $docRequiredConfig["UpdatedPattern"]) {
+    throw "expected design.md to $($docRequiredConfig["UpdatedExpectation"])"
+  }
+  if ($tasksText -notmatch "\[x\]") {
+    throw "expected tasks.md to mark the SDD task complete"
   }
 }
 if ($Scenario -eq "code-no-doc-change") {

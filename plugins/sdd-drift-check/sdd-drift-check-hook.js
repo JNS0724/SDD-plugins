@@ -70,6 +70,16 @@ const DOCUMENT_SYNC_RULES = [
   "Find the most appropriate existing heading, paragraph, list item, or task item, and make the smallest needed update there.",
   "For tasks.md, preserve the task-list format and update the relevant existing checklist item when possible.",
 ]
+const ACTIVE_SDD_ALIGNMENT_RULES = [
+  "Active SDD documents are live planning records until their change directory is archived; before the final answer, keep active design.md and tasks.md aligned with the implemented code.",
+  "Do not treat an optimization or refactor as documentation-free if it changes behavior, API or contracts, algorithms, state or data flow, data structures, performance strategy, error handling, security boundaries, user-visible results, or implementation constraints; update design.md when any of those code facts changed.",
+  "Do not satisfy SDD alignment by only adding a marker, completion note, or generic summary; replace the specific stale sentence, paragraph, or checklist item so the document states the actual implemented behavior, API, error handling, performance strategy, or task status.",
+  "After editing design.md, re-read the changed sentence mentally and ensure no old wording still contradicts the code you just wrote.",
+  "Update tasks.md when the code completes, changes, cancels, splits, or invalidates an implementation task, checklist item, planned step, or acceptance condition.",
+  "The no-document-change path is only valid for purely mechanical edits with no design or task impact, such as formatting-only changes, comment-only edits, test-only scaffolding, or dependency/config churn that does not change the active SDD plan.",
+  "If you choose no SDD edit, explicitly state which active design.md/tasks.md files you reviewed and why the code change has no design or task impact.",
+  "Modify only content relevant to the current code batch; do not invent future requirements or broaden the scope.",
+]
 const SUBAGENT_REVIEW_RULE =
   "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits."
 const DTS_CONTEXT_PATTERNS = [
@@ -1416,6 +1426,7 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
       "",
       "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
       "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
+      ...ACTIVE_SDD_ALIGNMENT_RULES,
       "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
       "After both documents have been reviewed, you may finish normally; the hook records the no-edit review decision and leaves a human confirmation note.",
       SUBAGENT_REVIEW_RULE,
@@ -1430,7 +1441,8 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
     "This is a deferred review checkpoint, not an instruction to stop coding immediately.",
     "Continue implementation work if more code changes are still required.",
     "When the implementation for this task is complete, and before any final answer, use the read tool to review the relevant design.md and tasks.md files.",
-    "After review, update only the SDD document(s) that actually need changes. It is valid to leave design.md and/or tasks.md unchanged when the review shows they already match the code.",
+    "After review, update active SDD document(s) whenever they no longer match the implemented code. Optimization and refactor work can still require SDD updates.",
+    ...ACTIVE_SDD_ALIGNMENT_RULES,
     "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
     "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
     ...DOCUMENT_SYNC_RULES,

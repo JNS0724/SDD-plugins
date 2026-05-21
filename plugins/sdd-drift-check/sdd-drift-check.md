@@ -308,6 +308,23 @@ unreviewed code batch. After the cap, the hook stays silent for tool results and
 keeps the unresolved review visible in the diagnostic log/report instead of
 continuing to inject model-visible text.
 
+The code-review prompt treats active SDD files as live planning records, not
+optional commentary. Until a change directory is archived, `design.md` and
+`tasks.md` should be kept aligned with implemented code facts. Behavior changes,
+API/contract changes, algorithms, state/data flow, data structures, performance
+strategy, error handling, security boundaries, user-visible results, and
+implementation constraints are all design-impacting changes even when the model
+calls the work an optimization or refactor. `tasks.md` should also move with the
+code when tasks are completed, changed, canceled, split, or invalidated. The
+prompt explicitly tells the model not to satisfy alignment by only adding a
+marker, generic completion note, or summary: it should replace the stale sentence,
+paragraph, or checklist item so the document states the actual implemented
+behavior, API, error handling, performance strategy, or task status, and it
+should not leave old wording that still contradicts the changed code. The
+no-edit path is reserved for mechanical changes with no design or task impact,
+such as formatting-only edits, comment-only edits, test-only scaffolding, or
+config/dependency churn that does not alter the active SDD plan.
+
 Frontend entry files are treated as code too. This includes `html` and `css`
 alongside JavaScript, TypeScript, framework files, and common backend/source
 extensions, so single-file browser prototypes such as `index.html` still trigger
@@ -345,11 +362,14 @@ directory name is `archive`, `archives`, `archived`, `.archive`, `.archived`, or
 `ARCHIVED`, `archived.md`, `archive.md`, or `已归档.md`; or when a small status
 file such as `status.md` contains `status: archived` or `状态: 已归档`.
 
-The model should update only the documents that actually need changes; it may
-leave both documents unchanged if review shows they already match the code. That
-no-edit path is not hard-blocked: the hook allows the turn to finish and writes a
+The model should update only the documents that actually need changes, but
+"optimization" or "refactor" is not by itself a reason to skip SDD edits. It may
+leave both documents unchanged only when review shows they already match the
+code or the code change has no active design/task impact. That no-edit path is
+not hard-blocked: the hook allows the turn to finish and writes a
 `.sdd-drift-report.md` note asking the user to confirm whether documentation
-really should remain unchanged.
+really should remain unchanged. The final response should also say which active
+SDD files were reviewed and why no document edit was needed.
 If the report contents are unchanged on a later unrelated hook pass, the hook
 does not rewrite the report just to refresh the timestamp.
 When it does edit an SDD document, the injected prompt explicitly asks it to
@@ -399,6 +419,24 @@ npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode stop-o
 npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode posttooluse-and-stop
 npm run e2e:real -- -Provider minimax -Scenario design-cascade -HookMode posttooluse-and-stop
 ```
+
+Real model semantic-drift matrix:
+
+```powershell
+npm run e2e:real -- -Provider deepseek -Scenario optimization-doc-required -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider deepseek -Scenario behavior-doc-required -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider deepseek -Scenario api-contract-doc-required -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider deepseek -Scenario error-handling-doc-required -HookMode posttooluse-and-stop
+
+npm run e2e:real -- -Provider minimax -Scenario optimization-doc-required -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider minimax -Scenario behavior-doc-required -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider minimax -Scenario api-contract-doc-required -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider minimax -Scenario error-handling-doc-required -HookMode posttooluse-and-stop
+```
+
+These scenarios cover performance strategy, user-visible behavior, API contract,
+and error-handling drift. They fail if `design.md` only receives a marker or
+completion note while stale facts still contradict the changed code.
 
 Real OpenCode workflow and silent-regression checks:
 
