@@ -251,7 +251,10 @@ New-Item -ItemType Directory -Force .claude
 ```
 
 Reliable OpenCode/OMO cascade mode, with `PostToolUse` enabled and `Stop`
-kept as a best-effort final continuation checkpoint:
+kept as a best-effort final continuation checkpoint. `PreToolUse` is only used
+for question-like handoff tools, so a model that asks whether to commit or
+continue is denied that question call and receives the pending SDD work as the
+tool-denial reason before control returns to the user:
 
 ```json
 {
@@ -266,9 +269,20 @@ kept as a best-effort final continuation checkpoint:
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion",
         "hooks": [
           {
             "type": "command",
@@ -294,12 +308,22 @@ kept as a best-effort final continuation checkpoint:
 
 Use an explicit `PostToolUse` matcher for OpenCode through oh-my-opencode:
 include file tools plus subagent result tools such as `Task`, `task`,
-`call_omo_agent`, `background_output`, and `delegate_task`. Avoid `matcher: "*"`
-unless you are debugging, because it makes every tool result run the command hook
-and can amplify oh-my-opencode/Bun instability in long sessions. File tools let
-the hook record actual Read/Edit/Write state, and subagent result tools provide a
-checkpoint where unresolved SDD drift can be re-shown to the main agent. Other
-tools stay silent unless there is already an unresolved SDD gap. The hook treats
+`call_omo_agent`, `background_output`, and `delegate_task`; also include
+question-like tools such as `question` / `AskUserQuestion` so commit-or-continue
+handoffs become SDD checkpoints. Avoid `matcher: "*"` unless you are debugging,
+because it makes every tool result run the command hook and can amplify
+oh-my-opencode/Bun instability in long sessions. File tools let the hook record
+actual Read/Edit/Write state, subagent result tools provide a checkpoint where
+unresolved SDD drift can be re-shown to the main agent, and question tools catch
+the common "work is done; should I commit?" handoff before the model stops
+working. When a question-like tool is intercepted by `PreToolUse`, the hook
+returns a structured `permissionDecision: "deny"` with the SDD reminder as the
+reason, so the model sees feedback and can continue the current turn. Other
+tools stay silent unless there is already an unresolved SDD gap.
+Question checkpoints only fire when the runtime exposes a question-like tool
+event. Plain OpenCode agents may not expose `question`; OpenCode + OMO and
+Claude-compatible hook bridges are the main target for this handoff case.
+The hook treats
 `Edit`, `Write`, and Claude Code's common `MultiEdit` tool as edits, and `Read`
 as review evidence. It deduplicates repeated file-tool `PostToolUse` calls by
 `tool_use_id`, so having a user-level and project-level hook config should not

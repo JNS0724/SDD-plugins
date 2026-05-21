@@ -199,9 +199,17 @@ $settings = @"
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "hooks": [
+          { "type": "command", "command": "node $hookPath" }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion",
         "hooks": [
           { "type": "command", "command": "node $hookPath" }
         ]

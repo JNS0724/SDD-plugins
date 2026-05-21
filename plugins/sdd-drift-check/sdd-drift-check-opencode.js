@@ -16,6 +16,15 @@ const SUBAGENT_CHECKPOINT_TOOL_NAMES = new Set([
   "delegate_task",
   "task",
 ])
+const QUESTION_CHECKPOINT_TOOL_NAMES = new Set([
+  "ask_user",
+  "ask_user_question",
+  "askuser",
+  "askuserquestion",
+  "confirm",
+  "confirmation",
+  "question",
+])
 
 const ownDir = __dirname
 
@@ -60,6 +69,7 @@ const isSupportedToolEvent = (tool, args) => {
   if (FILE_TOOL_NAMES.has(tool) && getToolFilePath(args || {})) return true
   if (tool === "background_task") return false
   if (tool === "call_omo_agent" && args?.run_in_background === true) return false
+  if (QUESTION_CHECKPOINT_TOOL_NAMES.has(tool)) return true
   return SUBAGENT_CHECKPOINT_TOOL_NAMES.has(tool)
 }
 

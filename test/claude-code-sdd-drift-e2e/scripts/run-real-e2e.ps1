@@ -148,9 +148,21 @@ $settingsObject = [ordered]@{
         )
       }
     )
+    PreToolUse = @(
+      [ordered]@{
+        matcher = "Question|question|AskUserQuestion|ask_user_question|askuserquestion"
+        hooks = @(
+          [ordered]@{
+            type = "command"
+            command = "node .claude/hooks/sdd-drift-check.js"
+            timeout = 10
+          }
+        )
+      }
+    )
     PostToolUse = @(
       [ordered]@{
-        matcher = "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task"
+        matcher = "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion"
         hooks = @(
           [ordered]@{
             type = "command"

@@ -73,6 +73,15 @@ const SUBAGENT_CHECKPOINT_TOOLS = new Set([
   "delegate_task",
   "task",
 ])
+const QUESTION_CHECKPOINT_TOOLS = new Set([
+  "ask_user",
+  "ask_user_question",
+  "askuser",
+  "askuserquestion",
+  "confirm",
+  "confirmation",
+  "question",
+])
 const CHECKPOINT_OUTPUT_KEYS = [
   "tool_output",
   "tool_result",
@@ -1603,6 +1612,9 @@ const isSubagentCheckpointTool = (tool, toolInput = {}) => {
   return SUBAGENT_CHECKPOINT_TOOLS.has(normalized)
 }
 
+const isQuestionCheckpointTool = (tool) =>
+  QUESTION_CHECKPOINT_TOOLS.has(normalizeCheckpointToolName(tool))
+
 const collectCheckpointStrings = (value, depth = 0, seen = new Set()) => {
   if (value == null || depth > 4) return []
   if (typeof value === "string") return [limitString(value, CHECKPOINT_OUTPUT_TEXT_MAX_BYTES)]
@@ -1817,6 +1829,43 @@ const buildSubagentCheckpointEnforcement = (cwd, state) => {
   return null
 }
 
+const buildQuestionCheckpointMessage = (message) =>
+  [
+    "SDD drift question checkpoint.",
+    "The assistant is about to ask the user a question or hand control back while SDD synchronization or review is still pending.",
+    "Do not ask about commit, next action, or whether to continue before resolving the SDD reminder below.",
+    "Continue the current turn now and handle the pending SDD work first.",
+    "",
+    message,
+  ].join("\n")
+
+const buildQuestionCheckpointEnforcement = (cwd, state) => {
+  const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
+  if (hardPeerGaps.length) {
+    return {
+      type: "peer",
+      signature: hash(JSON.stringify({ type: "question-peer", gaps: hardPeerGaps.map(serializablePeerGap) })),
+      message: buildQuestionCheckpointMessage(buildToolEnforcement(hardPeerGaps, { compact: true })),
+    }
+  }
+
+  const pendingCodeGaps = collectCodeGaps(cwd, state).filter((gap) => !gap.reviewReady)
+  if (pendingCodeGaps.length) {
+    return {
+      type: "code",
+      signature: hash(
+        JSON.stringify({
+          type: "question-code",
+          gaps: pendingCodeGaps.map((gap) => serializableCodeGap(cwd, gap)),
+        })
+      ),
+      message: buildQuestionCheckpointMessage(buildCodeEnforcement(cwd, pendingCodeGaps, { compact: true })),
+    }
+  }
+
+  return null
+}
+
 const shouldEmitSubagentCheckpointNotice = (state, pending) =>
   Boolean(pending?.signature) && state.subagentCheckpointNotice?.signature !== pending.signature
 
@@ -1994,6 +2043,16 @@ const buildClaudeCodeOutput = (hookEventName, message) =>
     },
   })
 
+const buildPreToolUseDenyOutput = (message) =>
+  JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: message,
+      additionalContext: message,
+    },
+  })
+
 const buildStopOutput = (input, message) => {
   if (isOpenCodeHookInput(input)) {
     if (OPENCODE_STOP_REPORT_ONLY) {
@@ -2021,6 +2080,10 @@ const emitEnforcement = (input, message) => {
   if (STRICT_BLOCK) {
     process.stderr.write(message)
     process.exit(2)
+  }
+  if (input?.hook_event_name === "PreToolUse") {
+    process.stdout.write(buildPreToolUseDenyOutput(message))
+    return
   }
   if (isOpenCodeHookInput(input)) {
     process.stdout.write(message)
@@ -2163,7 +2226,9 @@ const main = async () => {
     return
   }
 
-  if (input.hook_event_name !== "PostToolUse") {
+  const isPostToolUse = input.hook_event_name === "PostToolUse"
+  const isPreToolUse = input.hook_event_name === "PreToolUse"
+  if (!isPostToolUse && !isPreToolUse) {
     saveState(cwd, sessionID, state)
     refreshReport(cwd, state)
     writeDiagnosticLog(cwd, {
@@ -2177,14 +2242,18 @@ const main = async () => {
   const toolInput = input.tool_input || {}
   const fp = getToolFilePath(toolInput)
   if (!fp || typeof fp !== "string") {
-    const subagentCheckpoint = isSubagentCheckpointTool(tool, toolInput)
-    if (subagentCheckpoint && !markToolEvent(state, getToolEventKey(input))) {
+    const subagentCheckpoint = isPostToolUse && isSubagentCheckpointTool(tool, toolInput)
+    const questionCheckpoint = isQuestionCheckpointTool(tool)
+    const checkpoint = subagentCheckpoint || questionCheckpoint
+    if (checkpoint && !markToolEvent(state, getToolEventKey(input))) {
       saveState(cwd, sessionID, state)
       refreshReport(cwd, state)
       writeDiagnosticLog(cwd, {
         event: "ignored_duplicate_checkpoint_event",
         input: summarizeInput(input),
         tool,
+        subagentCheckpoint,
+        questionCheckpoint,
       })
       return
     }
@@ -2192,16 +2261,24 @@ const main = async () => {
     const hydratedFromCheckpointOutput = subagentCheckpoint
       ? hydrateStateFromCheckpointOutput(cwd, state, input)
       : false
-    const pending = subagentCheckpoint ? buildSubagentCheckpointEnforcement(cwd, state) : null
+    const pending = subagentCheckpoint
+      ? buildSubagentCheckpointEnforcement(cwd, state)
+      : questionCheckpoint
+        ? buildQuestionCheckpointEnforcement(cwd, state)
+        : null
     clearSubagentCheckpointNoticeIfResolved(state, pending)
     if (pending && shouldEmitSubagentCheckpointNotice(state, pending)) {
       markSubagentCheckpointNoticeEmitted(state, pending, tool)
       saveState(cwd, sessionID, state)
       refreshReport(cwd, state)
       writeDiagnosticLog(cwd, {
-        event: "emit_subagent_checkpoint_enforcement",
+        event: questionCheckpoint
+          ? "emit_question_checkpoint_enforcement"
+          : "emit_subagent_checkpoint_enforcement",
         input: summarizeInput(input),
         tool,
+        subagentCheckpoint,
+        questionCheckpoint,
         hydratedFromCheckpointOutput,
         pendingType: pending.type,
         pendingSignature: pending.signature,
@@ -2218,8 +2295,21 @@ const main = async () => {
       input: summarizeInput(input),
       tool,
       subagentCheckpoint,
+      questionCheckpoint,
       hydratedFromCheckpointOutput,
-      pendingSubagentCheckpoint: Boolean(pending),
+      pendingCheckpoint: Boolean(pending),
+    })
+    return
+  }
+
+  if (!isPostToolUse) {
+    saveState(cwd, sessionID, state)
+    refreshReport(cwd, state)
+    writeDiagnosticLog(cwd, {
+      event: "ignored_pretooluse_file_path",
+      input: summarizeInput(input),
+      tool,
+      file: fp,
     })
     return
   }
@@ -2355,6 +2445,8 @@ if (require.main === module) {
     buildClaudeCodeOutput,
     buildCodeEnforcement,
     buildPendingEnforcement,
+    buildPreToolUseDenyOutput,
+    buildQuestionCheckpointEnforcement,
     buildStopEnforcement,
     buildStopOutput,
     buildSubagentCheckpointEnforcement,
@@ -2384,6 +2476,7 @@ if (require.main === module) {
     isDtsContextText,
     isOpenCodeHookInput,
     isArchivedChangeDir,
+    isQuestionCheckpointTool,
     isSubagentCheckpointTool,
     loadState,
     normalizeKey,

@@ -442,6 +442,55 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "question-checkpoint-code")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "question-code")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "handoff.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const handoff = true\n")
+
+    hook.recordFile(state, code, true)
+    const codeGaps = hook.collectCodeGaps(cwd, state)
+    hook.markCodeDriftNoticeEmitted(cwd, state, codeGaps)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
+    assert.strictEqual(hook.isQuestionCheckpointTool("question"), true)
+    assert.strictEqual(hook.isQuestionCheckpointTool("AskUserQuestion"), true)
+
+    const pending = hook.buildQuestionCheckpointEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "code")
+    assert.match(pending.message, /SDD drift question checkpoint/)
+    assert.match(pending.message, /Do not ask about commit/)
+    assert.match(pending.message, /src\/handoff\.ts/)
+    assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), true)
+    hook.markSubagentCheckpointNoticeEmitted(state, pending, "question")
+    assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), false)
+
+    hook.recordFile(state, design, false)
+    hook.recordFile(state, tasks, false)
+    assert.strictEqual(hook.buildQuestionCheckpointEnforcement(cwd, state), null)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "question-checkpoint-peer")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "question-peer")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+
+    edit(state, design)
+    const pending = hook.buildQuestionCheckpointEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "peer")
+    assert.match(pending.message, /SDD drift question checkpoint/)
+    assert.match(pending.message, /sdd\/changes\/question-peer\/tasks\.md/)
+    assert.match(pending.message, /Peer SDD document synchronization is still pending/)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "task-output-hydration")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "task-hydration")
@@ -871,6 +920,15 @@ try {
       hookSpecificOutput: {
         hookEventName: "PostToolUse",
         additionalContext: "sync tasks.md",
+      },
+    })
+    const preOutput = JSON.parse(hook.buildPreToolUseDenyOutput("review SDD first"))
+    assert.deepStrictEqual(preOutput, {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "review SDD first",
+        additionalContext: "review SDD first",
       },
     })
   }

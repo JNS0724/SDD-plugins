@@ -120,6 +120,56 @@ const run = async () => {
   }
 
   {
+    const cwd = path.join(tmpRoot, "native-question-checkpoint")
+    write(path.join(cwd, "sdd", "changes", "alpha", "design.md"), "# Design\n")
+    write(path.join(cwd, "sdd", "changes", "alpha", "tasks.md"), "# Tasks\n")
+
+    assert.strictEqual(native._private.isSupportedToolEvent("question", {}), true)
+    assert.strictEqual(native._private.isSupportedToolEvent("askuserquestion", {}), true)
+
+    const calls = []
+    const hooks = await native.SddDriftCheckOpenCode({
+      directory: cwd,
+      worktree: cwd,
+      client: makeClient(),
+      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+        calls.push(hookInput)
+        assert.strictEqual(hookInput.hook_source, "opencode-plugin")
+        assert.strictEqual(hookInput.hook_event_name, "PostToolUse")
+        assert.strictEqual(hookInput.session_id, "session-native-question")
+        assert.strictEqual(hookInput.tool_name, "question")
+        assert.deepStrictEqual(hookInput.tool_input, { prompt: "Commit now?" })
+        return {
+          status: 0,
+          stdout: "SDD drift question checkpoint: review design.md and tasks.md before asking.",
+          stderr: "",
+        }
+      }),
+    })
+    const output = {
+      title: "question",
+      output: "Commit now?",
+      metadata: {},
+    }
+    await hooks["tool.execute.after"](
+      {
+        tool: "question",
+        sessionID: "session-native-question",
+        callID: "call-question",
+        args: {
+          prompt: "Commit now?",
+        },
+      },
+      output
+    )
+
+    assert.strictEqual(calls.length, 1)
+    assert.match(output.output, /Commit now/)
+    assert.match(output.output, /SDD drift question checkpoint/)
+    assert.strictEqual(output.metadata.sddDriftCheck.injected, true)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "native-chat-message")
     const calls = []
     write(path.join(cwd, "sdd", "changes", "ticket", "design.md"), "# Design\n")
