@@ -88,6 +88,7 @@ const run = async () => {
         assert.strictEqual(hookInput.session_id, "session-native-subagent")
         assert.strictEqual(hookInput.tool_name, "background_output")
         assert.deepStrictEqual(hookInput.tool_input, { task_id: "task-1" })
+        assert.strictEqual(hookInput.tool_output.output, "subagent says docs need review")
         return {
           status: 0,
           stdout: "SDD drift reminder: review design.md and tasks.md after subagent analysis",

@@ -328,6 +328,7 @@ try {
     assert.match(enforcement, /Do not treat an optimization or refactor as documentation-free/)
     assert.match(enforcement, /Do not satisfy SDD alignment by only adding a marker/)
     assert.match(enforcement, /document states the actual implemented behavior, API, error handling, performance strategy, or task status/)
+    assert.match(enforcement, /literal return values/)
     assert.match(enforcement, /no old wording still contradicts the code/)
     assert.match(enforcement, /changes behavior, API or contracts, algorithms, state or data flow/)
     assert.match(enforcement, /Update tasks\.md when the code completes, changes, cancels, splits, or invalidates/)
@@ -441,6 +442,95 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "task-output-hydration")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "task-hydration")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "from-task.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const fromTask = true\n")
+
+    const input = {
+      hook_event_name: "PostToolUse",
+      tool_name: "Task",
+      tool_use_id: "task-output-1",
+      tool_input: { description: "implement feature" },
+      tool_response: {
+        output: [
+          "Files changed:",
+          "- src/from-task.ts",
+          "",
+          "Also reviewed sdd/changes/task-hydration/design.md without editing it.",
+        ].join("\n"),
+      },
+    }
+
+    assert.match(hook.collectCheckpointOutputText(input), /src\/from-task\.ts/)
+    assert.deepStrictEqual(
+      hook.extractCheckpointEditedPaths(cwd, input.tool_response.output).map((file) => hook.normalizeKey(file)),
+      [hook.normalizeKey(code)]
+    )
+    assert.strictEqual(hook.hydrateStateFromCheckpointOutput(cwd, state, input), true)
+    const pending = hook.buildSubagentCheckpointEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "code")
+    assert.match(pending.message, /src\/from-task\.ts/)
+    assert.match(pending.message, /pending SDD review/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "task-mtime-hydration")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "task-mtime")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "mtime-task.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const mtimeTask = true\n")
+
+    const input = {
+      hook_event_name: "PostToolUse",
+      tool_name: "task",
+      tool_use_id: "task-mtime-1",
+      tool_input: { description: "implement feature" },
+      tool_response: {
+        output: "Implementation complete. The feature was implemented successfully.",
+      },
+    }
+
+    assert.strictEqual(hook.hydrateStateFromCheckpointMtime(cwd, state, input), true)
+    const pending = hook.buildSubagentCheckpointEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "code")
+    assert.match(pending.message, /src\/mtime-task\.ts/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "task-mtime-no-output")
+    const state = hook.emptyState()
+    const dir = path.join(cwd, "sdd", "changes", "task-mtime-no-output")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "mtime-task-no-output.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const mtimeTaskNoOutput = true\n")
+
+    const input = {
+      hook_event_name: "PostToolUse",
+      tool_name: "Task",
+      tool_use_id: "task-mtime-no-output-1",
+      tool_input: { description: "delegate implementation" },
+    }
+
+    assert.strictEqual(hook.hydrateStateFromCheckpointOutput(cwd, state, input), true)
+    const pending = hook.buildSubagentCheckpointEnforcement(cwd, state)
+    assert.strictEqual(pending.type, "code")
+    assert.match(pending.message, /src\/mtime-task-no-output\.ts/)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "frontend-html-code")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "epsilon-html")
@@ -509,6 +599,19 @@ try {
     assert.strictEqual(hook.isDtsContextActive(state), true)
     hook.recordFile(state, code, true)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
+  }
+
+  {
+    assert.strictEqual(
+      hook.isDtsContextText(
+        "Task completed. No issues were found during review, and the implementation fix is done."
+      ),
+      false
+    )
+    assert.strictEqual(
+      hook.isDtsContextText("Please fix this issue ticket by changing code only."),
+      true
+    )
   }
 
   {
@@ -839,7 +942,8 @@ try {
 
     const openCodeStop = JSON.parse(hook.buildStopOutput({ hook_source: "opencode-plugin" }, stopPrompt))
     assert.strictEqual(openCodeStop.decision, "block")
-    assert.strictEqual(openCodeStop.reason, stopPrompt)
+    assert.match(openCodeStop.reason, /Attempting OpenCode Stop continuation/)
+    assert.notStrictEqual(openCodeStop.reason, stopPrompt)
     assert.strictEqual(openCodeStop.inject_prompt, stopPrompt)
     assert.strictEqual(openCodeStop.stop_hook_active, true)
 

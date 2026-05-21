@@ -170,13 +170,19 @@ const appendToolOutput = (output, message) => {
   return true
 }
 
-const buildPostToolUseInput = (ctx, input) => ({
+const buildToolOutputSummary = (output = {}) => ({
+  title: compactText(output?.title || "", 1000),
+  output: compactText(output?.output || "", 64 * 1024),
+})
+
+const buildPostToolUseInput = (ctx, input, output) => ({
   hook_source: "opencode-plugin",
   hook_event_name: "PostToolUse",
   session_id: input.sessionID || "default",
   tool_use_id: input.callID || null,
   tool_name: normalizeToolName(input.tool),
   tool_input: normalizeToolArgs(input.args || {}),
+  tool_output: buildToolOutputSummary(output),
   cwd: normalizeCwd(ctx),
 })
 
@@ -237,7 +243,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       const tool = normalizeToolName(input.tool)
       if (!isSupportedToolEvent(tool, input.args || {})) return
 
-      const result = await hookRunner(hookScript, buildPostToolUseInput(ctx, input))
+      const result = await hookRunner(hookScript, buildPostToolUseInput(ctx, input, output))
       if (result.error || result.timedOut) {
         await logPluginIssue(ctx.client, "warn", "command hook did not complete", {
           hookScript,

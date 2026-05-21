@@ -4,9 +4,11 @@ OpenCode / Claude Code compatible hook for SDD drift checks.
 
 ## Current Status
 
-`PostToolUse` is now optional. The checked-in default config enables
-`UserPromptSubmit` for silent context capture and `Stop` for final checks, so
-the UI does not get tool-result enforcement text unless you opt in.
+`PostToolUse` is optional for Claude Code, but recommended for OpenCode through
+oh-my-opencode. The checked-in baseline keeps `UserPromptSubmit` for silent
+context capture and `Stop` for final checks. In OpenCode/OMO, Stop is only a
+best-effort continuation attempt because it fires after `session.idle`; the
+reliable model-visible path is still `PostToolUse`.
 
 ## Runtime Environment
 
@@ -30,11 +32,13 @@ OpenCode plugin hooks do not provide a direct Stop-continuation output channel.
 For reliable continuation in OpenCode, keep `tool.execute.after` enabled.
 
 Important OpenCode note: real testing with OpenCode 1.2.27 +
-`oh-my-opencode@3.17.2` showed that `Stop`-only did not trigger continuation in
-`opencode run`, even though the same transcript produced the correct block
-prompt when the hook was invoked directly. For reliable OpenCode cascade today,
-enable the optional `PostToolUse` hook below. Keep `Stop` enabled for
-Claude-compatible behavior and future OpenCode support.
+`oh-my-opencode@3.17.2` showed that `Stop`-only did not reliably trigger
+continuation in `opencode run`. Stop output can appear after the assistant has
+already ended, without causing another model turn. For reliable OpenCode cascade
+today, enable the optional `PostToolUse` hook below. Stop remains enabled as a
+bounded best-effort continuation attempt plus final report/log checkpoint. If
+you prefer no OpenCode Stop continuation attempt at all, set
+`SDD_DRIFT_OPENCODE_STOP_MODE=report-only`.
 
 The hook does not use `console.error`, `messages.transform`, or
 `session.prompt`. It is silent unless it has to return model-visible hook output.
@@ -106,6 +110,13 @@ Stop reminders default to one block via `SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS`
 because code-ahead-of-doc review is a human-confirmable checkpoint, not a hard
 peer-document synchronization requirement. Peer-document sync still uses
 `SDD_DRIFT_STOP_MAX_BLOCKS` and defaults to two blocks.
+
+In OpenCode/OMO mode, Stop returns a short `reason` and a full `inject_prompt`
+so OMO can attempt continuation without dumping the full SDD prompt as the
+visible block reason. This is best effort only: if the session has already
+settled, OpenCode may still not start another model turn. Claude Code receives
+normal `decision: "block"` Stop output. To make OpenCode Stop report-only, set
+`SDD_DRIFT_OPENCODE_STOP_MODE=report-only` or `SDD_DRIFT_OPENCODE_STOP_INJECT=0`.
 
 The hook also writes a lightweight JSONL diagnostic log by default:
 
@@ -202,7 +213,7 @@ Create `.opencode/oh-my-openagent.jsonc`:
 
 ### Claude Code Or Claude-Compatible Hook Config
 
-Default Stop-only config, with `UserPromptSubmit` context capture and no
+Claude Code Stop-only config, with `UserPromptSubmit` context capture and no
 `PostToolUse`:
 
 ```powershell
@@ -239,7 +250,8 @@ New-Item -ItemType Directory -Force .claude
 }
 ```
 
-Reliable OpenCode cascade mode, with optional `PostToolUse` enabled:
+Reliable OpenCode/OMO cascade mode, with `PostToolUse` enabled and `Stop`
+kept as a best-effort final continuation checkpoint:
 
 ```json
 {
@@ -392,6 +404,18 @@ the `PostToolUse` matcher must include the subagent result tools listed above;
 otherwise those tools do not invoke the hook, and the main agent may miss the
 pending SDD reminder after a subagent analysis returns.
 
+For OpenCode through oh-my-opencode and for OpenCode native plugin mode,
+subagent checkpoint events can also pass the tool result text into the command
+hook (`tool_response` in OMO, `tool_output` in native plugin mode). If an OMO
+plan/task agent edits code in a child context and returns a changed-files
+summary, the hook uses that summary to hydrate the parent-session state before
+checking SDD drift. This fallback is conservative: it only trusts checkpoint
+output lines that describe changed files and only records existing code paths
+inside the current workspace. If the child result says implementation/edit work
+completed but does not list files, or the checkpoint event has no text output at
+all, the hook can also scan recently modified code files in the current
+workspace (`SDD_DRIFT_CHECKPOINT_MTIME_SCAN=0` disables that fallback).
+
 Recommended `.gitignore` entries:
 
 ```gitignore
@@ -539,6 +563,17 @@ $env:SDD_DRIFT_STRICT = "1"
 opencode
 ```
 
+Disable OpenCode Stop continuation attempts and keep Stop report-only:
+
+```powershell
+$env:SDD_DRIFT_OPENCODE_STOP_MODE = "report-only"
+opencode
+```
+
+Use this only if the post-idle Stop prompt is more distracting than useful in
+your environment. In normal OpenCode/OMO usage, keep `PostToolUse` enabled; it
+handles the reliable model-visible continuation path.
+
 Hook bug diagnostics:
 
 ```powershell
@@ -553,6 +588,5 @@ opencode
 - Built-in peer rules are `proposal.md -> design.md` as a soft stage reminder
   only when `design.md` exists, `design.md -> tasks.md` only when `tasks.md`
   exists, and independent `tasks.md -> design.md` only when `design.md` exists.
-- OpenCode Stop-only continuation is kept as compatible output, but should not
-  be treated as reliable cascade enforcement until the OpenCode/oh-my bridge
-  invokes it consistently.
+- OpenCode Stop-only continuation is best effort. It should not be treated as
+  reliable cascade enforcement; use `PostToolUse` for model-visible reminders.

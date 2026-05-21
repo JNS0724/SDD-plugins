@@ -5,6 +5,8 @@ node_modules/
 *.pid
 .sdd-drift-report.md
 .sdd-drift-hook-state/
+.real-homes/
+.real-logs/
 .real-workspaces/
 .opencode/*.tmp
 .claude/*.tmp

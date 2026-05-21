@@ -8,6 +8,11 @@ const SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1"
 const STRICT_BLOCK = process.env.SDD_DRIFT_STRICT === "1"
 const DEBUG = process.env.SDD_DRIFT_DEBUG === "1"
 const OUTPUT_MODE = String(process.env.SDD_DRIFT_OUTPUT || "").toLowerCase()
+const OPENCODE_STOP_MODE = String(process.env.SDD_DRIFT_OPENCODE_STOP_MODE || "").toLowerCase()
+const OPENCODE_STOP_REPORT_ONLY =
+  OPENCODE_STOP_MODE === "report-only" ||
+  OPENCODE_STOP_MODE === "off" ||
+  process.env.SDD_DRIFT_OPENCODE_STOP_INJECT === "0"
 const STOP_MAX_BLOCKS = Number.parseInt(process.env.SDD_DRIFT_STOP_MAX_BLOCKS || "2", 10)
 const CODE_REVIEW_STOP_MAX_BLOCKS = Number.parseInt(
   process.env.SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS || "1",
@@ -34,6 +39,20 @@ const TRANSCRIPT_EVENT_CAP = Number.parseInt(
 )
 const CODE_REVIEW_CONFIRMATION_CAP = 50
 const DTS_CONTEXT_TEXT_MAX_BYTES = 512 * 1024
+const CHECKPOINT_OUTPUT_TEXT_MAX_BYTES = 64 * 1024
+const CHECKPOINT_MTIME_SCAN = process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN !== "0"
+const CHECKPOINT_MTIME_WINDOW_MS = Number.parseInt(
+  process.env.SDD_DRIFT_CHECKPOINT_MTIME_WINDOW_MS || String(10 * 60 * 1000),
+  10
+)
+const CHECKPOINT_MTIME_SCAN_MAX_FILES = Number.parseInt(
+  process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN_MAX_FILES || "50",
+  10
+)
+const CHECKPOINT_MTIME_SCAN_MAX_VISITS = Number.parseInt(
+  process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN_MAX_VISITS || "2000",
+  10
+)
 const DEFAULT_LOCK_STALE_MS = 5 * 60 * 1000
 const STATE_LOCK_STALE_MS = 30 * 1000
 const STATE_LOCK_WAIT_MS = 5 * 1000
@@ -54,6 +73,24 @@ const SUBAGENT_CHECKPOINT_TOOLS = new Set([
   "delegate_task",
   "task",
 ])
+const CHECKPOINT_OUTPUT_KEYS = [
+  "tool_output",
+  "tool_result",
+  "tool_response",
+  "result",
+  "output",
+  "response",
+]
+const CHECKPOINT_EDIT_LINE_RE =
+  /\b(changed|modified|edited|updated|created|wrote|written|implemented|generated|patched|touched|saved|added|deleted|removed|renamed|refactored)\b|已修改|已更新|已创建|已写入|已实现|已生成|写入|修改|更新|创建|实现|变更/i
+const CHECKPOINT_EDIT_HEADER_RE =
+  /\b(files?\s+(changed|modified|edited|updated|created|written)|changed\s+files?|modified\s+files?|updated\s+files?|created\s+files?|implementation\s+changes?)\b|变更文件|修改文件|更新文件|创建文件|已修改文件|已更新文件/i
+const CHECKPOINT_COMPLETION_RE =
+  /\b(implemented|fixed|updated|created|modified|changed|wrote|patched|refactored|built|generated|saved|completed implementation|implementation complete|feature complete)\b|已完成|完成实现|实现完成|已实现|已修复|已更新|已修改|已创建|已写入|完成修改|修复完成|更新完成|修改完成/i
+const CHECKPOINT_PATH_RE =
+  /(?:[A-Za-z]:)?(?:[A-Za-z0-9_. -]+[\\/])*(?:[A-Za-z0-9_. -]+\.(?:ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)|(?:proposal|design|tasks)\.md)/gi
+const CHECKPOINT_PATH_IGNORE_RE =
+  /^(?:node_modules|\.git|\.opencode|\.claude|\.sdd-drift-hook-state|\.real-workspaces)(?:\/|$)/
 const CHANGE_DOC_REQUIREMENTS = {
   [PROPOSAL_FILE]: [DESIGN_FILE],
   [DESIGN_FILE]: [TASKS_FILE],
@@ -74,6 +111,7 @@ const ACTIVE_SDD_ALIGNMENT_RULES = [
   "Active SDD documents are live planning records until their change directory is archived; before the final answer, keep active design.md and tasks.md aligned with the implemented code.",
   "Do not treat an optimization or refactor as documentation-free if it changes behavior, API or contracts, algorithms, state or data flow, data structures, performance strategy, error handling, security boundaries, user-visible results, or implementation constraints; update design.md when any of those code facts changed.",
   "Do not satisfy SDD alignment by only adding a marker, completion note, or generic summary; replace the specific stale sentence, paragraph, or checklist item so the document states the actual implemented behavior, API, error handling, performance strategy, or task status.",
+  "When a changed code file adds or changes exported names, public function signatures, literal return values, config defaults, user-visible strings, or acceptance-relevant constants, carry those concrete facts into the appropriate existing design.md/tasks.md wording instead of summarizing them vaguely.",
   "After editing design.md, re-read the changed sentence mentally and ensure no old wording still contradicts the code you just wrote.",
   "Update tasks.md when the code completes, changes, cancels, splits, or invalidates an implementation task, checklist item, planned step, or acceptance condition.",
   "The no-document-change path is only valid for purely mechanical edits with no design or task impact, such as formatting-only changes, comment-only edits, test-only scaffolding, or dependency/config churn that does not change the active SDD plan.",
@@ -86,16 +124,16 @@ const DTS_CONTEXT_PATTERNS = [
   /\bDTS-\d+\b/,
   /\bDTS\b/,
   /dts\s*(问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
-  /(问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,30}dts/i,
-  /(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,40}(修复|修改|处理|解决|fix|resolve|repair|patch|handle|address)/i,
-  /(修复|修改|处理|解决|fix|resolve|repair|patch|handle|address).{0,40}(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
+  /(问题单|工单|缺陷单|缺陷|issue\s+ticket|bug\s+ticket|ticket).{0,30}dts/i,
+  /(DTS|问题单|工单|缺陷单|缺陷|issue\s+ticket|bug\s+ticket|ticket).{0,40}(修复|修改|处理|解决|fix|resolve|repair|patch|handle|address)/i,
+  /(修复|修改|处理|解决|fix|resolve|repair|patch|handle|address).{0,40}(DTS|问题单|工单|缺陷单|缺陷|issue\s+ticket|bug\s+ticket|ticket)/i,
   /dts\s*(问题单|单|工单|缺陷|bug|issue|ticket)/i,
-  /(问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,30}dts/i,
+  /(问题单|工单|缺陷单|缺陷|issue\s+ticket|bug\s+ticket|ticket).{0,30}dts/i,
 ]
 const DTS_CONTEXT_NEGATION_PATTERNS = [
-  /(不是|非|无需|不要|不属于)\s*(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
-  /(DTS|问题单|工单|缺陷单|缺陷|bug|issue|ticket).{0,10}(不是|非|无需|不要|不属于)/i,
-  /\bnot\s+(?:a\s+)?(?:DTS|issue|ticket|bug)\b/i,
+  /(不是|非|无需|不要|不属于)\s*(DTS|问题单|工单|缺陷单|缺陷|issue\s+ticket|bug\s+ticket|ticket)/i,
+  /(DTS|问题单|工单|缺陷单|缺陷|issue\s+ticket|bug\s+ticket|ticket).{0,10}(不是|非|无需|不要|不属于)/i,
+  /\bnot\s+(?:a\s+)?(?:DTS|issue\s+ticket|bug\s+ticket|ticket)\b/i,
   /(不是|非|无需|不要|不属于)\s*DTS/i,
   /DTS.{0,10}(不是|非|无需|不要|不属于)/i,
   /\bnot\s+(?:a\s+)?DTS\b/i,
@@ -414,6 +452,7 @@ const writeDiagnosticLog = (cwd, event) => {
 
 const emptyState = () => ({
   version: 2,
+  createdAt: new Date().toISOString(),
   clock: 0,
   touched: [],
   edited: [],
@@ -440,6 +479,10 @@ const normalizeState = (parsed) => {
   if (!parsed || typeof parsed !== "object") return state
 
   state.version = 2
+  state.createdAt =
+    typeof parsed.createdAt === "string" && parsed.createdAt
+      ? parsed.createdAt
+      : new Date().toISOString()
   state.clock = Number.isFinite(parsed.clock) ? parsed.clock : 0
   state.touched = Array.isArray(parsed.touched) ? parsed.touched.map((fp) => path.normalize(fp)) : []
   state.edited = Array.isArray(parsed.edited) ? parsed.edited.map((fp) => path.normalize(fp)) : []
@@ -808,14 +851,24 @@ const markTranscriptEvent = (state, eventKey) => {
   return true
 }
 
+const fileMtimeMs = (fp) => {
+  try {
+    return fs.statSync(fp).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
 const recordFile = (state, fp, edited) => {
   const abs = path.normalize(path.resolve(fp))
   const key = normalizeKey(abs)
   const existing = state.files[key] || {}
+  const mtimeMs = fileMtimeMs(abs)
   state.clock += 1
   state.files[key] = {
     ...existing,
     path: abs,
+    ...(mtimeMs ? { mtimeMs } : {}),
     touchedSeq: state.clock,
     ...(edited ? { editedSeq: state.clock } : {}),
     ...(edited ? { firstEditedSeq: existing.firstEditedSeq || existing.editedSeq || state.clock } : {}),
@@ -1550,6 +1603,193 @@ const isSubagentCheckpointTool = (tool, toolInput = {}) => {
   return SUBAGENT_CHECKPOINT_TOOLS.has(normalized)
 }
 
+const collectCheckpointStrings = (value, depth = 0, seen = new Set()) => {
+  if (value == null || depth > 4) return []
+  if (typeof value === "string") return [limitString(value, CHECKPOINT_OUTPUT_TEXT_MAX_BYTES)]
+  if (typeof value !== "object") return []
+  if (seen.has(value)) return []
+  seen.add(value)
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectCheckpointStrings(item, depth + 1, seen))
+  }
+
+  const texts = []
+  for (const key of [
+    "output",
+    "content",
+    "text",
+    "message",
+    "summary",
+    "result",
+    "stdout",
+    "value",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      texts.push(...collectCheckpointStrings(value[key], depth + 1, seen))
+    }
+  }
+  return texts
+}
+
+const collectCheckpointOutputText = (input) => {
+  const texts = []
+  for (const key of CHECKPOINT_OUTPUT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(input || {}, key)) {
+      texts.push(...collectCheckpointStrings(input[key]))
+    }
+  }
+  return limitString(texts.filter(Boolean).join("\n"), CHECKPOINT_OUTPUT_TEXT_MAX_BYTES)
+}
+
+const stripCheckpointPathToken = (token) =>
+  String(token || "")
+    .replace(/^[\s"'`(<\[\-*]+/, "")
+    .replace(/^\d+[.)]\s*/, "")
+    .replace(/[\s"'`)>.,;:\]]+$/, "")
+
+const isInsideWorkspace = (cwd, fp) => {
+  const relative = path.relative(path.resolve(cwd), path.resolve(fp))
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+}
+
+const isIgnoredCheckpointPath = (cwd, fp) => {
+  const relative = rel(cwd, fp)
+  return CHECKPOINT_PATH_IGNORE_RE.test(relative)
+}
+
+const checkpointLineMayDescribeEdit = (line, priorHeaderLines) =>
+  CHECKPOINT_EDIT_LINE_RE.test(line) || priorHeaderLines > 0
+
+const extractCheckpointEditedPaths = (cwd, text) => {
+  const paths = []
+  let headerCarry = 0
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) {
+      headerCarry = 0
+      continue
+    }
+
+    if (CHECKPOINT_EDIT_HEADER_RE.test(line)) {
+      headerCarry = 4
+    }
+    const mayDescribeEdit = checkpointLineMayDescribeEdit(line, headerCarry)
+    if (headerCarry > 0) headerCarry -= 1
+    if (!mayDescribeEdit) continue
+
+    for (const match of line.matchAll(CHECKPOINT_PATH_RE)) {
+      const token = stripCheckpointPathToken(match[0])
+      if (!token) continue
+      const abs = path.isAbsolute(token) ? path.resolve(token) : resolveFile(cwd, token)
+      if (!isInsideWorkspace(cwd, abs)) continue
+      if (isIgnoredCheckpointPath(cwd, abs)) continue
+      if (!fs.existsSync(abs)) continue
+      if (!isCodePath(abs)) continue
+      if (!paths.some((existing) => samePath(existing, abs))) paths.push(path.normalize(abs))
+    }
+  }
+  return paths
+}
+
+const checkpointOutputSuggestsCodeEdit = (text) =>
+  CHECKPOINT_EDIT_LINE_RE.test(text || "") || CHECKPOINT_COMPLETION_RE.test(text || "")
+
+const checkpointMtimeWindowMs = () => {
+  if (!Number.isFinite(CHECKPOINT_MTIME_WINDOW_MS)) return 10 * 60 * 1000
+  return Math.max(0, CHECKPOINT_MTIME_WINDOW_MS)
+}
+
+const checkpointMtimeScanMaxFiles = () => {
+  if (!Number.isFinite(CHECKPOINT_MTIME_SCAN_MAX_FILES)) return 50
+  return Math.max(1, CHECKPOINT_MTIME_SCAN_MAX_FILES)
+}
+
+const checkpointMtimeScanMaxVisits = () => {
+  if (!Number.isFinite(CHECKPOINT_MTIME_SCAN_MAX_VISITS)) return 2000
+  return Math.max(100, CHECKPOINT_MTIME_SCAN_MAX_VISITS)
+}
+
+const shouldRecordCheckpointMtimePath = (state, fp, cutoffMs) => {
+  const mtimeMs = fileMtimeMs(fp)
+  if (!mtimeMs || mtimeMs < cutoffMs) return false
+  const existing = state.files[normalizeKey(fp)]
+  if (existing?.editedSeq && existing?.mtimeMs && mtimeMs <= Number(existing.mtimeMs) + 1) {
+    return false
+  }
+  return true
+}
+
+const scanRecentCheckpointCodePaths = (cwd, state, cutoffMs) => {
+  const found = []
+  const stack = [path.resolve(cwd)]
+  let visited = 0
+  const maxFiles = checkpointMtimeScanMaxFiles()
+  const maxVisits = checkpointMtimeScanMaxVisits()
+
+  while (stack.length && visited < maxVisits && found.length < maxFiles) {
+    const dir = stack.pop()
+    let entries = []
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      if (visited >= maxVisits || found.length >= maxFiles) break
+      const fp = path.join(dir, entry.name)
+      if (!isInsideWorkspace(cwd, fp) && !samePath(cwd, fp)) continue
+      if (isIgnoredCheckpointPath(cwd, fp)) continue
+      visited += 1
+      if (entry.isDirectory()) {
+        stack.push(fp)
+        continue
+      }
+      if (!entry.isFile()) continue
+      if (!isCodePath(fp)) continue
+      if (!shouldRecordCheckpointMtimePath(state, fp, cutoffMs)) continue
+      found.push(path.normalize(fp))
+    }
+  }
+
+  return found
+}
+
+const hydrateStateFromCheckpointMtime = (cwd, state, input, text = collectCheckpointOutputText(input)) => {
+  const tool = String(input?.tool_name || "").toLowerCase()
+  if (!CHECKPOINT_MTIME_SCAN) return false
+  if (!hasSddWorkspace(cwd) || isDtsContextActive(state)) return false
+  if (!isSubagentCheckpointTool(tool, input?.tool_input || {})) return false
+  const hasText = Boolean(String(text || "").trim())
+  if (hasText && !checkpointOutputSuggestsCodeEdit(text)) return false
+
+  const now = Date.now()
+  const createdAt = Date.parse(state.createdAt || "") || now
+  const cutoffMs = Math.max(createdAt, now - checkpointMtimeWindowMs())
+  let changed = false
+  for (const fp of scanRecentCheckpointCodePaths(cwd, state, cutoffMs)) {
+    recordFile(state, fp, true)
+    changed = true
+  }
+  return changed
+}
+
+const hydrateStateFromCheckpointOutput = (cwd, state, input) => {
+  const tool = String(input?.tool_name || "").toLowerCase()
+  if (!isSubagentCheckpointTool(tool, input?.tool_input || {})) return false
+
+  const text = collectCheckpointOutputText(input)
+  if (!text) return hydrateStateFromCheckpointMtime(cwd, state, input, "")
+
+  let changed = false
+  for (const fp of extractCheckpointEditedPaths(cwd, text)) {
+    recordFile(state, fp, true)
+    changed = true
+  }
+  return changed || hydrateStateFromCheckpointMtime(cwd, state, input, text)
+}
+
 const buildSubagentCheckpointEnforcement = (cwd, state) => {
   const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
   if (hardPeerGaps.length) {
@@ -1756,9 +1996,17 @@ const buildClaudeCodeOutput = (hookEventName, message) =>
 
 const buildStopOutput = (input, message) => {
   if (isOpenCodeHookInput(input)) {
+    if (OPENCODE_STOP_REPORT_ONLY) {
+      return JSON.stringify({
+        decision: "approve",
+        stop_hook_active: false,
+        sdd_drift_report_only: true,
+      })
+    }
     return JSON.stringify({
       decision: "block",
-      reason: message,
+      reason:
+        "SDD drift check found pending SDD synchronization or review. Attempting OpenCode Stop continuation; see .sdd-drift-report.md if the session does not continue.",
       inject_prompt: message,
       stop_hook_active: true,
     })
@@ -1866,6 +2114,20 @@ const main = async () => {
 
     refreshReport(cwd, state)
 
+    if (isOpenCodeHookInput(input) && OPENCODE_STOP_REPORT_ONLY) {
+      saveState(cwd, sessionID, state)
+      writeDiagnosticLog(cwd, {
+        event: "stop_opencode_report_only",
+        input: summarizeInput(input),
+        pendingType: pending.type,
+        pendingSignature: pending.signature,
+        transcriptPath: transcriptPath ? limitString(transcriptPath) : null,
+        hydrated,
+        messagePreview: limitString(pending.message, 800),
+      })
+      return
+    }
+
     const configuredMaxBlocks = pending.type === "code" ? CODE_REVIEW_STOP_MAX_BLOCKS : STOP_MAX_BLOCKS
     const maxBlocks = Number.isFinite(configuredMaxBlocks)
       ? Math.max(0, configuredMaxBlocks)
@@ -1915,9 +2177,22 @@ const main = async () => {
   const toolInput = input.tool_input || {}
   const fp = getToolFilePath(toolInput)
   if (!fp || typeof fp !== "string") {
-    const pending = isSubagentCheckpointTool(tool, toolInput)
-      ? buildSubagentCheckpointEnforcement(cwd, state)
-      : null
+    const subagentCheckpoint = isSubagentCheckpointTool(tool, toolInput)
+    if (subagentCheckpoint && !markToolEvent(state, getToolEventKey(input))) {
+      saveState(cwd, sessionID, state)
+      refreshReport(cwd, state)
+      writeDiagnosticLog(cwd, {
+        event: "ignored_duplicate_checkpoint_event",
+        input: summarizeInput(input),
+        tool,
+      })
+      return
+    }
+
+    const hydratedFromCheckpointOutput = subagentCheckpoint
+      ? hydrateStateFromCheckpointOutput(cwd, state, input)
+      : false
+    const pending = subagentCheckpoint ? buildSubagentCheckpointEnforcement(cwd, state) : null
     clearSubagentCheckpointNoticeIfResolved(state, pending)
     if (pending && shouldEmitSubagentCheckpointNotice(state, pending)) {
       markSubagentCheckpointNoticeEmitted(state, pending, tool)
@@ -1927,6 +2202,7 @@ const main = async () => {
         event: "emit_subagent_checkpoint_enforcement",
         input: summarizeInput(input),
         tool,
+        hydratedFromCheckpointOutput,
         pendingType: pending.type,
         pendingSignature: pending.signature,
         messagePreview: limitString(pending.message, 800),
@@ -1941,7 +2217,8 @@ const main = async () => {
       event: "ignored_no_file_path",
       input: summarizeInput(input),
       tool,
-      subagentCheckpoint: isSubagentCheckpointTool(tool, toolInput),
+      subagentCheckpoint,
+      hydratedFromCheckpointOutput,
       pendingSubagentCheckpoint: Boolean(pending),
     })
     return
@@ -2097,6 +2374,10 @@ if (require.main === module) {
     getChangeDoc,
     hasEditedSddChange,
     hasSddWorkspace,
+    collectCheckpointOutputText,
+    extractCheckpointEditedPaths,
+    hydrateStateFromCheckpointMtime,
+    hydrateStateFromCheckpointOutput,
     hydrateStateFromTranscript,
     isCodeDriftNoticeSuppressed,
     isDtsContextActive,
