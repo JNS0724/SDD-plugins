@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "dts-code")]
   [string]$Scenario = "multi-code-cascade",
 
   [string]$ModelOverride = "",
@@ -189,7 +189,8 @@ Set-Content -LiteralPath $tasksPath -Value "# Tasks`n`n- [ ] Keep this file unch
 Set-Content -LiteralPath $appPath -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
 Set-Content -LiteralPath $helperPath -Value "export function helper() {`n  return `"helper`"`n}"
 
-$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade"
+$isDtsScenario = $Scenario -eq "dts-code"
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $isDtsScenario
 $marker = if ($isCodeScenario) {
   "Real $Provider Claude code drift verification $runId"
 } else {
@@ -209,7 +210,18 @@ $sddEditRules = @(
   "Do not edit design.md and tasks.md in the same parallel tool batch; update design.md, wait for hook feedback, then update tasks.md if requested."
 ) -join " "
 
-$prompt = if ($Scenario -eq "multi-code-cascade") {
+$prompt = if ($isDtsScenario) {
+  @(
+    "Execute this exact local file-editing validation task now."
+    "This is a DTS问题单 / DTS issue ticket fix. For this validation, only implementation code should change and SDD documents should not be updated."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Use this sequence exactly: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Do not read or write sdd/changes/test-feat/design.md or sdd/changes/test-feat/tasks.md unless hook feedback explicitly requires it."
+    "4. Finish briefly after src/app.ts is updated."
+    "Use only Read, Write, Edit, or MultiEdit tools."
+  ) -join " "
+} elseif ($Scenario -eq "multi-code-cascade") {
   @(
     "Execute this exact local file-editing validation task now."
     $sddEditRules
@@ -303,19 +315,29 @@ $errText = if (Test-Path -LiteralPath $errLog) { Get-Content -LiteralPath $errLo
 $reportText = if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Raw } else { "" }
 $combinedText = "$outText`n$errText"
 
-if ($designText -notmatch [regex]::Escape($marker)) {
-  throw "expected design.md to contain real model marker"
-}
 if ($designText -notmatch "(?m)^#\s+Design\b") {
   throw "expected design.md to preserve the # Design heading"
 }
 if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
   throw "expected src/app.ts to contain real model code marker"
 }
+if ($isDtsScenario) {
+  if ($designText -notmatch "Initial design\." -or $designText -match [regex]::Escape($marker)) {
+    throw "expected design.md not to be updated for DTS context"
+  }
+  if ($tasksText -notmatch "Keep this file unchanged until SDD drift enforcement asks for synchronization" -or $tasksText -match [regex]::Escape($taskMarker)) {
+    throw "expected tasks.md not to be updated for DTS context"
+  }
+  if ($combinedText -match "SDD drift tool result enforcement") {
+    throw "expected no SDD drift enforcement for DTS context"
+  }
+} elseif ($designText -notmatch [regex]::Escape($marker)) {
+  throw "expected design.md to contain real model marker"
+}
 if ($Scenario -eq "multi-code-cascade" -and $helperText -notmatch [regex]::Escape($helperMarker)) {
   throw "expected src/helper.ts to contain real model helper marker"
 }
-if ($combinedText -notmatch "SDD drift tool result enforcement") {
+if (!$isDtsScenario -and $combinedText -notmatch "SDD drift tool result enforcement") {
   throw "expected Claude Code hook stream to include SDD drift tool result enforcement"
 }
 if ($Scenario -eq "multi-code-cascade") {
@@ -326,7 +348,7 @@ if ($Scenario -eq "multi-code-cascade") {
     throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
   }
 }
-if ($tasksText -notmatch [regex]::Escape($taskMarker)) {
+if (!$isDtsScenario -and $tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain real model synchronization marker"
 }
 if ($tasksText -notmatch "(?m)^#\s+Tasks\b") {
