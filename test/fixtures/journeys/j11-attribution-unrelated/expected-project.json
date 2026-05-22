@@ -1,0 +1,15 @@
+{
+  "states": {
+    "sdd/changes/alpha": "ALIGNED",
+    "sdd/changes/beta": "ALIGNED"
+  },
+  "linkedCodeContains": {},
+  "conditions": {
+    "sdd/changes/alpha": {
+      "codeAheadOfDocs": false
+    },
+    "sdd/changes/beta": {
+      "codeAheadOfDocs": false
+    }
+  }
+}

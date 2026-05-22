@@ -1,0 +1,7 @@
+{
+  "sdd/changes/alpha/design.md": "# Alpha Design\n",
+  "sdd/changes/alpha/tasks.md": "# Alpha Tasks\n",
+  "sdd/changes/beta/design.md": "# Beta Design\n",
+  "sdd/changes/beta/tasks.md": "# Beta Tasks\n",
+  "src/unrelated/fix.ts": "export const fix = 1\n"
+}

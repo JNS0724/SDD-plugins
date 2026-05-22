@@ -1790,6 +1790,147 @@ const saveProjectState = (cwd, project) => {
   writeTextAtomic(projectStatePath(cwd), JSON.stringify(project, null, 2))
 }
 
+const attributionReviewSignature = (cwd, codeFiles, candidates) =>
+  hash(
+    JSON.stringify({
+      type: "attribution-review",
+      codeFiles: (codeFiles || []).map((file) => rel(cwd, file)).sort(),
+      candidates: (candidates || []).map((dir) => dir.relDir).sort(),
+    })
+  )
+
+const buildAttributionReviewPrompt = (cwd, { codeFiles = [], candidates = [] } = {}) => {
+  const codeLines = codeFiles.length
+    ? codeFiles.map((file) => `  - ${rel(cwd, file)}`)
+    : ["  - unknown code file"]
+  const candidateLines = candidates.length
+    ? candidates.map((dir) => {
+        const docs = dir.docs || {}
+        const docState = [
+          docs.design?.exists ? "design.md" : null,
+          docs.tasks?.exists ? "tasks.md" : null,
+        ]
+          .filter(Boolean)
+          .join(", ")
+        const suffix = docState ? `; docs: ${docState}` : ""
+        return `  - ${dir.relDir}${dir.state ? ` (${dir.state}${suffix})` : suffix}`
+      })
+    : ["  - no active SDD change-dir candidates"]
+
+  return [
+    "SDD attribution review needed.",
+    "",
+    "Recent code changes:",
+    ...codeLines,
+    "",
+    "Candidate active SDD change directories:",
+    ...candidateLines,
+    "",
+    ...formatAttributionReviewRules(),
+    "",
+    "Read the relevant candidate design.md/tasks.md files, decide which change-dir owns the code change, then do exactly one of these:",
+    "- edit the matching SDD document(s) if they are stale;",
+    "- leave documents unchanged if the reviewed docs are already aligned;",
+    "- create a new sdd/changes/<id>/ directory only if this work is feature-sized and not covered by any candidate;",
+    "- state that the code change is unrelated to active SDD scope if none applies.",
+    "Preserve existing SDD templates and headings when editing.",
+  ].join("\n")
+}
+
+const markAttributionReviewEmitted = (cwd, state, codeFiles, candidates) => {
+  if (!state || !Array.isArray(candidates) || candidates.length === 0) return null
+  state.attributionReviews =
+    state.attributionReviews && typeof state.attributionReviews === "object"
+      ? state.attributionReviews
+      : {}
+  const signature = attributionReviewSignature(cwd, codeFiles, candidates)
+  if (state.attributionReviews[signature]?.emittedAt) return null
+
+  const prompt = buildAttributionReviewPrompt(cwd, { codeFiles, candidates })
+  state.attributionReviews[signature] = {
+    signature,
+    emittedAt: new Date().toISOString(),
+    codeFiles: (codeFiles || []).map((file) => rel(cwd, file)).sort(),
+    candidates: candidates.map((dir) => dir.relDir).sort(),
+  }
+  state.attributionReviewPrompts = [
+    ...(state.attributionReviewPrompts || []),
+    { signature, prompt },
+  ]
+  return { signature, prompt }
+}
+
+const takeAttributionReviewPrompts = (state) => {
+  const prompts = Array.isArray(state?.attributionReviewPrompts)
+    ? state.attributionReviewPrompts
+    : []
+  if (state) delete state.attributionReviewPrompts
+  return prompts
+}
+
+const pendingAttributionReviews = (state) =>
+  Object.values(state?.attributionReviews || {}).filter((review) => !review.resolution)
+
+const candidateHasDir = (review, relDirValue) =>
+  (review.candidates || []).some((candidate) => toPosix(candidate) === toPosix(relDirValue))
+
+const resolveAttributionReviewsForDoc = (cwd, project, state, sessionID, doc, record) => {
+  const reviews = pendingAttributionReviews(state)
+  if (!reviews.length || !doc?.dir) return false
+  const relDirValue = relDirForProject(cwd, doc.dir)
+  const edited = Number(record?.editedSeq || 0) > 0
+  const nowIso = new Date().toISOString()
+  let changed = false
+
+  for (const review of reviews) {
+    const isCandidate = candidateHasDir(review, relDirValue)
+    const isNewChangeDir = !isCandidate && project?.changeDirs?.[relDirValue]
+    if (!isCandidate && !isNewChangeDir) continue
+
+    if (edited) {
+      review.resolution = isCandidate ? "edit" : "new-change-dir"
+      review.resolvedToDir = relDirValue
+      review.resolvedAt = nowIso
+      if (project) {
+        project.activeChangeDir = relDirValue
+        project.activeUntilMs = Date.now() + ACTIVE_CHANGE_DIR_TTL_MS
+        project.activeLastEditedSession = sessionID
+      }
+      changed = true
+    } else if (!review.partialResolution) {
+      review.partialResolution = "read-only"
+      review.partialResolvedToDir = relDirValue
+      review.partialResolvedAt = nowIso
+      changed = true
+    }
+  }
+  return changed
+}
+
+const resolveReadOnlyAttributionReviews = (state) => {
+  const nowIso = new Date().toISOString()
+  let changed = false
+  for (const review of pendingAttributionReviews(state)) {
+    if (review.partialResolution !== "read-only") continue
+    review.resolution = "no-edit-confirmed"
+    review.resolvedAt = nowIso
+    review.resolvedToDir = review.partialResolvedToDir
+    changed = true
+  }
+  return changed
+}
+
+const acceptUnresolvedAttributionReviews = (state) => {
+  const nowIso = new Date().toISOString()
+  let changed = false
+  for (const review of pendingAttributionReviews(state)) {
+    review.resolution = "unrelated"
+    review.resolvedAt = nowIso
+    changed = true
+  }
+  return changed
+}
+
 const updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record) => {
   const relDirValue = relDirForProject(cwd, doc.dir)
   const dir = project.changeDirs[relDirValue] || createChangeDirFromFs(cwd, doc.dir)
@@ -1873,6 +2014,7 @@ const updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record)
   }
   dir.docs[key] = target
   project.changeDirs[relDirValue] = dir
+  resolveAttributionReviewsForDoc(cwd, project, state, sessionID, doc, record)
 }
 
 const getChangeDirForPath = (fp) => {
@@ -1908,6 +2050,10 @@ const recordProjectArchiveAction = (cwd, project, fp) => {
 
 const collectProjectAttributionTargets = (cwd, project, state, codeFile) => {
   const decision = Attribution.decide({ cwd, session: state, project, codeFile })
+  if (decision?.kind === "needs-review") {
+    markAttributionReviewEmitted(cwd, state, [codeFile], decision.candidates)
+    return []
+  }
   return Attribution.targetsForDecision(decision)
 }
 
@@ -3039,6 +3185,7 @@ const dispatch = async (input) => {
     applyToolRecord,
     buildClaudeCodeOutput,
     buildCodeEnforcement,
+    buildAttributionReviewPrompt,
     buildPreCompactSummary,
     buildQuestionCheckpointEnforcement,
     buildPendingEnforcement,
@@ -3067,6 +3214,7 @@ const dispatch = async (input) => {
     limitString,
     hydrateStateFromTranscript,
     hydrateStateFromCheckpointOutput,
+    acceptUnresolvedAttributionReviews,
     markCarryOverNoticeEmitted,
     markCodeDriftNoticeEmitted,
     markCodeReviewNoEditConfirmation,
@@ -3082,6 +3230,7 @@ const dispatch = async (input) => {
     refreshAlignedBaseline,
     refreshReport,
     rel,
+    resolveReadOnlyAttributionReviews,
     resolveFile,
     shouldEmitCarryOverNotice,
     shouldEmitCodeDriftNotice,
@@ -3092,6 +3241,7 @@ const dispatch = async (input) => {
     summarizeGaps,
     SHOW_WARNINGS,
     STOP_MAX_BLOCKS,
+    takeAttributionReviewPrompts,
     transcriptPathForContext,
     writeDiagnosticLog,
     writeStdout: (message) => process.stdout.write(message),
@@ -3207,6 +3357,7 @@ if (require.main === module) {
     buildToolEnforcement,
     buildClaudeCodeOutput,
     buildCodeEnforcement,
+    buildAttributionReviewPrompt,
     buildPendingEnforcement,
     buildPreToolUseDenyOutput,
     buildQuestionCheckpointEnforcement,
@@ -3272,6 +3423,7 @@ if (require.main === module) {
     getToolEventKey,
     HookHandlers,
     markCarryOverNoticeEmitted,
+    markAttributionReviewEmitted,
     markToolEvent,
     pruneStateFiles,
     refreshAlignedBaseline,
@@ -3279,10 +3431,13 @@ if (require.main === module) {
     resolveTranscriptPath,
     refreshReport,
     releaseFileLock,
+    acceptUnresolvedAttributionReviews,
+    resolveReadOnlyAttributionReviews,
     runActions,
     saveProjectState,
     saveState,
     writeDiagnosticLog,
+    takeAttributionReviewPrompts,
     updateDtsContextFromInput,
     shouldEmitCarryOverNotice,
     shouldEmitCodeDriftNotice,

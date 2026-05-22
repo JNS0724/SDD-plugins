@@ -9,6 +9,7 @@ const handleStop = (input, ctx) => {
     pending = ctx.buildPendingEnforcement(cwd, state, { includeStageOnly: false, project })
   }
   if (!pending) {
+    const attributionReadOnlyResolved = ctx.resolveReadOnlyAttributionReviews(state)
     state.stopBlocks = {}
     ctx.clearPeerSyncs(state)
     ctx.clearStageOnlyRequirements(state)
@@ -19,6 +20,7 @@ const handleStop = (input, ctx) => {
       input: ctx.summarizeInput(input),
       transcriptPath: transcriptPath ? ctx.limitString(transcriptPath) : null,
       hydrated,
+      attributionReadOnlyResolved,
     })
     return
   }
@@ -28,6 +30,7 @@ const handleStop = (input, ctx) => {
     (pending.gaps || []).length > 0 &&
     (pending.gaps || []).every((gap) => gap.needsConfirmation && gap.reviewReady)
   if (ctx.markStopCodeReviewConfirmation(state, pending)) {
+    const attributionReadOnlyResolved = ctx.resolveReadOnlyAttributionReviews(state)
     state.stopBlocks = {}
     ctx.clearPeerSyncs(state)
     ctx.refreshAlignedBaseline(cwd, project, state)
@@ -39,6 +42,7 @@ const handleStop = (input, ctx) => {
       pendingSignature: pending.signature,
       transcriptPath: transcriptPath ? ctx.limitString(transcriptPath) : null,
       hydrated,
+      attributionReadOnlyResolved,
     })
     return
   }
@@ -68,7 +72,18 @@ const handleStop = (input, ctx) => {
       : 2
   const blockCount = state.stopBlocks[pending.signature] || 0
   if (blockCount >= maxBlocks) {
+    const attributionUnrelatedAccepted = ctx.acceptUnresolvedAttributionReviews(state)
     ctx.persist()
+    if (attributionUnrelatedAccepted) {
+      ctx.writeDiagnosticLog(cwd, {
+        event: "attribution_unrelated_accepted",
+        input: ctx.summarizeInput(input),
+        pendingType: pending.type,
+        pendingSignature: pending.signature,
+        blockCount,
+        maxBlocks,
+      })
+    }
     ctx.writeDiagnosticLog(cwd, {
       event: "stop_allow_max_blocks",
       input: ctx.summarizeInput(input),
@@ -76,6 +91,7 @@ const handleStop = (input, ctx) => {
       pendingSignature: pending.signature,
       blockCount,
       maxBlocks,
+      attributionUnrelatedAccepted,
     })
     return
   }

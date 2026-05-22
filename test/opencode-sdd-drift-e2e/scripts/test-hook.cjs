@@ -1029,6 +1029,87 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "attribution-review-prompt")
+    const alpha = path.join(cwd, "sdd", "changes", "alpha")
+    const beta = path.join(cwd, "sdd", "changes", "beta")
+    const code = path.join(cwd, "src", "shared", "feature.ts")
+    write(path.join(alpha, "design.md"), "# Alpha design\n")
+    write(path.join(alpha, "tasks.md"), "# Alpha tasks\n")
+    write(path.join(beta, "design.md"), "# Beta design\n")
+    write(path.join(beta, "tasks.md"), "# Beta tasks\n")
+    write(code, "export const shared = 1\n")
+
+    const prompt = hook.buildAttributionReviewPrompt(cwd, {
+      codeFiles: [code],
+      candidates: [
+        { relDir: "sdd/changes/alpha", state: "ALIGNED" },
+        { relDir: "sdd/changes/beta", state: "ALIGNED" },
+      ],
+    })
+    assert.match(prompt, /SDD attribution review needed/)
+    assert.match(prompt, /src\/shared\/feature\.ts/)
+    assert.match(prompt, /sdd\/changes\/alpha/)
+    assert.match(prompt, /sdd\/changes\/beta/)
+    assert.match(prompt, /When deciding whether SDD documents need edits/)
+    assert.match(prompt, /Purely mechanical changes/)
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    hook.recordFile(state, code, true)
+    hook.applySessionToProject(cwd, project, state, "session-attribution-review")
+
+    const reviews = Object.values(state.attributionReviews || {})
+    assert.strictEqual(reviews.length, 1)
+    assert.deepStrictEqual(reviews[0].candidates.sort(), [
+      "sdd/changes/alpha",
+      "sdd/changes/beta",
+    ])
+    assert.deepStrictEqual(project.changeDirs["sdd/changes/alpha"].linkedCode, [])
+    assert.deepStrictEqual(project.changeDirs["sdd/changes/beta"].linkedCode, [])
+
+    const queued = hook.takeAttributionReviewPrompts(state)
+    assert.strictEqual(queued.length, 1)
+    assert.match(queued[0].prompt, /SDD attribution review needed/)
+    assert.strictEqual(hook.takeAttributionReviewPrompts(state).length, 0)
+
+    hook.applySessionToProject(cwd, project, state, "session-attribution-review")
+    assert.strictEqual(Object.values(state.attributionReviews || {}).length, 1)
+    assert.strictEqual(hook.takeAttributionReviewPrompts(state).length, 0)
+
+    edit(state, path.join(alpha, "design.md"))
+    hook.applySessionToProject(cwd, project, state, "session-attribution-review")
+    assert.strictEqual(reviews[0].resolution, "edit")
+    assert.strictEqual(reviews[0].resolvedToDir, "sdd/changes/alpha")
+    assert.strictEqual(project.activeChangeDir, "sdd/changes/alpha")
+    assert.ok(
+      project.changeDirs["sdd/changes/alpha"].linkedCode.some((item) => item.path === "src/shared/feature.ts")
+    )
+    assert.deepStrictEqual(project.changeDirs["sdd/changes/beta"].linkedCode, [])
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "attribution-review-read-only")
+    const dir = path.join(cwd, "sdd", "changes", "alpha")
+    const code = path.join(cwd, "src", "feature.ts")
+    write(path.join(dir, "design.md"), "# Design\n")
+    write(path.join(dir, "tasks.md"), "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    hook.markAttributionReviewEmitted(cwd, state, [code], [
+      { relDir: "sdd/changes/alpha", state: "ALIGNED" },
+    ])
+    hook.recordFile(state, path.join(dir, "design.md"), false)
+    hook.applySessionToProject(cwd, project, state, "session-attribution-read")
+    const review = Object.values(state.attributionReviews || {})[0]
+    assert.strictEqual(review.partialResolution, "read-only")
+    assert.strictEqual(review.resolution, undefined)
+    assert.strictEqual(hook.resolveReadOnlyAttributionReviews(state), true)
+    assert.strictEqual(review.resolution, "no-edit-confirmed")
+  }
+
+  {
     const cwd = path.join(tmpRoot, "dispatch-no-sdd")
     fs.mkdirSync(cwd, { recursive: true })
     await hook.dispatch({

@@ -35,6 +35,7 @@ const handlePostToolUse = (input, ctx) => {
   }
 
   if (project) ctx.applySessionToProject(cwd, project, state, ctx.sessionID)
+  const attributionReviewPrompts = ctx.takeAttributionReviewPrompts(state)
   const warnings = isEdit ? ctx.drift(cwd, abs, state) : []
   const peerGaps = ctx.collectCombinedPeerGaps(cwd, state, project)
   const hardPeerGaps = ctx.collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false })
@@ -52,7 +53,10 @@ const handlePostToolUse = (input, ctx) => {
     state,
     ctx.buildSubagentCheckpointEnforcement(cwd, state, project)
   )
-  const emitCodeGap = !hardPeerGaps.length && ctx.shouldEmitCodeDriftNotice(state, codeGaps)
+  const emitAttributionReview = attributionReviewPrompts.length > 0
+  const emitCodeGap =
+    !hardPeerGaps.length &&
+    (emitAttributionReview || ctx.shouldEmitCodeDriftNotice(state, codeGaps))
   const suppressCodeGap =
     !hardPeerGaps.length && !emitCodeGap && ctx.isCodeDriftNoticeSuppressed(state, codeGaps)
   const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
@@ -98,14 +102,27 @@ const handlePostToolUse = (input, ctx) => {
     ctx.emitEnforcement(input, ctx.buildToolEnforcement(emitPeerGaps, { compact: compactPeerGap }))
   } else if (emitCodeGap) {
     ctx.writeDiagnosticLog(cwd, {
-      event: compactCodeGap ? "emit_code_reminder_compact" : "emit_code_enforcement",
+      event: emitAttributionReview
+        ? "emit_attribution_review"
+        : compactCodeGap
+          ? "emit_code_reminder_compact"
+          : "emit_code_enforcement",
       input: ctx.summarizeInput(input),
       file: ctx.rel(cwd, abs),
       tool,
       isEdit,
+      attributionReviewSignatures: attributionReviewPrompts.map((item) => item.signature),
       ...ctx.summarizeGaps(cwd, peerGaps, codeGaps),
     })
-    ctx.emitEnforcement(input, ctx.buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap }))
+    ctx.emitEnforcement(
+      input,
+      [
+        ...attributionReviewPrompts.map((item) => item.prompt),
+        ctx.buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap }),
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    )
   } else if (ctx.SHOW_WARNINGS && warnings.length) {
     ctx.writeDiagnosticLog(cwd, {
       event: "emit_warning",

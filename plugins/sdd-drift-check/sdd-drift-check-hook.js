@@ -308,6 +308,7 @@ var require_post_tool_use = __commonJS({
         return;
       }
       if (project) ctx.applySessionToProject(cwd, project, state, ctx.sessionID);
+      const attributionReviewPrompts = ctx.takeAttributionReviewPrompts(state);
       const warnings = isEdit ? ctx.drift(cwd, abs, state) : [];
       const peerGaps = ctx.collectCombinedPeerGaps(cwd, state, project);
       const hardPeerGaps = ctx.collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false });
@@ -324,7 +325,8 @@ var require_post_tool_use = __commonJS({
         state,
         ctx.buildSubagentCheckpointEnforcement(cwd, state, project)
       );
-      const emitCodeGap = !hardPeerGaps.length && ctx.shouldEmitCodeDriftNotice(state, codeGaps);
+      const emitAttributionReview = attributionReviewPrompts.length > 0;
+      const emitCodeGap = !hardPeerGaps.length && (emitAttributionReview || ctx.shouldEmitCodeDriftNotice(state, codeGaps));
       const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && ctx.isCodeDriftNoticeSuppressed(state, codeGaps);
       const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0;
       const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : [];
@@ -355,14 +357,21 @@ var require_post_tool_use = __commonJS({
         ctx.emitEnforcement(input, ctx.buildToolEnforcement(emitPeerGaps, { compact: compactPeerGap }));
       } else if (emitCodeGap) {
         ctx.writeDiagnosticLog(cwd, {
-          event: compactCodeGap ? "emit_code_reminder_compact" : "emit_code_enforcement",
+          event: emitAttributionReview ? "emit_attribution_review" : compactCodeGap ? "emit_code_reminder_compact" : "emit_code_enforcement",
           input: ctx.summarizeInput(input),
           file: ctx.rel(cwd, abs),
           tool,
           isEdit,
+          attributionReviewSignatures: attributionReviewPrompts.map((item) => item.signature),
           ...ctx.summarizeGaps(cwd, peerGaps, codeGaps)
         });
-        ctx.emitEnforcement(input, ctx.buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap }));
+        ctx.emitEnforcement(
+          input,
+          [
+            ...attributionReviewPrompts.map((item) => item.prompt),
+            ctx.buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap })
+          ].filter(Boolean).join("\n\n")
+        );
       } else if (ctx.SHOW_WARNINGS && warnings.length) {
         ctx.writeDiagnosticLog(cwd, {
           event: "emit_warning",
@@ -417,6 +426,7 @@ var require_stop = __commonJS({
         pending = ctx.buildPendingEnforcement(cwd, state, { includeStageOnly: false, project });
       }
       if (!pending) {
+        const attributionReadOnlyResolved = ctx.resolveReadOnlyAttributionReviews(state);
         state.stopBlocks = {};
         ctx.clearPeerSyncs(state);
         ctx.clearStageOnlyRequirements(state);
@@ -426,12 +436,14 @@ var require_stop = __commonJS({
           event: "stop_allow_no_pending",
           input: ctx.summarizeInput(input),
           transcriptPath: transcriptPath ? ctx.limitString(transcriptPath) : null,
-          hydrated
+          hydrated,
+          attributionReadOnlyResolved
         });
         return;
       }
       const reviewConfirmationReady = pending.type === "code" && (pending.gaps || []).length > 0 && (pending.gaps || []).every((gap) => gap.needsConfirmation && gap.reviewReady);
       if (ctx.markStopCodeReviewConfirmation(state, pending)) {
+        const attributionReadOnlyResolved = ctx.resolveReadOnlyAttributionReviews(state);
         state.stopBlocks = {};
         ctx.clearPeerSyncs(state);
         ctx.refreshAlignedBaseline(cwd, project, state);
@@ -442,7 +454,8 @@ var require_stop = __commonJS({
           pendingType: pending.type,
           pendingSignature: pending.signature,
           transcriptPath: transcriptPath ? ctx.limitString(transcriptPath) : null,
-          hydrated
+          hydrated,
+          attributionReadOnlyResolved
         });
         return;
       }
@@ -464,14 +477,26 @@ var require_stop = __commonJS({
       const maxBlocks = Number.isFinite(configuredMaxBlocks) ? Math.max(0, configuredMaxBlocks) : pending.type === "code" ? 1 : 2;
       const blockCount = state.stopBlocks[pending.signature] || 0;
       if (blockCount >= maxBlocks) {
+        const attributionUnrelatedAccepted = ctx.acceptUnresolvedAttributionReviews(state);
         ctx.persist();
+        if (attributionUnrelatedAccepted) {
+          ctx.writeDiagnosticLog(cwd, {
+            event: "attribution_unrelated_accepted",
+            input: ctx.summarizeInput(input),
+            pendingType: pending.type,
+            pendingSignature: pending.signature,
+            blockCount,
+            maxBlocks
+          });
+        }
         ctx.writeDiagnosticLog(cwd, {
           event: "stop_allow_max_blocks",
           input: ctx.summarizeInput(input),
           pendingType: pending.type,
           pendingSignature: pending.signature,
           blockCount,
-          maxBlocks
+          maxBlocks,
+          attributionUnrelatedAccepted
         });
         return;
       }
@@ -2099,6 +2124,120 @@ var saveProjectState = (cwd, project) => {
   recomputeProjectState(project, cwd);
   writeTextAtomic(projectStatePath(cwd), JSON.stringify(project, null, 2));
 };
+var attributionReviewSignature = (cwd, codeFiles, candidates) => hash(
+  JSON.stringify({
+    type: "attribution-review",
+    codeFiles: (codeFiles || []).map((file) => rel(cwd, file)).sort(),
+    candidates: (candidates || []).map((dir) => dir.relDir).sort()
+  })
+);
+var buildAttributionReviewPrompt = (cwd, { codeFiles = [], candidates = [] } = {}) => {
+  const codeLines = codeFiles.length ? codeFiles.map((file) => `  - ${rel(cwd, file)}`) : ["  - unknown code file"];
+  const candidateLines = candidates.length ? candidates.map((dir) => {
+    const docs = dir.docs || {};
+    const docState = [
+      docs.design?.exists ? "design.md" : null,
+      docs.tasks?.exists ? "tasks.md" : null
+    ].filter(Boolean).join(", ");
+    const suffix = docState ? `; docs: ${docState}` : "";
+    return `  - ${dir.relDir}${dir.state ? ` (${dir.state}${suffix})` : suffix}`;
+  }) : ["  - no active SDD change-dir candidates"];
+  return [
+    "SDD attribution review needed.",
+    "",
+    "Recent code changes:",
+    ...codeLines,
+    "",
+    "Candidate active SDD change directories:",
+    ...candidateLines,
+    "",
+    ...formatAttributionReviewRules(),
+    "",
+    "Read the relevant candidate design.md/tasks.md files, decide which change-dir owns the code change, then do exactly one of these:",
+    "- edit the matching SDD document(s) if they are stale;",
+    "- leave documents unchanged if the reviewed docs are already aligned;",
+    "- create a new sdd/changes/<id>/ directory only if this work is feature-sized and not covered by any candidate;",
+    "- state that the code change is unrelated to active SDD scope if none applies.",
+    "Preserve existing SDD templates and headings when editing."
+  ].join("\n");
+};
+var markAttributionReviewEmitted = (cwd, state, codeFiles, candidates) => {
+  if (!state || !Array.isArray(candidates) || candidates.length === 0) return null;
+  state.attributionReviews = state.attributionReviews && typeof state.attributionReviews === "object" ? state.attributionReviews : {};
+  const signature = attributionReviewSignature(cwd, codeFiles, candidates);
+  if (state.attributionReviews[signature]?.emittedAt) return null;
+  const prompt = buildAttributionReviewPrompt(cwd, { codeFiles, candidates });
+  state.attributionReviews[signature] = {
+    signature,
+    emittedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    codeFiles: (codeFiles || []).map((file) => rel(cwd, file)).sort(),
+    candidates: candidates.map((dir) => dir.relDir).sort()
+  };
+  state.attributionReviewPrompts = [
+    ...state.attributionReviewPrompts || [],
+    { signature, prompt }
+  ];
+  return { signature, prompt };
+};
+var takeAttributionReviewPrompts = (state) => {
+  const prompts = Array.isArray(state?.attributionReviewPrompts) ? state.attributionReviewPrompts : [];
+  if (state) delete state.attributionReviewPrompts;
+  return prompts;
+};
+var pendingAttributionReviews = (state) => Object.values(state?.attributionReviews || {}).filter((review) => !review.resolution);
+var candidateHasDir = (review, relDirValue) => (review.candidates || []).some((candidate) => toPosix(candidate) === toPosix(relDirValue));
+var resolveAttributionReviewsForDoc = (cwd, project, state, sessionID, doc, record) => {
+  const reviews = pendingAttributionReviews(state);
+  if (!reviews.length || !doc?.dir) return false;
+  const relDirValue = relDirForProject(cwd, doc.dir);
+  const edited = Number(record?.editedSeq || 0) > 0;
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  let changed = false;
+  for (const review of reviews) {
+    const isCandidate = candidateHasDir(review, relDirValue);
+    const isNewChangeDir = !isCandidate && project?.changeDirs?.[relDirValue];
+    if (!isCandidate && !isNewChangeDir) continue;
+    if (edited) {
+      review.resolution = isCandidate ? "edit" : "new-change-dir";
+      review.resolvedToDir = relDirValue;
+      review.resolvedAt = nowIso;
+      if (project) {
+        project.activeChangeDir = relDirValue;
+        project.activeUntilMs = Date.now() + ACTIVE_CHANGE_DIR_TTL_MS;
+        project.activeLastEditedSession = sessionID;
+      }
+      changed = true;
+    } else if (!review.partialResolution) {
+      review.partialResolution = "read-only";
+      review.partialResolvedToDir = relDirValue;
+      review.partialResolvedAt = nowIso;
+      changed = true;
+    }
+  }
+  return changed;
+};
+var resolveReadOnlyAttributionReviews = (state) => {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  let changed = false;
+  for (const review of pendingAttributionReviews(state)) {
+    if (review.partialResolution !== "read-only") continue;
+    review.resolution = "no-edit-confirmed";
+    review.resolvedAt = nowIso;
+    review.resolvedToDir = review.partialResolvedToDir;
+    changed = true;
+  }
+  return changed;
+};
+var acceptUnresolvedAttributionReviews = (state) => {
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  let changed = false;
+  for (const review of pendingAttributionReviews(state)) {
+    review.resolution = "unrelated";
+    review.resolvedAt = nowIso;
+    changed = true;
+  }
+  return changed;
+};
 var updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record) => {
   const relDirValue = relDirForProject(cwd, doc.dir);
   const dir = project.changeDirs[relDirValue] || createChangeDirFromFs(cwd, doc.dir);
@@ -2162,6 +2301,7 @@ var updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record) =
   }
   dir.docs[key] = target;
   project.changeDirs[relDirValue] = dir;
+  resolveAttributionReviewsForDoc(cwd, project, state, sessionID, doc, record);
 };
 var getChangeDirForPath = (fp) => {
   const root = findSdd(fp);
@@ -2194,6 +2334,10 @@ var recordProjectArchiveAction = (cwd, project, fp) => {
 };
 var collectProjectAttributionTargets = (cwd, project, state, codeFile) => {
   const decision = Attribution.decide({ cwd, session: state, project, codeFile });
+  if (decision?.kind === "needs-review") {
+    markAttributionReviewEmitted(cwd, state, [codeFile], decision.candidates);
+    return [];
+  }
   return Attribution.targetsForDecision(decision);
 };
 var appendProjectLinkedCode = (dir, cwd, record, sessionID) => {
@@ -3140,6 +3284,7 @@ var dispatch = async (input) => {
       applyToolRecord,
       buildClaudeCodeOutput,
       buildCodeEnforcement,
+      buildAttributionReviewPrompt,
       buildPreCompactSummary,
       buildQuestionCheckpointEnforcement,
       buildPendingEnforcement,
@@ -3168,6 +3313,7 @@ var dispatch = async (input) => {
       limitString,
       hydrateStateFromTranscript,
       hydrateStateFromCheckpointOutput,
+      acceptUnresolvedAttributionReviews,
       markCarryOverNoticeEmitted,
       markCodeDriftNoticeEmitted,
       markCodeReviewNoEditConfirmation,
@@ -3183,6 +3329,7 @@ var dispatch = async (input) => {
       refreshAlignedBaseline,
       refreshReport,
       rel,
+      resolveReadOnlyAttributionReviews,
       resolveFile,
       shouldEmitCarryOverNotice,
       shouldEmitCodeDriftNotice,
@@ -3193,6 +3340,7 @@ var dispatch = async (input) => {
       summarizeGaps,
       SHOW_WARNINGS,
       STOP_MAX_BLOCKS,
+      takeAttributionReviewPrompts,
       transcriptPathForContext,
       writeDiagnosticLog,
       writeStdout: (message) => process.stdout.write(message)
@@ -3298,6 +3446,7 @@ if (require.main === module) {
     buildToolEnforcement,
     buildClaudeCodeOutput,
     buildCodeEnforcement,
+    buildAttributionReviewPrompt,
     buildPendingEnforcement,
     buildPreToolUseDenyOutput,
     buildQuestionCheckpointEnforcement,
@@ -3363,6 +3512,7 @@ if (require.main === module) {
     getToolEventKey,
     HookHandlers,
     markCarryOverNoticeEmitted,
+    markAttributionReviewEmitted,
     markToolEvent,
     pruneStateFiles,
     refreshAlignedBaseline,
@@ -3370,10 +3520,13 @@ if (require.main === module) {
     resolveTranscriptPath,
     refreshReport,
     releaseFileLock,
+    acceptUnresolvedAttributionReviews,
+    resolveReadOnlyAttributionReviews,
     runActions,
     saveProjectState,
     saveState,
     writeDiagnosticLog,
+    takeAttributionReviewPrompts,
     updateDtsContextFromInput,
     shouldEmitCarryOverNotice,
     shouldEmitCodeDriftNotice,
