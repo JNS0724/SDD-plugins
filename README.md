@@ -77,6 +77,29 @@ See the plugin documentation for installation and behavior details:
 docs/sdd-drift-check/sdd-drift-check.md
 ```
 
+## Build And Package
+
+`plugins/sdd-drift-check/src/` is the development source. The distributable
+hook file is committed at:
+
+```text
+plugins/sdd-drift-check/sdd-drift-check-hook.js
+```
+
+After changing files under `plugins/sdd-drift-check/src/`, rebuild the
+single-file hook before testing or committing:
+
+```powershell
+cd plugins\sdd-drift-check
+npm install
+npm run build
+npm run build:check
+```
+
+`npm run build` updates `sdd-drift-check-hook.js`. `npm run build:check`
+generates a temporary bundle and compares it with the committed hook file; a
+non-zero exit means the package artifact is stale.
+
 ## Testing
 
 Static and fake-provider tests:

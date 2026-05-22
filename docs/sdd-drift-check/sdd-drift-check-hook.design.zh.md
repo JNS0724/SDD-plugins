@@ -306,7 +306,9 @@ loadProjectState(cwd):
 §24  Exports             保留 module.exports 契约 + 新增导出
 ```
 
-—— 部署物仍是单文件。无 `lib/` 子目录。无 build step。
+—— 部署物仍是单文件，无 `lib/` 子目录。开发态源码拆分在
+`plugins/sdd-drift-check/src/`，通过 `npm run build` 打包回
+`sdd-drift-check-hook.js`；用户安装和运行时不需要执行 build step。
 
 ---
 

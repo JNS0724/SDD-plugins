@@ -452,6 +452,42 @@ Recommended `.gitignore` entries:
 .opencode/*.tmp
 ```
 
+## Build And Package
+
+The runtime package is still a single CommonJS hook file:
+
+```text
+plugins/sdd-drift-check/sdd-drift-check-hook.js
+```
+
+The maintainable source lives under:
+
+```text
+plugins/sdd-drift-check/src/
+```
+
+After changing `src/`, rebuild the distributable hook:
+
+```powershell
+cd plugins\sdd-drift-check
+npm install
+npm run build
+```
+
+Then verify the committed artifact is in sync:
+
+```powershell
+npm run build:check
+```
+
+`build:check` creates a temporary bundle and byte-compares it with
+`sdd-drift-check-hook.js`. If it fails, run `npm run build` and commit the
+updated hook file together with the source change.
+
+The native OpenCode adapter `sdd-drift-check-opencode.js` is not bundled by this
+step; it loads the shared hook file at runtime. For user installs, copy both the
+adapter and the rebuilt hook as shown above.
+
 ## Tests
 
 ```powershell
