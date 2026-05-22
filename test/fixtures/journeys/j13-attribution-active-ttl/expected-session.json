@@ -1,0 +1,16 @@
+{
+  "sessions": {
+    "session-j13-a": {
+      "editedRel": [
+        "sdd/changes/alpha/design.md",
+        "sdd/changes/alpha/tasks.md",
+        "src/alpha/feature.ts"
+      ],
+      "pendingType": "code"
+    },
+    "session-j13-b": {
+      "editedRel": ["src/alpha/next.ts"],
+      "pendingType": "code"
+    }
+  }
+}

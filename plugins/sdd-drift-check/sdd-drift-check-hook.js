@@ -2326,7 +2326,25 @@ var collectCombinedPeerGaps = (cwd, state, project, options = {}) => {
   });
 };
 var collectCombinedCodeGaps = (cwd, state, project) => {
-  const combined = [...collectCodeGaps(cwd, state), ...collectProjectCodeGaps(cwd, project)];
+  const sessionGaps = collectCodeGaps(cwd, state);
+  const rawProjectGaps = collectProjectCodeGaps(cwd, project);
+  const projectGaps = rawProjectGaps.filter(
+    (gap) => !state.codeReviewConfirmations?.[gap.reviewSignature]?.implementationFlow && !isCodeReviewConfirmed(state, gap.reviewSignature)
+  );
+  const codeFilesKey = (gap) => (gap.codeFiles || []).map((file) => rel(cwd, file)).sort().join("\0");
+  const projectCodeKeys = new Set(rawProjectGaps.map(codeFilesKey));
+  const projectLinkedCode = new Set(
+    Object.values(project?.changeDirs || {}).flatMap(
+      (dir) => (dir.linkedCode || []).map((item) => toPosix(item.path))
+    )
+  );
+  const allCodeFilesTrackedByProject = (gap) => (gap.codeFiles || []).every((file) => projectLinkedCode.has(rel(cwd, file)));
+  const combined = [
+    ...sessionGaps.filter(
+      (gap) => !projectCodeKeys.has(codeFilesKey(gap)) && !allCodeFilesTrackedByProject(gap)
+    ),
+    ...projectGaps
+  ];
   const seen = /* @__PURE__ */ new Set();
   return combined.filter((gap) => {
     const key = JSON.stringify({

@@ -1,0 +1,17 @@
+{
+  "states": {
+    "sdd/changes/alpha": "CODE_PENDING_REVIEW",
+    "sdd/changes/beta": "ALIGNED"
+  },
+  "linkedCodeContains": {
+    "sdd/changes/alpha": ["src/alpha/feature.ts", "src/alpha/next.ts"]
+  },
+  "conditions": {
+    "sdd/changes/alpha": {
+      "codeAheadOfDocs": true
+    },
+    "sdd/changes/beta": {
+      "codeAheadOfDocs": false
+    }
+  }
+}

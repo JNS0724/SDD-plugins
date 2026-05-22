@@ -1,0 +1,8 @@
+{
+  "sdd/changes/alpha/design.md": "# Design\n",
+  "sdd/changes/alpha/tasks.md": "# Tasks\n",
+  "sdd/changes/beta/design.md": "# Design\n",
+  "sdd/changes/beta/tasks.md": "# Tasks\n",
+  "src/alpha/feature.ts": "export const feature = 1\n",
+  "src/alpha/next.ts": "export const next = 1\n"
+}
