@@ -801,6 +801,22 @@ try {
     assert.strictEqual(hook.hydrateStateFromTranscript(cwd, state, transcript), false)
     assert.strictEqual(state.clock, clockAfterFirstHydration)
     assert.strictEqual(hook.buildPendingEnforcement(cwd, state).signature, pending.signature)
+    const helper = path.join(cwd, "src", "helper.ts")
+    write(helper, "export const helper = 1\n")
+    fs.appendFileSync(
+      transcript,
+      JSON.stringify({
+        part: {
+          type: "tool",
+          id: "call-helper-read",
+          name: "read",
+          state: { status: "completed", input: { filePath: helper } },
+        },
+      }) + "\n"
+    )
+    assert.strictEqual(hook.hydrateStateFromTranscript(cwd, state, transcript), true)
+    assert.strictEqual(state.clock, clockAfterFirstHydration + 1)
+    assert.ok(state.transcriptCursor?.offset > 0)
     assert.strictEqual(hook.markStopCodeReviewConfirmation(state, pending), true)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
   }
@@ -825,6 +841,25 @@ try {
     edit(state, design)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
     assert.strictEqual(hook.collectPeerGaps(cwd, state).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "session-files-lru")
+    const state = hook.emptyState()
+    for (let i = 0; i < 1005; i += 1) {
+      hook.recordFile(state, path.join(cwd, "src", `file-${i}.ts`), true)
+    }
+    assert.ok(Object.keys(state.files).length <= 1000)
+    assert.strictEqual(
+      Boolean(state.files[hook.normalizeKey(path.join(cwd, "src", "file-0.ts"))]),
+      false,
+      "oldest file records should be pruned from session state"
+    )
+    assert.strictEqual(
+      Boolean(state.files[hook.normalizeKey(path.join(cwd, "src", "file-1004.ts"))]),
+      true,
+      "newest file records should be retained in session state"
+    )
   }
 
   {
@@ -1225,8 +1260,36 @@ try {
     hook.recordFile(state, tasks, false)
     hook.applySessionToProject(cwd, project, state, "project-session")
     assert.strictEqual(hook.collectProjectCodeGaps(cwd, project).length, 0)
-    assert.strictEqual(hook.refreshAlignedBaseline(cwd, project, state), true)
+    assert.strictEqual(
+      hook.refreshAlignedBaseline(cwd, project, state),
+      false,
+      "read-only review after code must not refresh implementation-flow alignedAtMs"
+    )
     assert.strictEqual(hook.collectCarryOverDrift(project).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "project-state-implementation-baseline")
+    const dir = path.join(cwd, "sdd", "changes", "implementation-flow")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "implementation.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const implementation = 1\n")
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    edit(state, design)
+    edit(state, tasks)
+    hook.recordFile(state, code, true)
+    hook.applySessionToProject(cwd, project, state, "implementation-session")
+    assert.strictEqual(
+      hook.refreshAlignedBaseline(cwd, project, state),
+      true,
+      "implementation-flow docs edited before code should refresh alignedAtMs"
+    )
+    assert.strictEqual(project.changeDirs["sdd/changes/implementation-flow"].state, "ALIGNED")
   }
 
   {
@@ -1291,6 +1354,25 @@ try {
     const reloaded = hook.loadProjectState(cwd)
     assert.ok(reloaded.changeDirs["sdd/changes/persist"])
     assert.match(hook.projectStatePath(cwd).replace(/\\/g, "/"), /sdd-drift-hook-state\/project\.json$/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "carry-over-notice")
+    const dir = path.join(cwd, "sdd", "changes", "carry")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "carry.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const carry = 1\n")
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    hook.recordFile(state, code, true)
+    hook.applySessionToProject(cwd, project, state, "carry-session")
+    assert.strictEqual(hook.shouldEmitCarryOverNotice(state, project), true)
+    hook.markCarryOverNoticeEmitted(state, project, "PostToolUse")
+    assert.strictEqual(hook.shouldEmitCarryOverNotice(state, project), false)
   }
 
   {

@@ -58,6 +58,8 @@ const STATE_LOCK_STALE_MS = 30 * 1000
 const STATE_LOCK_WAIT_MS = 5 * 1000
 const STATE_LOCK_RETRY_MS = 20
 const STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const SESSION_FILES_MAX = Number.parseInt(process.env.SDD_DRIFT_SESSION_FILES_MAX || "1000", 10)
+const STDIN_TIMEOUT_MS = Number.parseInt(process.env.SDD_DRIFT_STDIN_TIMEOUT_MS || "5000", 10)
 const PROJECT_LOCK_WAIT_MS = 2 * 1000
 const PROJECT_LINKED_CODE_CAP = Number.parseInt(
   process.env.SDD_DRIFT_PROJECT_LINKED_CODE_CAP || "200",
@@ -203,15 +205,37 @@ const hasSddWorkspace = (cwd) => {
   return false
 }
 
-const readStdin = () =>
+const readStdin = (timeoutMs = STDIN_TIMEOUT_MS) =>
   new Promise((resolve, reject) => {
     let data = ""
+    let settled = false
+    let timer = null
+
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(data)
+    }
+
+    const fail = (err) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      reject(err)
+    }
+
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(finish, timeoutMs)
+    }
+
     process.stdin.setEncoding("utf8")
     process.stdin.on("data", (chunk) => {
       data += chunk
     })
-    process.stdin.on("end", () => resolve(data))
-    process.stdin.on("error", reject)
+    process.stdin.on("end", finish)
+    process.stdin.on("error", fail)
+    if (process.stdin.isTTY) finish()
   })
 
 const parseHookInput = (raw) => JSON.parse(String(raw || "{}").replace(/^\uFEFF/, ""))
@@ -498,9 +522,11 @@ const emptyState = () => ({
   subagentCheckpointNotice: null,
   codeReviewConfirmations: {},
   transcriptEvents: {},
+  transcriptCursor: null,
   dtsContext: null,
   firstEventAt: null,
   projectStateSeenAt: null,
+  carryOverNotice: null,
   attributionReviews: {},
   noEditSession: true,
   circuitBreaker: {},
@@ -508,6 +534,33 @@ const emptyState = () => ({
 
 const addPath = (items, item) => {
   if (!items.some((existing) => samePath(existing, item))) items.push(path.normalize(item))
+}
+
+const sessionFilesMax = () =>
+  Number.isFinite(SESSION_FILES_MAX) ? Math.max(100, SESSION_FILES_MAX) : 1000
+
+const fileRecordOrder = (record) =>
+  Math.max(
+    Number(record?.editedSeq || 0),
+    Number(record?.touchedSeq || 0),
+    Number(record?.firstEditedSeq || 0)
+  )
+
+const pruneStateFiles = (state) => {
+  const maxFiles = sessionFilesMax()
+  const entries = Object.entries(state.files || {})
+  if (entries.length <= maxFiles) return false
+
+  const keep = new Set(
+    entries
+      .sort((left, right) => fileRecordOrder(right[1]) - fileRecordOrder(left[1]))
+      .slice(0, maxFiles)
+      .map(([key]) => key)
+  )
+  state.files = Object.fromEntries(entries.filter(([key]) => keep.has(key)))
+  state.touched = (state.touched || []).filter((file) => keep.has(normalizeKey(file)))
+  state.edited = (state.edited || []).filter((file) => keep.has(normalizeKey(file)))
+  return true
 }
 
 const normalizeState = (parsed) => {
@@ -551,6 +604,21 @@ const normalizeState = (parsed) => {
     parsed.transcriptEvents && typeof parsed.transcriptEvents === "object"
       ? parsed.transcriptEvents
       : {}
+  state.transcriptCursor =
+    parsed.transcriptCursor && typeof parsed.transcriptCursor === "object"
+      ? {
+          path:
+            typeof parsed.transcriptCursor.path === "string"
+              ? path.resolve(parsed.transcriptCursor.path)
+              : null,
+          offset: Number.isFinite(parsed.transcriptCursor.offset)
+            ? Math.max(0, Number(parsed.transcriptCursor.offset))
+            : 0,
+          lineIndex: Number.isFinite(parsed.transcriptCursor.lineIndex)
+            ? Math.max(0, Number(parsed.transcriptCursor.lineIndex))
+            : 0,
+        }
+      : null
   state.dtsContext =
     parsed.dtsContext && typeof parsed.dtsContext === "object" ? parsed.dtsContext : null
   state.firstEventAt =
@@ -558,6 +626,10 @@ const normalizeState = (parsed) => {
   state.projectStateSeenAt =
     typeof parsed.projectStateSeenAt === "string" && parsed.projectStateSeenAt
       ? parsed.projectStateSeenAt
+      : null
+  state.carryOverNotice =
+    parsed.carryOverNotice && typeof parsed.carryOverNotice === "object"
+      ? parsed.carryOverNotice
       : null
   state.attributionReviews =
     parsed.attributionReviews && typeof parsed.attributionReviews === "object"
@@ -587,6 +659,7 @@ const normalizeState = (parsed) => {
     }
   }
 
+  pruneStateFiles(state)
   return state
 }
 
@@ -909,13 +982,20 @@ const fileMtimeMs = (fp) => {
   }
 }
 
+const latestStateEventMs = (state) =>
+  Object.values(state.files || {}).reduce(
+    (latest, file) =>
+      Math.max(latest, Number(file?.touchedAtMs || 0), Number(file?.editedAtMs || 0)),
+    0
+  )
+
 const recordFile = (state, fp, edited) => {
   const abs = path.normalize(path.resolve(fp))
   const key = normalizeKey(abs)
   const existing = state.files[key] || {}
   const mtimeMs = fileMtimeMs(abs)
   state.clock += 1
-  const eventMs = Date.now() * 1000 + state.clock
+  const eventMs = Math.max(Date.now() * 1000, latestStateEventMs(state)) + 1
   state.files[key] = {
     ...existing,
     path: abs,
@@ -930,6 +1010,7 @@ const recordFile = (state, fp, edited) => {
     addPath(state.edited, abs)
     state.noEditSession = false
   }
+  pruneStateFiles(state)
   return state.clock
 }
 
@@ -1044,6 +1125,48 @@ const transcriptToolEventKey = (record, lineIndex, recordIndex) => {
       input: record?.input || {},
     })
   )}`
+}
+
+const countTranscriptLines = (text) => {
+  if (!text) return 0
+  const newlines = (text.match(/\n/g) || []).length
+  return text.endsWith("\n") ? newlines : newlines + 1
+}
+
+const readTranscriptChunk = (state, transcriptPath) => {
+  const abs = path.resolve(transcriptPath)
+  const stat = fs.statSync(abs)
+  const sameCursor = state.transcriptCursor?.path === abs
+  let offset = sameCursor ? Number(state.transcriptCursor?.offset || 0) : 0
+  let lineIndex = sameCursor ? Number(state.transcriptCursor?.lineIndex || 0) : 0
+
+  if (!Number.isFinite(offset) || offset < 0 || offset > stat.size) {
+    offset = 0
+    lineIndex = 0
+  }
+
+  const buffer = fs.readFileSync(abs).subarray(offset)
+  if (!buffer.length) {
+    state.transcriptCursor = { path: abs, offset, lineIndex }
+    return { content: "", lineIndexBase: lineIndex }
+  }
+
+  let processLength = buffer.length
+  const lastNewline = buffer.lastIndexOf(0x0a)
+  if (lastNewline >= 0) {
+    const tail = buffer.subarray(lastNewline + 1).toString("utf8").trim()
+    processLength = tail && !(tail.startsWith("{") && tail.endsWith("}")) ? lastNewline + 1 : buffer.length
+  } else if (offset > 0) {
+    const tail = buffer.toString("utf8").trim()
+    processLength = tail.startsWith("{") && tail.endsWith("}") ? buffer.length : 0
+  }
+
+  const processBuffer = buffer.subarray(0, processLength)
+  const content = processBuffer.toString("utf8")
+  const nextOffset = offset + processLength
+  const nextLineIndex = lineIndex + countTranscriptLines(content)
+  state.transcriptCursor = { path: abs, offset: nextOffset, lineIndex: nextLineIndex }
+  return { content, lineIndexBase: lineIndex }
 }
 
 const getRequirementBucket = (state, dir, create) => {
@@ -1192,13 +1315,17 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
 
   let changed = false
   let content = ""
+  let lineIndexBase = 0
   const seen = new Set()
   const pendingToolUses = new Map()
   try {
-    content = fs.readFileSync(transcriptPath, "utf8")
+    const chunk = readTranscriptChunk(state, transcriptPath)
+    content = chunk.content
+    lineIndexBase = chunk.lineIndexBase
   } catch {
     return false
   }
+  if (!content) return false
 
   const lines = content.split(/\r?\n/)
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
@@ -1231,7 +1358,7 @@ const hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
       if (finalRecord.failed) continue
       if (finalRecord.source === "tool_use" && !finalRecord.completed) continue
 
-      const key = transcriptToolEventKey(finalRecord, lineIndex, recordIndex)
+      const key = transcriptToolEventKey(finalRecord, lineIndexBase + lineIndex, recordIndex)
       if (seen.has(key)) continue
       seen.add(key)
       if (!markTranscriptEvent(state, key)) continue
@@ -1759,6 +1886,8 @@ const recordProjectArchiveAction = (cwd, project, fp) => {
 
 const collectProjectAttributionTargets = (cwd, project, state) => {
   const activeDirs = Object.values(project.changeDirs || {}).filter((dir) => !dir.archived)
+  if (activeDirs.length <= 1) return activeDirs
+
   const sessionTouched = activeDirs.filter((dir) =>
     (state.edited || []).some((file) => toPosix(file).includes(`/${dir.relDir}/`))
   )
@@ -1930,11 +2059,36 @@ const collectCarryOverDrift = (project) =>
     .filter((dir) => !dir.archived)
     .filter((dir) => dir.state !== "ALIGNED" && dir.state !== "PROPOSAL_STAGE")
 
-const formatCarryOverReminder = (project) => {
+const carryOverSignature = (project) =>
+  hash(
+    JSON.stringify(
+      collectCarryOverDrift(project).map((dir) => ({
+        relDir: dir.relDir,
+        state: dir.state,
+      }))
+    )
+  )
+
+const markCarryOverNoticeEmitted = (state, project, source) => {
+  const signature = carryOverSignature(project)
+  state.carryOverNotice = {
+    signature,
+    source,
+    emittedAt: new Date().toISOString(),
+  }
+}
+
+const shouldEmitCarryOverNotice = (state, project) => {
+  const driftDirs = collectCarryOverDrift(project)
+  if (!driftDirs.length) return false
+  return state.carryOverNotice?.signature !== carryOverSignature(project)
+}
+
+const formatCarryOverReminder = (project, options = {}) => {
   const driftDirs = collectCarryOverDrift(project)
   if (!driftDirs.length) return ""
   return [
-    "SDD carry-over drift from prior sessions:",
+    `${options.prefix || ""}SDD carry-over drift from prior sessions:`,
     ...driftDirs.map((dir) => `- ${dir.relDir}: ${dir.state}`),
     "",
     "Before final answer, review these active SDD change directories and synchronize design.md/tasks.md with the implementation if needed.",
@@ -1957,13 +2111,23 @@ const refreshAlignedBaseline = (cwd, project, state) => {
   let changed = false
   for (const dir of Object.values(project.changeDirs || {})) {
     if (dir.archived) continue
-    const hasLinkedCode = (dir.linkedCode || []).length > 0
-    if (!hasLinkedCode) continue
-    const docs = [dir.docs?.design, dir.docs?.tasks].filter((doc) => doc?.exists)
-    if (!docs.length) continue
-    const latestCodeMs = Math.max(0, ...dir.linkedCode.map((item) => Number(item.lastEditedMs || 0)))
-    const allReviewed = docs.every((doc) => Math.max(Number(doc.lastEditedMs || 0), Number(doc.lastReviewedMs || 0)) >= latestCodeMs)
-    if (!allReviewed) continue
+    const linkedCodeRecords = (dir.linkedCode || [])
+      .map((item) => state.files?.[normalizeKey(path.join(cwd, item.path))])
+      .filter((record) => record?.editedSeq && isCodePath(record.path || ""))
+    if (!linkedCodeRecords.length) continue
+    const latestCodeSeq = Math.max(0, ...linkedCodeRecords.map((record) => Number(record.editedSeq || 0)))
+    if (!latestCodeSeq) continue
+
+    const docPaths = [DESIGN_FILE, TASKS_FILE]
+      .filter((file) => dir.docs?.[docKeyForFile(file)]?.exists)
+      .map((file) => path.join(cwd, dir.relDir, file))
+    if (!docPaths.length) continue
+
+    const docSeqs = docPaths.map((file) => editedSeq(state, file))
+    const allDocsEditedBeforeCode = docSeqs.every((seq) => seq > 0 && seq < latestCodeSeq)
+    if (!allDocsEditedBeforeCode) continue
+
+    const latestCodeMs = Math.max(0, ...linkedCodeRecords.map((record) => eventMsForFileRecord(record, true)))
     if (Number(dir.alignedAtMs || 0) >= latestCodeMs) continue
     dir.alignedAtMs = Math.max(nowMs, latestCodeMs)
     dir.alignedAt = new Date().toISOString()
@@ -2856,7 +3020,11 @@ const main = async () => {
       state.subagentContext = { parentSessionId: input.parentSessionId }
     }
     if (project) applySessionToProject(cwd, project, state, sessionID)
-    const reminder = isFirstEvent && !isDtsContextActive(state) ? formatCarryOverReminder(project) : ""
+    const reminder =
+      isFirstEvent && !isDtsContextActive(state) && shouldEmitCarryOverNotice(state, project)
+        ? formatCarryOverReminder(project)
+        : ""
+    if (reminder) markCarryOverNoticeEmitted(state, project, input.hook_event_name)
     persist()
     writeDiagnosticLog(cwd, {
       event: reminder ? "carry_over_emitted" : "user_prompt_context_captured",
@@ -3038,6 +3206,30 @@ const main = async () => {
       return
     }
 
+    const carryOverFallback =
+      isPostToolUse &&
+      state.noEditSession &&
+      !isDtsContextActive(state) &&
+      shouldEmitCarryOverNotice(state, project)
+        ? formatCarryOverReminder(project, { prefix: "[Carry-over] " })
+        : ""
+    if (carryOverFallback) {
+      if (!state.firstEventAt) state.firstEventAt = new Date().toISOString()
+      markCarryOverNoticeEmitted(state, project, "PostToolUse")
+      persistAndReport()
+      writeDiagnosticLog(cwd, {
+        event: "emit_carry_over_fallback",
+        input: summarizeInput(input),
+        tool,
+        subagentCheckpoint,
+        questionCheckpoint,
+        hydratedFromCheckpointOutput,
+        messagePreview: limitString(carryOverFallback, 800),
+      })
+      emitEnforcement(input, carryOverFallback)
+      return
+    }
+
     persistAndReport()
     writeDiagnosticLog(cwd, {
       event: "ignored_no_file_path",
@@ -3110,11 +3302,23 @@ const main = async () => {
     Boolean(state.peerDriftNotice?.active) &&
     state.peerDriftNotice.signature === peerSignature
   const compactCodeGap = emitCodeGap && Boolean(state.codeDriftNotice?.active)
+  const carryOverFallback =
+    !emitPeerGaps.length &&
+    !emitCodeGap &&
+    state.noEditSession &&
+    !isDtsContextActive(state) &&
+    shouldEmitCarryOverNotice(state, project)
+      ? formatCarryOverReminder(project, { prefix: "[Carry-over] " })
+      : ""
   if (emitPeerGaps.length) {
     markPeerDriftNoticeEmitted(state, emitPeerGaps)
   }
   if (emitCodeGap) {
     markCodeDriftNoticeEmitted(cwd, state, codeGaps)
+  }
+  if (carryOverFallback) {
+    if (!state.firstEventAt) state.firstEventAt = new Date().toISOString()
+    markCarryOverNoticeEmitted(state, project, "PostToolUse")
   }
 
   persistAndReport()
@@ -3151,6 +3355,17 @@ const main = async () => {
       ...summarizeGaps(cwd, peerGaps, codeGaps),
     })
     emitEnforcement(input, warnings.join("\n"))
+  } else if (carryOverFallback) {
+    writeDiagnosticLog(cwd, {
+      event: "emit_carry_over_fallback",
+      input: summarizeInput(input),
+      file: rel(cwd, abs),
+      tool,
+      isEdit,
+      messagePreview: limitString(carryOverFallback, 800),
+      ...summarizeGaps(cwd, peerGaps, codeGaps),
+    })
+    emitEnforcement(input, carryOverFallback)
   } else {
     writeDiagnosticLog(cwd, {
       event: codeReviewNoEditConfirmed
@@ -3244,7 +3459,9 @@ if (require.main === module) {
     ATTRIBUTION_REVIEW_RULES,
     buildPreCompactSummary,
     getToolEventKey,
+    markCarryOverNoticeEmitted,
     markToolEvent,
+    pruneStateFiles,
     refreshAlignedBaseline,
     recordFile,
     resolveTranscriptPath,
@@ -3254,6 +3471,7 @@ if (require.main === module) {
     saveState,
     writeDiagnosticLog,
     updateDtsContextFromInput,
+    shouldEmitCarryOverNotice,
     shouldEmitCodeDriftNotice,
     shouldEmitSubagentCheckpointNotice,
     markCodeDriftNoticeEmitted,

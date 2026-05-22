@@ -125,3 +125,32 @@ recordFile              line  912        ← R1
 main                    line 2789        ← R11 / 注册表缺失
 module.exports          line 3190
 ```
+
+---
+
+## 六、处理记录（2026-05-22）
+
+### 6.1 已采纳并修复
+
+| 编号 | 处理结论 | 修改内容 |
+|------|----------|----------|
+| B1 | 采纳 | `refreshAlignedBaseline` 改为只处理“本会话先编辑 SDD 文档、后编辑代码”的实现流基线刷新；跨会话仅 Read 旧文档不再刷新 `alignedAtMs`。同时 `recordFile` 的事件时间改为基于 state 内最大事件时间单调递增，避免快速工具调用或系统时间抖动导致 design/tasks 顺序误判。 |
+| B3 | 采纳 | 增加 PostToolUse carry-over 兜底：未配置 `UserPromptSubmit` / `ChatMessage` 时，首次可见工具结果仍可通过 `[Carry-over] SDD carry-over drift from prior sessions:` 提醒模型处理跨会话遗留 drift，并通过 `carryOverNotice` 签名避免重复提示。 |
+| R1 | 采纳 | 增加 `session.files` LRU 上限，默认 `1000`，可通过 `SDD_DRIFT_SESSION_FILES_MAX` 调整；同步裁剪 `touched` / `edited`，避免长会话 state 无界增长。 |
+| R2 | 采纳 | 增加 `transcriptCursor`，`hydrateStateFromTranscript` 改为按 byte offset 增量读取 transcript，并保存 `lineIndex`，避免 Stop 阶段反复全量扫描大 transcript。 |
+| R9 | 采纳 | `readStdin` 增加默认 5s 超时，可通过 `SDD_DRIFT_STDIN_TIMEOUT_MS` 调整；超时后使用已读入内容继续解析，避免 hook 因 stdin 未关闭而无限阻塞。 |
+| B2 | 部分采纳 | `collectProjectAttributionTargets` 增加 single active change-dir 短路，减少单 change-dir 场景下不必要的候选扩散。完整 FR11 LLM attribution fork 暂未实现，仍列为后续 P2。 |
+
+### 6.2 暂缓或反驳
+
+| 编号 | 处理结论 | 理由 |
+|------|----------|------|
+| B4 | 反驳，保留现状 | review 认为 `ChangeDir.peerSyncs` 越界，但当前项目级 `peerSyncs` 是跨会话识别 design/tasks 同步关系的持久化证据，用来避免 “design 改 tasks，tasks 又反向触发 design” 的 ping-pong。该字段虽然偏离原设计 schema，但删除会回退近期已修复的真实使用问题。后续如要严格 schema，可改名为 `docSyncs` 并同步更新设计文档，而不是直接删除。 |
+| R11 / Dispatcher | 暂缓 | `main()` 结构复杂的问题成立，但本轮优先处理行为正确性和长会话稳定性。Dispatcher/Action 抽象属于 P3 结构债，建议在 snapshot fixture 更完整后单独重构。 |
+| CircuitBreaker | 暂缓 | `circuitBreaker` 字段仍未完全使用；当前新增了 stdin timeout 和原子状态写入等更直接的稳定性修复。异常熔断适合与 Dispatcher 重构一起落地。 |
+| P0 16 旅程 snapshot fixture | 暂缓 | 本轮补充了针对 B1/R1/R2/B3 的单元回归，但完整 16 旅程 snapshot fixture 体量较大，应作为后续单独测试基建任务实施。 |
+
+### 6.3 本轮新增验证
+
+- `npm test` 覆盖：project per-doc review、implementation-flow baseline、peer sync 防反向误判、session files LRU、transcript cursor 增量 hydration、carry-over notice 签名去重。
+- `node -c plugins/sdd-drift-check/sdd-drift-check-hook.js` 语法检查通过。
