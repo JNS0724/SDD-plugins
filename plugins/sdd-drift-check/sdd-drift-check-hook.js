@@ -58,6 +58,15 @@ const STATE_LOCK_STALE_MS = 30 * 1000
 const STATE_LOCK_WAIT_MS = 5 * 1000
 const STATE_LOCK_RETRY_MS = 20
 const STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const PROJECT_LOCK_WAIT_MS = 2 * 1000
+const PROJECT_LINKED_CODE_CAP = Number.parseInt(
+  process.env.SDD_DRIFT_PROJECT_LINKED_CODE_CAP || "200",
+  10
+)
+const ACTIVE_CHANGE_DIR_TTL_MS = Number.parseInt(
+  process.env.SDD_DRIFT_ACTIVE_TTL_MS || String(7 * 24 * 60 * 60 * 1000),
+  10
+)
 const STATE_DIR = ".sdd-drift-hook-state"
 const PEER_FILES = ["design.md", "tasks.md"]
 const PROPOSAL_FILE = "proposal.md"
@@ -127,8 +136,19 @@ const ACTIVE_SDD_ALIGNMENT_RULES = [
   "If you choose no SDD edit, explicitly state which active design.md/tasks.md files you reviewed and why the code change has no design or task impact.",
   "Modify only content relevant to the current code batch; do not invent future requirements or broaden the scope.",
 ]
+const ATTRIBUTION_REVIEW_RULES = [
+  "Purely mechanical changes (formatting, comment-only edits, test-scaffolding, dependency bumps, lint fixes) do not require any SDD document update. State this conclusion explicitly in your response and continue.",
+  "If the code change implements behavior already described in a candidate change-dir's design.md, and that change-dir's tasks.md already reflects the implementation, no SDD action is needed.",
+  "If the code change adds, changes, or removes behavior not described in any candidate change-dir's design.md, update the most relevant change-dir's design.md to state the actual implemented behavior. Update tasks.md if a tracked task item is now complete or invalidated.",
+  "If the code change is genuinely unrelated to any active change-dir, acknowledge it as out-of-SDD scope in your response, or create a new sdd/changes/<id>/ directory when the work is feature-sized and warrants tracking.",
+  "If multiple candidate change-dirs could apply, choose the most specific match based on design.md content and briefly document the reasoning in your response. Do not edit unrelated change-dirs.",
+]
 const SUBAGENT_REVIEW_RULE =
   "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits."
+const formatAttributionReviewRules = () => [
+  "When deciding whether SDD documents need edits, apply these attribution review rules in order:",
+  ...ATTRIBUTION_REVIEW_RULES.map((rule, index) => `${index + 1}. ${rule}`),
+]
 const DTS_CONTEXT_PATTERNS = [
   /\bDTS-\d+\b/,
   /\bDTS\b/,
@@ -269,6 +289,8 @@ const stateDir = (cwd) => {
 
 const statePath = (cwd, sessionID) =>
   path.join(stateDir(cwd), `${hash(path.resolve(cwd))}-${sanitize(sessionID)}.json`)
+
+const projectStatePath = (cwd) => path.join(stateDir(cwd), "project.json")
 
 const diagnosticLogPath = (cwd) =>
   process.env.SDD_DRIFT_LOG_PATH || path.join(stateDir(cwd), "sdd-drift-check.log.jsonl")
@@ -460,7 +482,7 @@ const writeDiagnosticLog = (cwd, event) => {
 }
 
 const emptyState = () => ({
-  version: 2,
+  version: 3,
   createdAt: new Date().toISOString(),
   clock: 0,
   touched: [],
@@ -477,6 +499,11 @@ const emptyState = () => ({
   codeReviewConfirmations: {},
   transcriptEvents: {},
   dtsContext: null,
+  firstEventAt: null,
+  projectStateSeenAt: null,
+  attributionReviews: {},
+  noEditSession: true,
+  circuitBreaker: {},
 })
 
 const addPath = (items, item) => {
@@ -487,7 +514,7 @@ const normalizeState = (parsed) => {
   const state = emptyState()
   if (!parsed || typeof parsed !== "object") return state
 
-  state.version = 2
+  state.version = 3
   state.createdAt =
     typeof parsed.createdAt === "string" && parsed.createdAt
       ? parsed.createdAt
@@ -526,6 +553,20 @@ const normalizeState = (parsed) => {
       : {}
   state.dtsContext =
     parsed.dtsContext && typeof parsed.dtsContext === "object" ? parsed.dtsContext : null
+  state.firstEventAt =
+    typeof parsed.firstEventAt === "string" && parsed.firstEventAt ? parsed.firstEventAt : null
+  state.projectStateSeenAt =
+    typeof parsed.projectStateSeenAt === "string" && parsed.projectStateSeenAt
+      ? parsed.projectStateSeenAt
+      : null
+  state.attributionReviews =
+    parsed.attributionReviews && typeof parsed.attributionReviews === "object"
+      ? parsed.attributionReviews
+      : {}
+  state.noEditSession =
+    typeof parsed.noEditSession === "boolean" ? parsed.noEditSession : state.edited.length === 0
+  state.circuitBreaker =
+    parsed.circuitBreaker && typeof parsed.circuitBreaker === "object" ? parsed.circuitBreaker : {}
 
   for (const fp of state.touched) {
     const key = normalizeKey(fp)
@@ -874,16 +915,21 @@ const recordFile = (state, fp, edited) => {
   const existing = state.files[key] || {}
   const mtimeMs = fileMtimeMs(abs)
   state.clock += 1
+  const eventMs = Date.now() * 1000 + state.clock
   state.files[key] = {
     ...existing,
     path: abs,
     ...(mtimeMs ? { mtimeMs } : {}),
+    touchedAtMs: eventMs,
     touchedSeq: state.clock,
-    ...(edited ? { editedSeq: state.clock } : {}),
+    ...(edited ? { editedSeq: state.clock, editedAtMs: eventMs } : {}),
     ...(edited ? { firstEditedSeq: existing.firstEditedSeq || existing.editedSeq || state.clock } : {}),
   }
   addPath(state.touched, abs)
-  if (edited) addPath(state.edited, abs)
+  if (edited) {
+    addPath(state.edited, abs)
+    state.noEditSession = false
+  }
   return state.clock
 }
 
@@ -1343,6 +1389,640 @@ const collectActiveChangeDirs = (cwd, state) => {
   return active
 }
 
+const emptyProjectState = () => ({
+  version: 1,
+  lastUpdatedAt: new Date().toISOString(),
+  changeDirs: {},
+  activeChangeDir: null,
+  activeUntilMs: 0,
+  activeLastEditedSession: null,
+})
+
+const relDirForProject = (cwd, dir) => toPosix(path.relative(cwd, dir))
+
+const docKeyForFile = (file) => {
+  if (file === PROPOSAL_FILE) return "proposal"
+  if (file === DESIGN_FILE) return "design"
+  if (file === TASKS_FILE) return "tasks"
+  return null
+}
+
+const docFileForKey = (key) => {
+  if (key === "proposal") return PROPOSAL_FILE
+  if (key === "design") return DESIGN_FILE
+  if (key === "tasks") return TASKS_FILE
+  return null
+}
+
+const eventMsForFileRecord = (record, edited) => {
+  const value = edited ? record?.editedAtMs : record?.touchedAtMs
+  if (Number.isFinite(value)) return value
+  if (Number.isFinite(record?.mtimeMs)) return Math.round(record.mtimeMs * 1000)
+  return Date.now() * 1000
+}
+
+const docRecordFromFs = (fp) => {
+  try {
+    const stat = fs.statSync(fp)
+    if (!stat.isFile()) return { exists: false }
+    const ms = Math.round(stat.mtimeMs * 1000)
+    return {
+      exists: true,
+      lastEditedMs: ms,
+      lastReviewedMs: ms,
+    }
+  } catch {
+    return { exists: false }
+  }
+}
+
+const createChangeDirFromFs = (cwd, dir) => {
+  const normalized = path.normalize(dir)
+  const changeDir = {
+    relDir: relDirForProject(cwd, normalized),
+    archived: isArchivedChangeDir(normalized),
+    docs: {
+      proposal: docRecordFromFs(path.join(normalized, PROPOSAL_FILE)),
+      design: docRecordFromFs(path.join(normalized, DESIGN_FILE)),
+      tasks: docRecordFromFs(path.join(normalized, TASKS_FILE)),
+    },
+    linkedCode: [],
+    alignedAt: null,
+    alignedAtMs: 0,
+    state: "ALIGNED",
+    conditions: {
+      proposalOnly: false,
+      designAheadOfTasks: false,
+      tasksAheadOfDesign: false,
+      codeAheadOfDocs: false,
+      codePendingDocs: [],
+    },
+    peerSyncs: {},
+  }
+  changeDir.conditions = computeProjectConditions(changeDir)
+  changeDir.state = computeProjectState(changeDir.conditions, changeDir.archived)
+  return changeDir
+}
+
+const normalizeProjectDoc = (doc) => ({
+  exists: Boolean(doc?.exists),
+  ...(Number.isFinite(doc?.lastEditedMs) ? { lastEditedMs: Number(doc.lastEditedMs) } : {}),
+  ...(Number.isFinite(doc?.lastReviewedMs) ? { lastReviewedMs: Number(doc.lastReviewedMs) } : {}),
+  ...(typeof doc?.lastEditedSession === "string" ? { lastEditedSession: doc.lastEditedSession } : {}),
+  ...(typeof doc?.lastReviewedSession === "string" ? { lastReviewedSession: doc.lastReviewedSession } : {}),
+})
+
+const normalizeProjectChangeDir = (cwd, relDirValue, value) => {
+  const relDir = toPosix(value?.relDir || relDirValue || "")
+  const absDir = path.join(cwd, relDir)
+  const fromFs = createChangeDirFromFs(cwd, absDir)
+  const changeDir = {
+    ...fromFs,
+    ...value,
+    relDir,
+    archived: Boolean(value?.archived) || isArchivedChangeDir(absDir),
+    docs: {
+      proposal: normalizeProjectDoc(value?.docs?.proposal || fromFs.docs.proposal),
+      design: normalizeProjectDoc(value?.docs?.design || fromFs.docs.design),
+      tasks: normalizeProjectDoc(value?.docs?.tasks || fromFs.docs.tasks),
+    },
+    linkedCode: Array.isArray(value?.linkedCode)
+      ? value.linkedCode
+          .filter((item) => item?.path && Number.isFinite(item?.lastEditedMs))
+          .map((item) => ({
+            path: toPosix(item.path),
+            lastEditedMs: Number(item.lastEditedMs),
+            ...(typeof item.lastEditedSession === "string"
+              ? { lastEditedSession: item.lastEditedSession }
+              : {}),
+            linkedAt: Number.isFinite(item.linkedAt) ? Number(item.linkedAt) : Number(item.lastEditedMs),
+          }))
+      : [],
+    alignedAt: typeof value?.alignedAt === "string" ? value.alignedAt : null,
+    alignedAtMs: Number.isFinite(value?.alignedAtMs) ? Number(value.alignedAtMs) : 0,
+    peerSyncs: value?.peerSyncs && typeof value.peerSyncs === "object" ? value.peerSyncs : {},
+  }
+  changeDir.conditions = computeProjectConditions(changeDir)
+  changeDir.state = computeProjectState(changeDir.conditions, changeDir.archived)
+  return changeDir
+}
+
+const computeProjectConditions = (dir) => {
+  const design = dir.docs?.design || {}
+  const tasks = dir.docs?.tasks || {}
+  const proposal = dir.docs?.proposal || {}
+  const designExists = design.exists === true
+  const tasksExists = tasks.exists === true
+  const designEditedKnown = typeof design.lastEditedSession === "string"
+  const tasksEditedKnown = typeof tasks.lastEditedSession === "string"
+  const designEdited = Number(design.lastEditedMs || 0)
+  const tasksEdited = Number(tasks.lastEditedMs || 0)
+  const designReviewed = Math.max(designEdited, Number(design.lastReviewedMs || 0))
+  const tasksReviewed = Math.max(tasksEdited, Number(tasks.lastReviewedMs || 0))
+  const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)))
+  const tasksSyncedFromDesign =
+    dir.peerSyncs?.tasks?.sourceFile === DESIGN_FILE &&
+    Number(dir.peerSyncs.tasks.sourceEditedMs || 0) >= designEdited &&
+    Number(dir.peerSyncs.tasks.targetEditedMs || 0) >= Number(dir.peerSyncs.tasks.sourceEditedMs || 0)
+  const designSyncedFromTasks =
+    dir.peerSyncs?.design?.sourceFile === TASKS_FILE &&
+    Number(dir.peerSyncs.design.sourceEditedMs || 0) >= tasksEdited &&
+    Number(dir.peerSyncs.design.targetEditedMs || 0) >= Number(dir.peerSyncs.design.sourceEditedMs || 0)
+  const reviewTargets = [
+    designExists ? [DESIGN_FILE, designReviewed] : null,
+    tasksExists ? [TASKS_FILE, tasksReviewed] : null,
+  ].filter(Boolean)
+  const codePendingDocs = reviewTargets
+    .filter(([, reviewedAt]) => latestCodeMs > reviewedAt)
+    .map(([file]) => file)
+
+  return {
+    proposalOnly: proposal.exists === true && !designExists && !tasksExists,
+    designAheadOfTasks:
+      designExists && tasksExists && designEditedKnown && designEdited > tasksEdited && designEdited > 0 && !designSyncedFromTasks,
+    tasksAheadOfDesign:
+      designExists && tasksExists && tasksEditedKnown && tasksEdited > designEdited && tasksEdited > 0 && !tasksSyncedFromDesign,
+    codeAheadOfDocs: latestCodeMs > Number(dir.alignedAtMs || 0) && codePendingDocs.length > 0,
+    codePendingDocs,
+  }
+}
+
+const computeProjectState = (conditions, archived) => {
+  if (archived) return "ARCHIVED"
+  if (conditions.proposalOnly) return "PROPOSAL_STAGE"
+  const flags = [
+    conditions.designAheadOfTasks,
+    conditions.tasksAheadOfDesign,
+    conditions.codeAheadOfDocs,
+  ].filter(Boolean)
+  if (flags.length === 0) return "ALIGNED"
+  if (flags.length > 1) return "MULTI_DRIFT"
+  if (conditions.designAheadOfTasks) return "DESIGN_PENDING_TASKS"
+  if (conditions.tasksAheadOfDesign) return "TASKS_PENDING_DESIGN"
+  return "CODE_PENDING_REVIEW"
+}
+
+const recomputeProjectState = (project, cwd) => {
+  for (const [relDirValue, dir] of Object.entries(project.changeDirs || {})) {
+    const absDir = path.join(cwd, dir.relDir || relDirValue)
+    dir.archived = Boolean(dir.archived) || isArchivedChangeDir(absDir)
+    for (const key of ["proposal", "design", "tasks"]) {
+      const file = docFileForKey(key)
+      const fp = path.join(absDir, file)
+      const fsDoc = docRecordFromFs(fp)
+      dir.docs[key] = {
+        ...(dir.docs?.[key] || {}),
+        exists: fsDoc.exists,
+        ...(fsDoc.exists && !Number.isFinite(dir.docs?.[key]?.lastEditedMs)
+          ? { lastEditedMs: fsDoc.lastEditedMs }
+          : {}),
+        ...(fsDoc.exists && !Number.isFinite(dir.docs?.[key]?.lastReviewedMs)
+          ? { lastReviewedMs: fsDoc.lastReviewedMs }
+          : {}),
+      }
+    }
+    dir.conditions = computeProjectConditions(dir)
+    dir.state = computeProjectState(dir.conditions, dir.archived)
+  }
+  project.lastUpdatedAt = new Date().toISOString()
+  return project
+}
+
+const ensureProjectChangeDirs = (cwd, project) => {
+  for (const dir of discoverChangeDirs(cwd)) {
+    const relDirValue = relDirForProject(cwd, dir)
+    if (!project.changeDirs[relDirValue]) {
+      project.changeDirs[relDirValue] = createChangeDirFromFs(cwd, dir)
+    }
+  }
+  return recomputeProjectState(project, cwd)
+}
+
+const normalizeProjectState = (cwd, parsed) => {
+  const project = emptyProjectState()
+  if (parsed && typeof parsed === "object") {
+    project.version = 1
+    project.lastUpdatedAt =
+      typeof parsed.lastUpdatedAt === "string" && parsed.lastUpdatedAt
+        ? parsed.lastUpdatedAt
+        : project.lastUpdatedAt
+    project.activeChangeDir =
+      typeof parsed.activeChangeDir === "string" ? toPosix(parsed.activeChangeDir) : null
+    project.activeUntilMs = Number.isFinite(parsed.activeUntilMs) ? Number(parsed.activeUntilMs) : 0
+    project.activeLastEditedSession =
+      typeof parsed.activeLastEditedSession === "string" ? parsed.activeLastEditedSession : null
+    project.changeDirs = {}
+    for (const [relDirValue, value] of Object.entries(parsed.changeDirs || {})) {
+      project.changeDirs[toPosix(relDirValue)] = normalizeProjectChangeDir(cwd, relDirValue, value)
+    }
+  }
+  return ensureProjectChangeDirs(cwd, project)
+}
+
+const quarantineCorruptStateFile = (fp) => {
+  try {
+    if (!fs.existsSync(fp)) return
+    fs.renameSync(fp, `${fp}.corrupt-${Date.now()}`)
+  } catch {}
+}
+
+const loadProjectState = (cwd) => {
+  const fp = projectStatePath(cwd)
+  try {
+    return normalizeProjectState(cwd, JSON.parse(fs.readFileSync(fp, "utf8")))
+  } catch (err) {
+    if (err?.code !== "ENOENT") quarantineCorruptStateFile(fp)
+    return normalizeProjectState(cwd, emptyProjectState())
+  }
+}
+
+const saveProjectState = (cwd, project) => {
+  recomputeProjectState(project, cwd)
+  writeTextAtomic(projectStatePath(cwd), JSON.stringify(project, null, 2))
+}
+
+const updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record) => {
+  const relDirValue = relDirForProject(cwd, doc.dir)
+  const dir = project.changeDirs[relDirValue] || createChangeDirFromFs(cwd, doc.dir)
+  const key = docKeyForFile(doc.file)
+  if (!key) return
+
+  const previous = { ...(dir.docs[key] || {}) }
+  const edited = Number(record.editedSeq || 0) > 0
+  const eventMs = eventMsForFileRecord(record, edited)
+  const target = {
+    ...(dir.docs[key] || {}),
+    exists: true,
+  }
+  if (edited) {
+    if (target.lastEditedSession && eventMs <= Number(target.lastEditedMs || 0)) {
+      dir.docs[key] = target
+      project.changeDirs[relDirValue] = dir
+      return
+    }
+    target.lastEditedMs = Math.max(Number(target.lastEditedMs || 0), eventMs)
+    target.lastEditedSession = sessionID
+    target.lastReviewedMs = Math.max(Number(target.lastReviewedMs || 0), target.lastEditedMs)
+    target.lastReviewedSession = sessionID
+    const designEdited = Number(dir.docs.design?.lastEditedMs || 0)
+    const tasksEdited = Number(dir.docs.tasks?.lastEditedMs || 0)
+    const designEditedInSession =
+      key === "tasks" &&
+      editedSeq(state, path.join(doc.dir, DESIGN_FILE)) > 0 &&
+      editedSeq(state, path.join(doc.dir, DESIGN_FILE)) < Number(record.editedSeq || 0)
+    const tasksEditedInSession =
+      key === "design" &&
+      editedSeq(state, path.join(doc.dir, TASKS_FILE)) > 0 &&
+      editedSeq(state, path.join(doc.dir, TASKS_FILE)) < Number(record.editedSeq || 0)
+    const sessionPeerSync = getPeerSyncBucket(state, doc.dir, false)?.files?.[doc.file]
+    const sessionSyncedFromDesign =
+      key === "tasks" && sessionPeerSync?.sourceFile === DESIGN_FILE
+    const sessionSyncedFromTasks =
+      key === "design" && sessionPeerSync?.sourceFile === TASKS_FILE
+    const tasksWasSyncedFromPriorDesign =
+      key === "design" && dir.peerSyncs?.tasks?.sourceFile === DESIGN_FILE
+    const designWasSyncedFromPriorTasks =
+      key === "tasks" && dir.peerSyncs?.design?.sourceFile === TASKS_FILE
+    if (designWasSyncedFromPriorTasks) delete dir.peerSyncs.design
+    if (tasksWasSyncedFromPriorDesign) delete dir.peerSyncs.tasks
+
+    if (
+      key === "tasks" &&
+      (sessionSyncedFromDesign || designEdited > Number(previous.lastEditedMs || 0) || designEditedInSession) &&
+      !(!sessionSyncedFromDesign && designWasSyncedFromPriorTasks)
+    ) {
+      dir.peerSyncs.tasks = {
+        sourceFile: DESIGN_FILE,
+        sourceEditedMs: designEdited,
+        targetEditedMs: target.lastEditedMs,
+      }
+    } else if (
+      key === "design" &&
+      (sessionSyncedFromTasks || tasksEdited > Number(previous.lastEditedMs || 0) || tasksEditedInSession) &&
+      !(!sessionSyncedFromTasks && tasksWasSyncedFromPriorDesign)
+    ) {
+      dir.peerSyncs.design = {
+        sourceFile: TASKS_FILE,
+        sourceEditedMs: tasksEdited,
+        targetEditedMs: target.lastEditedMs,
+      }
+    } else {
+      if (key === "tasks") delete dir.peerSyncs.design
+      if (key === "design") delete dir.peerSyncs.tasks
+    }
+    project.activeChangeDir = relDirValue
+    project.activeUntilMs = Date.now() + ACTIVE_CHANGE_DIR_TTL_MS
+    project.activeLastEditedSession = sessionID
+  } else {
+    if (target.lastReviewedSession && eventMs <= Number(target.lastReviewedMs || 0)) {
+      dir.docs[key] = target
+      project.changeDirs[relDirValue] = dir
+      return
+    }
+    target.lastReviewedMs = Math.max(Number(target.lastReviewedMs || 0), eventMs)
+    target.lastReviewedSession = sessionID
+  }
+  dir.docs[key] = target
+  project.changeDirs[relDirValue] = dir
+}
+
+const getChangeDirForPath = (fp) => {
+  const root = findSdd(fp)
+  if (!root) return null
+  const relPath = toPosix(path.relative(root, fp))
+  const match = relPath.match(/^changes\/([^/]+)(?:\/|$)/)
+  if (!match) return null
+  return {
+    root,
+    id: match[1],
+    dir: path.join(root, "changes", match[1]),
+    rel: relPath,
+  }
+}
+
+const recordProjectArchiveAction = (cwd, project, fp) => {
+  const changeDir = getChangeDirForPath(fp)
+  if (!changeDir) return false
+  const relDirValue = relDirForProject(cwd, changeDir.dir)
+  const dir = project.changeDirs[relDirValue] || createChangeDirFromFs(cwd, changeDir.dir)
+  if (!isArchivedChangeDir(changeDir.dir)) return false
+  dir.archived = true
+  dir.conditions = computeProjectConditions(dir)
+  dir.state = "ARCHIVED"
+  project.changeDirs[relDirValue] = dir
+  if (project.activeChangeDir === relDirValue) {
+    project.activeChangeDir = null
+    project.activeUntilMs = 0
+  }
+  return true
+}
+
+const collectProjectAttributionTargets = (cwd, project, state) => {
+  const activeDirs = Object.values(project.changeDirs || {}).filter((dir) => !dir.archived)
+  const sessionTouched = activeDirs.filter((dir) =>
+    (state.edited || []).some((file) => toPosix(file).includes(`/${dir.relDir}/`))
+  )
+  if (sessionTouched.length === 1) return sessionTouched
+
+  const now = Date.now()
+  if (project.activeChangeDir && now < Number(project.activeUntilMs || 0)) {
+    const active = activeDirs.find((dir) => dir.relDir === project.activeChangeDir)
+    if (active) return [active]
+  }
+
+  return activeDirs
+}
+
+const appendProjectLinkedCode = (dir, cwd, record, sessionID) => {
+  const relPath = rel(cwd, record.path)
+  const lastEditedMs = eventMsForFileRecord(record, true)
+  const existing = (dir.linkedCode || []).find((item) => samePath(path.join(cwd, item.path), record.path))
+  if (existing) {
+    existing.lastEditedMs = Math.max(Number(existing.lastEditedMs || 0), lastEditedMs)
+    existing.lastEditedSession = sessionID
+    return
+  }
+  dir.linkedCode = [
+    ...(dir.linkedCode || []),
+    {
+      path: relPath,
+      lastEditedMs,
+      lastEditedSession: sessionID,
+      linkedAt: lastEditedMs,
+    },
+  ]
+    .sort((left, right) => Number(right.lastEditedMs || 0) - Number(left.lastEditedMs || 0))
+    .slice(0, Math.max(1, PROJECT_LINKED_CODE_CAP || 200))
+}
+
+const applySessionToProject = (cwd, project, state, sessionID) => {
+  ensureProjectChangeDirs(cwd, project)
+  if (isDtsContextActive(state)) return recomputeProjectState(project, cwd)
+
+  for (const record of Object.values(state.files || {})) {
+    const fp = record?.path
+    if (!fp) continue
+    const doc = getChangeDoc(fp)
+    if (doc?.dir && doc.file) {
+      updateProjectDocFromRecord(cwd, project, state, sessionID, doc, record)
+      continue
+    }
+    if (record.editedSeq && isCodePath(fp)) {
+      const targets = collectProjectAttributionTargets(cwd, project, state)
+      for (const dir of targets) appendProjectLinkedCode(dir, cwd, record, sessionID)
+      if (targets.length === 1) {
+        project.activeChangeDir = targets[0].relDir
+        project.activeUntilMs = Date.now() + ACTIVE_CHANGE_DIR_TTL_MS
+        project.activeLastEditedSession = sessionID
+      }
+    }
+  }
+
+  for (const fp of state.edited || []) recordProjectArchiveAction(cwd, project, fp)
+  return recomputeProjectState(project, cwd)
+}
+
+const collectProjectPeerGaps = (cwd, project, options = {}) => {
+  const includeStageOnly = options.includeStageOnly !== false
+  const includeHard = options.includeHard !== false
+  const gaps = []
+  for (const dir of Object.values(project?.changeDirs || {})) {
+    if (dir.archived) continue
+    const absDir = path.join(cwd, dir.relDir)
+    const conditions = computeProjectConditions(dir)
+    const required = []
+    const sourceFiles = []
+    if (conditions.proposalOnly && includeStageOnly) {
+      continue
+    }
+    if (conditions.designAheadOfTasks && includeHard) {
+      required.push(TASKS_FILE)
+      sourceFiles.push(DESIGN_FILE)
+    }
+    if (conditions.tasksAheadOfDesign && includeHard) {
+      required.push(DESIGN_FILE)
+      sourceFiles.push(TASKS_FILE)
+    }
+    if (!required.length) continue
+    gaps.push({
+      relDir: dir.relDir,
+      edited: [PROPOSAL_FILE, DESIGN_FILE, TASKS_FILE].filter((file) => {
+        const key = docKeyForFile(file)
+        return Number(dir.docs?.[key]?.lastEditedMs || 0) > 0
+      }),
+      sourceFiles,
+      stageOnly: false,
+      absent: required.filter((file) => !fs.existsSync(path.join(absDir, file))),
+      missing: required.filter((file) => !fs.existsSync(path.join(absDir, file))),
+      unsynced: required.filter((file) => fs.existsSync(path.join(absDir, file))),
+      stale: [],
+      required,
+      projectLevel: true,
+    })
+  }
+  return gaps
+}
+
+const collectProjectCodeGaps = (cwd, project) => {
+  if (!project || !hasSddWorkspace(cwd)) return []
+  const gaps = []
+  for (const dir of Object.values(project.changeDirs || {})) {
+    if (dir.archived) continue
+    const conditions = computeProjectConditions(dir)
+    if (!conditions.codeAheadOfDocs) continue
+    const codeFiles = (dir.linkedCode || []).map((item) => path.join(cwd, item.path))
+    const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)))
+    const reviewTargets = conditions.codePendingDocs.map((file) => path.join(cwd, dir.relDir, file))
+    if (!reviewTargets.length || !codeFiles.length) continue
+    gaps.push({
+      codeFiles,
+      latestCodeSeq: latestCodeMs,
+      latestCodeMs,
+      reviewTargets,
+      pendingReviewTargets: reviewTargets,
+      reviewReady: false,
+      needsConfirmation: false,
+      projectLevel: true,
+      relDir: dir.relDir,
+      reviewSignature: hash(
+        JSON.stringify({
+          type: "project-code",
+          relDir: dir.relDir,
+          latestCodeMs,
+          reviewTargets: reviewTargets.map((file) => rel(cwd, file)).sort(),
+        })
+      ),
+    })
+  }
+  return gaps
+}
+
+const collectCombinedPeerGaps = (cwd, state, project, options = {}) => {
+  const combined = [
+    ...collectPeerGaps(cwd, state, options),
+    ...collectProjectPeerGaps(cwd, project, options),
+  ]
+  const seen = new Set()
+  return combined.filter((gap) => {
+    const key = `${gap.relDir}:${gap.required.sort().join(",")}:${gap.sourceFiles.sort().join(",")}:${gap.stageOnly}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+const collectCombinedCodeGaps = (cwd, state, project) => {
+  const combined = [...collectCodeGaps(cwd, state), ...collectProjectCodeGaps(cwd, project)]
+  const seen = new Set()
+  return combined.filter((gap) => {
+    const key = JSON.stringify({
+      codeFiles: (gap.codeFiles || []).map((file) => rel(cwd, file)).sort(),
+      reviewTargets: (gap.reviewTargets || []).map((file) => rel(cwd, file)).sort(),
+    })
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+const collectCarryOverDrift = (project) =>
+  Object.values(project?.changeDirs || {})
+    .filter((dir) => !dir.archived)
+    .filter((dir) => dir.state !== "ALIGNED" && dir.state !== "PROPOSAL_STAGE")
+
+const formatCarryOverReminder = (project) => {
+  const driftDirs = collectCarryOverDrift(project)
+  if (!driftDirs.length) return ""
+  return [
+    "SDD carry-over drift from prior sessions:",
+    ...driftDirs.map((dir) => `- ${dir.relDir}: ${dir.state}`),
+    "",
+    "Before final answer, review these active SDD change directories and synchronize design.md/tasks.md with the implementation if needed.",
+    SUBAGENT_REVIEW_RULE,
+  ].join("\n")
+}
+
+const buildPreCompactSummary = (project) => {
+  const driftDirs = collectCarryOverDrift(project)
+  if (!driftDirs.length) return ""
+  return [
+    "SDD drift summary preserved across compaction:",
+    ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`),
+  ].join("\n")
+}
+
+const refreshAlignedBaseline = (cwd, project, state) => {
+  if (!project) return false
+  const nowMs = Date.now() * 1000
+  let changed = false
+  for (const dir of Object.values(project.changeDirs || {})) {
+    if (dir.archived) continue
+    const hasLinkedCode = (dir.linkedCode || []).length > 0
+    if (!hasLinkedCode) continue
+    const docs = [dir.docs?.design, dir.docs?.tasks].filter((doc) => doc?.exists)
+    if (!docs.length) continue
+    const latestCodeMs = Math.max(0, ...dir.linkedCode.map((item) => Number(item.lastEditedMs || 0)))
+    const allReviewed = docs.every((doc) => Math.max(Number(doc.lastEditedMs || 0), Number(doc.lastReviewedMs || 0)) >= latestCodeMs)
+    if (!allReviewed) continue
+    if (Number(dir.alignedAtMs || 0) >= latestCodeMs) continue
+    dir.alignedAtMs = Math.max(nowMs, latestCodeMs)
+    dir.alignedAt = new Date().toISOString()
+    changed = true
+  }
+  if (changed) recomputeProjectState(project, cwd)
+  return changed
+}
+
+const isImplementationFlowCodePending = (cwd, state, pending) => {
+  if (pending?.type !== "code") return false
+  const gaps = pending.gaps || []
+  if (!gaps.length) return false
+  return gaps.every((gap) => {
+    const latest = Number(gap.latestCodeSeq || 0)
+    if (!latest) return false
+    const targets = gap.reviewTargets || []
+    if (!targets.length) return false
+    return targets.every((target) => {
+      const seq = editedSeq(state, target)
+      return seq > 0 && seq < latest
+    })
+  })
+}
+
+const markImplementationFlowConfirmation = (cwd, state, pending, project = null) => {
+  if (!isImplementationFlowCodePending(cwd, state, pending)) return false
+  const nowMs = Date.now() * 1000
+  for (const gap of pending.gaps || []) {
+    const signature = gap.reviewSignature || codeReviewSignature(cwd, gap)
+    if (!signature) continue
+    state.codeReviewConfirmations[signature] = {
+      confirmed: true,
+      confirmedAt: new Date().toISOString(),
+      codeSeq: gap.latestCodeSeq || 0,
+      codeFiles: gap.codeFiles || [],
+      reviewTargets: gap.reviewTargets || [],
+      implementationFlow: true,
+      userConfirmationRecommended: false,
+    }
+    if (project) {
+      const relDirs = new Set(
+        (gap.reviewTargets || [])
+          .map((file) => getChangeDirForPath(file))
+          .filter(Boolean)
+          .map((changeDir) => relDirForProject(cwd, changeDir.dir))
+      )
+      for (const relDirValue of relDirs) {
+        const dir = project.changeDirs?.[relDirValue]
+        if (!dir) continue
+        dir.alignedAtMs = Math.max(Number(dir.alignedAtMs || 0), Number(gap.latestCodeMs || 0), nowMs)
+        dir.alignedAt = new Date().toISOString()
+      }
+    }
+  }
+  if (project) recomputeProjectState(project, cwd)
+  return true
+}
+
 const collectReviewTargets = (cwd, state) => {
   if (!hasSddWorkspace(cwd)) return []
 
@@ -1397,6 +2077,7 @@ const collectCodeGaps = (cwd, state) => {
     pendingReviewTargets,
   }
   const reviewSignature = codeReviewSignature(cwd, baseGap)
+  if (state.codeReviewConfirmations?.[reviewSignature]?.implementationFlow) return []
   const hasReviewEdit = editedSddSeqAfter(state, reviewTargets, latestCodeSeq)
 
   const reviewReady = pendingReviewTargets.length === 0
@@ -1489,6 +2170,7 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
       "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
       "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
       ...ACTIVE_SDD_ALIGNMENT_RULES,
+      ...formatAttributionReviewRules(),
       "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
       "After both documents have been reviewed, you may finish normally; the hook records the no-edit review decision and leaves a human confirmation note.",
       SUBAGENT_REVIEW_RULE,
@@ -1505,6 +2187,7 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
     "When the implementation for this task is complete, and before any final answer, use the read tool to review the relevant design.md and tasks.md files.",
     "After review, update active SDD document(s) whenever they no longer match the implemented code. Optimization and refactor work can still require SDD updates.",
     ...ACTIVE_SDD_ALIGNMENT_RULES,
+    ...formatAttributionReviewRules(),
     "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
     "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
     ...DOCUMENT_SYNC_RULES,
@@ -1802,8 +2485,8 @@ const hydrateStateFromCheckpointOutput = (cwd, state, input) => {
   return changed || hydrateStateFromCheckpointMtime(cwd, state, input, text)
 }
 
-const buildSubagentCheckpointEnforcement = (cwd, state) => {
-  const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
+const buildSubagentCheckpointEnforcement = (cwd, state, project = null) => {
+  const hardPeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false })
   if (hardPeerGaps.length) {
     return {
       type: "peer",
@@ -1812,7 +2495,7 @@ const buildSubagentCheckpointEnforcement = (cwd, state) => {
     }
   }
 
-  const pendingCodeGaps = collectCodeGaps(cwd, state).filter((gap) => !gap.reviewReady)
+  const pendingCodeGaps = collectCombinedCodeGaps(cwd, state, project).filter((gap) => !gap.reviewReady)
   if (pendingCodeGaps.length) {
     return {
       type: "code",
@@ -1839,8 +2522,8 @@ const buildQuestionCheckpointMessage = (message) =>
     message,
   ].join("\n")
 
-const buildQuestionCheckpointEnforcement = (cwd, state) => {
-  const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
+const buildQuestionCheckpointEnforcement = (cwd, state, project = null) => {
+  const hardPeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false })
   if (hardPeerGaps.length) {
     return {
       type: "peer",
@@ -1849,7 +2532,7 @@ const buildQuestionCheckpointEnforcement = (cwd, state) => {
     }
   }
 
-  const pendingCodeGaps = collectCodeGaps(cwd, state).filter((gap) => !gap.reviewReady)
+  const pendingCodeGaps = collectCombinedCodeGaps(cwd, state, project).filter((gap) => !gap.reviewReady)
   if (pendingCodeGaps.length) {
     return {
       type: "code",
@@ -1927,7 +2610,8 @@ const markCodeReviewNoEditConfirmation = (state, gaps) => {
 }
 
 const buildPendingEnforcement = (cwd, state, options = {}) => {
-  const peerGaps = collectPeerGaps(cwd, state, {
+  const project = options.project || null
+  const peerGaps = collectCombinedPeerGaps(cwd, state, project, {
     includeStageOnly: options.includeStageOnly !== false,
   })
   if (peerGaps.length) {
@@ -1938,7 +2622,7 @@ const buildPendingEnforcement = (cwd, state, options = {}) => {
     }
   }
 
-  const codeGaps = collectCodeGaps(cwd, state)
+  const codeGaps = collectCombinedCodeGaps(cwd, state, project)
   if (codeGaps.length) {
     return {
       type: "code",
@@ -1991,10 +2675,12 @@ const collectCodeReviewAdvisoryLines = (cwd, state) =>
       return `  - reviewed SDD document(s) after code change(s) [${codeList || "unknown"}] and made no SDD edits. User confirmation recommended for: ${reviewList || "design.md, tasks.md"}`
     })
 
-const collectReportLines = (cwd, state) => {
-  const lines = collectPeerGaps(cwd, state, { includeStageOnly: false }).map((gap) => `  - ${formatGap(gap)}`)
+const collectReportLines = (cwd, state, project = null) => {
+  const lines = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false }).map(
+    (gap) => `  - ${formatGap(gap)}`
+  )
 
-  for (const gap of collectCodeGaps(cwd, state)) {
+  for (const gap of collectCombinedCodeGaps(cwd, state, project)) {
     const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ")
     const reviewList = (gap.pendingReviewTargets || gap.reviewTargets || [])
       .map((file) => rel(cwd, file))
@@ -2008,9 +2694,9 @@ const collectReportLines = (cwd, state) => {
   return lines
 }
 
-const refreshReport = (cwd, state) => {
+const refreshReport = (cwd, state, project = null) => {
   const reportPath = path.join(cwd, ".sdd-drift-report.md")
-  const lines = collectReportLines(cwd, state)
+  const lines = collectReportLines(cwd, state, project)
 
   if (lines.length) {
     try {
@@ -2107,6 +2793,7 @@ const main = async () => {
 
   const sessionID = input.session_id || "default"
   const currentStatePath = statePath(cwd, sessionID)
+  const currentProjectPath = projectStatePath(cwd)
   const stateLock = acquireFileLock(currentStatePath, {
     staleMs: STATE_LOCK_STALE_MS,
     waitMs: STATE_LOCK_WAIT_MS,
@@ -2122,30 +2809,95 @@ const main = async () => {
     return
   }
 
+  const projectLock = acquireFileLock(currentProjectPath, {
+    staleMs: STATE_LOCK_STALE_MS,
+    waitMs: PROJECT_LOCK_WAIT_MS,
+    retryMs: STATE_LOCK_RETRY_MS,
+  })
+
   try {
   const state = loadState(cwd, sessionID)
+  const project = projectLock ? loadProjectState(cwd) : null
+  const persist = () => {
+    if (project) {
+      applySessionToProject(cwd, project, state, sessionID)
+      saveProjectState(cwd, project)
+      state.projectStateSeenAt = project.lastUpdatedAt
+    }
+    saveState(cwd, sessionID, state)
+  }
+  const persistAndReport = () => {
+    if (project) {
+      applySessionToProject(cwd, project, state, sessionID)
+      saveProjectState(cwd, project)
+      state.projectStateSeenAt = project.lastUpdatedAt
+    }
+    refreshReport(cwd, state, project)
+    saveState(cwd, sessionID, state)
+  }
   const transcriptPathForContext = resolveTranscriptPath(input)
   const dtsContextActive = updateDtsContextFromInput(state, input, transcriptPathForContext)
   writeDiagnosticLog(cwd, {
     event: "hook_start",
     input: summarizeInput(input),
     statePath: currentStatePath,
+    projectPath: currentProjectPath,
     stateLockAcquired: Boolean(stateLock),
+    projectLockAcquired: Boolean(projectLock),
     outputMode: OUTPUT_MODE || "auto",
     strictBlock: STRICT_BLOCK,
     dtsContextActive,
   })
 
+  if (input.hook_event_name === "UserPromptSubmit" || input.hook_event_name === "ChatMessage") {
+    const isFirstEvent = !state.firstEventAt
+    if (isFirstEvent) state.firstEventAt = new Date().toISOString()
+    if (input.parentSessionId) {
+      state.subagentContext = { parentSessionId: input.parentSessionId }
+    }
+    if (project) applySessionToProject(cwd, project, state, sessionID)
+    const reminder = isFirstEvent && !isDtsContextActive(state) ? formatCarryOverReminder(project) : ""
+    persist()
+    writeDiagnosticLog(cwd, {
+      event: reminder ? "carry_over_emitted" : "user_prompt_context_captured",
+      input: summarizeInput(input),
+      firstEvent: isFirstEvent,
+      messagePreview: reminder ? limitString(reminder, 800) : null,
+    })
+    if (reminder && input.hook_event_name === "UserPromptSubmit") {
+      process.stdout.write(buildClaudeCodeOutput("UserPromptSubmit", reminder))
+    }
+    return
+  }
+
+  if (input.hook_event_name === "PreCompact") {
+    if (project) applySessionToProject(cwd, project, state, sessionID)
+    const summary = buildPreCompactSummary(project)
+    persist()
+    writeDiagnosticLog(cwd, {
+      event: summary ? "precompact_summary_emit" : "precompact_no_pending",
+      input: summarizeInput(input),
+      messagePreview: summary ? limitString(summary, 800) : null,
+    })
+    if (summary) process.stdout.write(buildClaudeCodeOutput("PreCompact", summary))
+    return
+  }
+
   if (input.hook_event_name === "Stop") {
     const transcriptPath = transcriptPathForContext
     const hydrated = hydrateStateFromTranscript(cwd, state, transcriptPath)
-    const pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false })
+    if (project) applySessionToProject(cwd, project, state, sessionID)
+    let pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false, project })
+    if (markImplementationFlowConfirmation(cwd, state, pending, project)) {
+      refreshAlignedBaseline(cwd, project, state)
+      pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false, project })
+    }
     if (!pending) {
       state.stopBlocks = {}
       clearPeerSyncs(state)
       clearStageOnlyRequirements(state)
-      refreshReport(cwd, state)
-      saveState(cwd, sessionID, state)
+      refreshAlignedBaseline(cwd, project, state)
+      persistAndReport()
       writeDiagnosticLog(cwd, {
         event: "stop_allow_no_pending",
         input: summarizeInput(input),
@@ -2162,8 +2914,8 @@ const main = async () => {
     if (markStopCodeReviewConfirmation(state, pending)) {
       state.stopBlocks = {}
       clearPeerSyncs(state)
-      refreshReport(cwd, state)
-      saveState(cwd, sessionID, state)
+      refreshAlignedBaseline(cwd, project, state)
+      persistAndReport()
       writeDiagnosticLog(cwd, {
         event: "stop_allow_review_confirmed",
         input: summarizeInput(input),
@@ -2175,10 +2927,10 @@ const main = async () => {
       return
     }
 
-    refreshReport(cwd, state)
+    refreshReport(cwd, state, project)
 
     if (isOpenCodeHookInput(input) && OPENCODE_STOP_REPORT_ONLY) {
-      saveState(cwd, sessionID, state)
+      persistAndReport()
       writeDiagnosticLog(cwd, {
         event: "stop_opencode_report_only",
         input: summarizeInput(input),
@@ -2199,7 +2951,7 @@ const main = async () => {
         : 2
     const blockCount = state.stopBlocks[pending.signature] || 0
     if (blockCount >= maxBlocks) {
-      saveState(cwd, sessionID, state)
+      persist()
       writeDiagnosticLog(cwd, {
         event: "stop_allow_max_blocks",
         input: summarizeInput(input),
@@ -2212,7 +2964,7 @@ const main = async () => {
     }
 
     state.stopBlocks[pending.signature] = blockCount + 1
-    saveState(cwd, sessionID, state)
+    persist()
     writeDiagnosticLog(cwd, {
       event: reviewConfirmationReady ? "stop_review_confirmation_requested" : "stop_block_emit",
       input: summarizeInput(input),
@@ -2229,8 +2981,7 @@ const main = async () => {
   const isPostToolUse = input.hook_event_name === "PostToolUse"
   const isPreToolUse = input.hook_event_name === "PreToolUse"
   if (!isPostToolUse && !isPreToolUse) {
-    saveState(cwd, sessionID, state)
-    refreshReport(cwd, state)
+    persistAndReport()
     writeDiagnosticLog(cwd, {
       event: "ignored_event",
       input: summarizeInput(input),
@@ -2246,8 +2997,7 @@ const main = async () => {
     const questionCheckpoint = isQuestionCheckpointTool(tool)
     const checkpoint = subagentCheckpoint || questionCheckpoint
     if (checkpoint && !markToolEvent(state, getToolEventKey(input))) {
-      saveState(cwd, sessionID, state)
-      refreshReport(cwd, state)
+      persistAndReport()
       writeDiagnosticLog(cwd, {
         event: "ignored_duplicate_checkpoint_event",
         input: summarizeInput(input),
@@ -2261,16 +3011,16 @@ const main = async () => {
     const hydratedFromCheckpointOutput = subagentCheckpoint
       ? hydrateStateFromCheckpointOutput(cwd, state, input)
       : false
+    if (project) applySessionToProject(cwd, project, state, sessionID)
     const pending = subagentCheckpoint
-      ? buildSubagentCheckpointEnforcement(cwd, state)
+      ? buildSubagentCheckpointEnforcement(cwd, state, project)
       : questionCheckpoint
-        ? buildQuestionCheckpointEnforcement(cwd, state)
+        ? buildQuestionCheckpointEnforcement(cwd, state, project)
         : null
     clearSubagentCheckpointNoticeIfResolved(state, pending)
     if (pending && shouldEmitSubagentCheckpointNotice(state, pending)) {
       markSubagentCheckpointNoticeEmitted(state, pending, tool)
-      saveState(cwd, sessionID, state)
-      refreshReport(cwd, state)
+      persistAndReport()
       writeDiagnosticLog(cwd, {
         event: questionCheckpoint
           ? "emit_question_checkpoint_enforcement"
@@ -2288,8 +3038,7 @@ const main = async () => {
       return
     }
 
-    saveState(cwd, sessionID, state)
-    refreshReport(cwd, state)
+    persistAndReport()
     writeDiagnosticLog(cwd, {
       event: "ignored_no_file_path",
       input: summarizeInput(input),
@@ -2303,8 +3052,7 @@ const main = async () => {
   }
 
   if (!isPostToolUse) {
-    saveState(cwd, sessionID, state)
-    refreshReport(cwd, state)
+    persistAndReport()
     writeDiagnosticLog(cwd, {
       event: "ignored_pretooluse_file_path",
       input: summarizeInput(input),
@@ -2318,8 +3066,7 @@ const main = async () => {
   const isEdit = tool === "edit" || tool === "write" || tool === "multiedit"
 
   if (!markToolEvent(state, getToolEventKey(input))) {
-    saveState(cwd, sessionID, state)
-    refreshReport(cwd, state)
+    persistAndReport()
     writeDiagnosticLog(cwd, {
       event: "ignored_duplicate_tool_event",
       input: summarizeInput(input),
@@ -2329,8 +3076,7 @@ const main = async () => {
   }
 
   if (!applyToolRecord(cwd, state, tool, toolInput)) {
-    saveState(cwd, sessionID, state)
-    refreshReport(cwd, state)
+    persistAndReport()
     writeDiagnosticLog(cwd, {
       event: "ignored_unsupported_tool_record",
       input: summarizeInput(input),
@@ -2339,20 +3085,21 @@ const main = async () => {
     return
   }
 
+  if (project) applySessionToProject(cwd, project, state, sessionID)
   const warnings = isEdit ? drift(cwd, abs, state) : []
-  const peerGaps = collectPeerGaps(cwd, state)
-  const hardPeerGaps = collectPeerGaps(cwd, state, { includeStageOnly: false })
-  const stagePeerGaps = collectPeerGaps(cwd, state, { includeHard: false })
-  let codeGaps = collectCodeGaps(cwd, state)
+  const peerGaps = collectCombinedPeerGaps(cwd, state, project)
+  const hardPeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false })
+  const stagePeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeHard: false })
+  let codeGaps = collectCombinedCodeGaps(cwd, state, project)
   const codeReviewNoEditConfirmed =
     !hardPeerGaps.length && markCodeReviewNoEditConfirmation(state, codeGaps)
   if (codeReviewNoEditConfirmed) {
-    codeGaps = collectCodeGaps(cwd, state)
+    codeGaps = collectCombinedCodeGaps(cwd, state, project)
   }
   const noticePeerGaps = hardPeerGaps.length ? hardPeerGaps : stagePeerGaps
   clearPeerDriftNoticeIfResolved(state, noticePeerGaps)
   clearCodeDriftNoticeIfResolved(state, codeGaps)
-  clearSubagentCheckpointNoticeIfResolved(state, buildSubagentCheckpointEnforcement(cwd, state))
+  clearSubagentCheckpointNoticeIfResolved(state, buildSubagentCheckpointEnforcement(cwd, state, project))
   const emitCodeGap = !hardPeerGaps.length && shouldEmitCodeDriftNotice(state, codeGaps)
   const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && isCodeDriftNoticeSuppressed(state, codeGaps)
   const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
@@ -2370,8 +3117,7 @@ const main = async () => {
     markCodeDriftNoticeEmitted(cwd, state, codeGaps)
   }
 
-  saveState(cwd, sessionID, state)
-  refreshReport(cwd, state)
+  persistAndReport()
 
   if (emitPeerGaps.length) {
     writeDiagnosticLog(cwd, {
@@ -2426,6 +3172,7 @@ const main = async () => {
     })
   }
   } finally {
+    releaseFileLock(projectLock)
     releaseFileLock(stateLock)
   }
 }
@@ -2454,10 +3201,17 @@ if (require.main === module) {
     clearSubagentCheckpointNoticeIfResolved,
     cleanupDiagnosticLogs,
     collectActiveChangeDirs,
+    collectCarryOverDrift,
     collectCodeGaps,
+    collectCombinedCodeGaps,
+    collectCombinedPeerGaps,
     collectPeerGaps,
+    collectProjectCodeGaps,
+    collectProjectPeerGaps,
     collectReportLines,
     collectReviewTargets,
+    computeProjectConditions,
+    computeProjectState,
     codeReviewSignature,
     diagnosticLogPath,
     drift,
@@ -2478,23 +3232,32 @@ if (require.main === module) {
     isArchivedChangeDir,
     isQuestionCheckpointTool,
     isSubagentCheckpointTool,
+    loadProjectState,
     loadState,
     normalizeKey,
+    normalizeProjectState,
     parseHookInput,
+    projectStatePath,
     applyToolRecord,
+    applySessionToProject,
     acquireFileLock,
+    ATTRIBUTION_REVIEW_RULES,
+    buildPreCompactSummary,
     getToolEventKey,
     markToolEvent,
+    refreshAlignedBaseline,
     recordFile,
     resolveTranscriptPath,
     refreshReport,
     releaseFileLock,
+    saveProjectState,
     saveState,
     writeDiagnosticLog,
     updateDtsContextFromInput,
     shouldEmitCodeDriftNotice,
     shouldEmitSubagentCheckpointNotice,
     markCodeDriftNoticeEmitted,
+    markImplementationFlowConfirmation,
     markSubagentCheckpointNoticeEmitted,
     markCodeReviewNoEditConfirmation,
     markStopCodeReviewConfirmation,

@@ -38,6 +38,7 @@ sdd/changes/<change-id>/
 | `tasks.md` 还不存在 | 认为仍在设计阶段，不强迫创建 |
 | 改了普通代码 | 提醒最终回复前评审活跃 `design.md` / `tasks.md` |
 | 多个 change 同时存在 | 检查所有未归档的活跃 change |
+| 跨会话遗留 drift | 通过项目级 `project.json` 继续识别并提醒 |
 | 模型判断无需改文档 | 允许结束，并写 `.sdd-drift-report.md` 让人确认 |
 | DTS / 问题单修改 | 可跳过代码领先文档提醒 |
 | 已归档 change | 跳过 |

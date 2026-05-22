@@ -56,19 +56,23 @@ The hook does not use `console.error`, `messages.transform`, or
 | peer file synced later in the same session | Clears the gap and does not create a reverse ping-pong requirement |
 | normal code changed without later SDD review | Emits deferred reminders to review relevant `design.md` and `tasks.md` before the final answer |
 | many code files changed in one turn | Keeps accumulating changed files and emits bounded compact reminders until the latest code batch has reviewed `design.md` and `tasks.md` |
+| new session starts with prior unresolved drift | Restores project-level carry-over drift from `project.json` and can inject a compact reminder through `UserPromptSubmit` / `PreCompact` / `Stop` |
 | DTS / issue-ticket context | Skips code-ahead-of-doc review reminders; Claude Code captures prompt context through `UserPromptSubmit`, native OpenCode captures it through `chat.message`, and any runtime can force it with `SDD_DRIFT_DTS_CONTEXT=1` |
 | code only affects task progress | Allows a tasks-only update, or no document edit, after both `design.md` and `tasks.md` have been reviewed |
 | model ignores constraints and stops | Writes `.sdd-drift-report.md` for human review |
 
 State is stored under the nearest `.git/sdd-drift-hook-state/` when possible, so
-normal hook state does not pollute project status. `.sdd-drift-report.md` is kept
-in the project root because it is meant to be visible.
+normal hook state does not pollute project status. The directory contains
+per-session state files plus `project.json`, which is the cross-session authority
+for active change directories, document review timestamps, linked code files, and
+`alignedAtMs` baselines. `.sdd-drift-report.md` is kept in the project root
+because it is meant to be visible.
 
-State updates are serialized with a short-lived lock per session. This matters
-when an agent emits parallel file writes: a `design.md` edit that asks for
-`tasks.md` synchronization and the follow-up `tasks.md` edit must be merged into
-one session state, otherwise one hook process can overwrite the other and create
-design/tasks ping-pong reminders.
+State updates are serialized with short-lived locks for both the session file and
+`project.json`. This matters when an agent emits parallel file writes: a
+`design.md` edit that asks for `tasks.md` synchronization and the follow-up
+`tasks.md` edit must be merged into one coherent state, otherwise one hook
+process can overwrite the other and create design/tasks ping-pong reminders.
 
 `proposal.md` is treated as a stage boundary. Editing it does not create
 `design.md` by itself. If `design.md` already exists, the hook can softly remind

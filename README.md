@@ -57,6 +57,8 @@ It supports:
 - Question/tool handoff checkpoints before commit-or-continue prompts.
 - `Stop` hook checks for Claude-compatible final review behavior.
 - Session-level batching for code changes before SDD reconciliation.
+- Project-level `project.json` state for cross-session active change-dir drift,
+  review timestamps, linked code, and aligned baselines.
 - Issue-ticket/DTS context suppression for code-ahead-of-doc reminders.
 - Bounded code-review reminders to avoid repeated tool-result injection loops.
 - Diagnostic JSONL logs with default 3-day retention.

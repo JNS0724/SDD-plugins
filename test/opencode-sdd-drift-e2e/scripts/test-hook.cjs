@@ -1190,6 +1190,136 @@ try {
     assert.strictEqual(hook.buildPendingEnforcement(cwd, state), null)
   }
 
+  {
+    const cwd = path.join(tmpRoot, "project-state-per-doc-review")
+    const dir = path.join(cwd, "sdd", "changes", "project-code")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "project.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const project = 1\n")
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    hook.recordFile(state, code, true)
+    hook.applySessionToProject(cwd, project, state, "project-session")
+
+    let gaps = hook.collectProjectCodeGaps(cwd, project)
+    assert.strictEqual(gaps.length, 1)
+    assert.deepStrictEqual(gaps[0].pendingReviewTargets.map((file) => path.basename(file)).sort(), [
+      "design.md",
+      "tasks.md",
+    ])
+
+    hook.recordFile(state, design, false)
+    hook.applySessionToProject(cwd, project, state, "project-session")
+    gaps = hook.collectProjectCodeGaps(cwd, project)
+    assert.strictEqual(gaps.length, 1)
+    assert.deepStrictEqual(
+      gaps[0].pendingReviewTargets.map((file) => path.basename(file)),
+      ["tasks.md"],
+      "project code gap should only keep tasks.md pending after design.md is reviewed"
+    )
+
+    hook.recordFile(state, tasks, false)
+    hook.applySessionToProject(cwd, project, state, "project-session")
+    assert.strictEqual(hook.collectProjectCodeGaps(cwd, project).length, 0)
+    assert.strictEqual(hook.refreshAlignedBaseline(cwd, project, state), true)
+    assert.strictEqual(hook.collectCarryOverDrift(project).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "project-state-peer-exists")
+    const dir = path.join(cwd, "sdd", "changes", "project-peer")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    write(design, "# Design\n")
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    edit(state, design)
+    hook.applySessionToProject(cwd, project, state, "project-peer-session")
+    assert.strictEqual(hook.collectProjectPeerGaps(cwd, project).length, 0)
+
+    write(tasks, "# Tasks\n")
+    edit(state, tasks)
+    hook.applySessionToProject(cwd, project, state, "project-peer-session")
+    assert.strictEqual(hook.collectProjectPeerGaps(cwd, project).length, 0)
+
+    edit(state, design)
+    hook.applySessionToProject(cwd, project, state, "project-peer-session")
+    let gaps = hook.collectProjectPeerGaps(cwd, project)
+    assert.strictEqual(gaps.length, 1)
+    assert.deepStrictEqual(
+      gaps[0].required,
+      ["tasks.md"],
+      "project peer gap should require tasks.md after a new design.md edit"
+    )
+
+    edit(state, tasks)
+    hook.applySessionToProject(cwd, project, state, "project-peer-session")
+    gaps = hook.collectProjectPeerGaps(cwd, project)
+    assert.strictEqual(gaps.length, 0)
+
+    edit(state, design)
+    hook.applySessionToProject(cwd, project, state, "project-peer-session")
+    project.changeDirs["sdd/changes/project-peer"].peerSyncs.design = {
+      sourceFile: "tasks.md",
+      sourceEditedMs: Date.now() * 1000,
+      targetEditedMs: Date.now() * 1000 + 1,
+    }
+    edit(state, tasks)
+    hook.applySessionToProject(cwd, project, state, "project-peer-session")
+    gaps = hook.collectProjectPeerGaps(cwd, project)
+    assert.strictEqual(
+      gaps.length,
+      0,
+      "session-recognized tasks.md sync should override stale opposite project peer sync"
+    )
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "project-state-persist")
+    const dir = path.join(cwd, "sdd", "changes", "persist")
+    write(path.join(dir, "design.md"), "# Design\n")
+    write(path.join(dir, "tasks.md"), "# Tasks\n")
+
+    const project = hook.loadProjectState(cwd)
+    assert.ok(project.changeDirs["sdd/changes/persist"])
+    hook.saveProjectState(cwd, project)
+    const reloaded = hook.loadProjectState(cwd)
+    assert.ok(reloaded.changeDirs["sdd/changes/persist"])
+    assert.match(hook.projectStatePath(cwd).replace(/\\/g, "/"), /sdd-drift-hook-state\/project\.json$/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "project-implementation-flow")
+    const dir = path.join(cwd, "sdd", "changes", "j1")
+    const proposal = path.join(dir, "proposal.md")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "j1.ts")
+    write(proposal, "# Proposal\n")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const j1 = 1\n")
+
+    const state = hook.emptyState()
+    const project = hook.loadProjectState(cwd)
+    edit(state, proposal)
+    edit(state, design)
+    edit(state, tasks)
+    hook.recordFile(state, code, true)
+    hook.applySessionToProject(cwd, project, state, "j1-session")
+    let pending = hook.buildPendingEnforcement(cwd, state, { project, includeStageOnly: false })
+    assert.strictEqual(pending.type, "code")
+    assert.strictEqual(hook.markImplementationFlowConfirmation(cwd, state, pending, project), true)
+    pending = hook.buildPendingEnforcement(cwd, state, { project, includeStageOnly: false })
+    assert.strictEqual(pending, null)
+    assert.strictEqual(hook.collectCarryOverDrift(project).length, 0)
+  }
+
   console.log("sdd-drift hook unit tests passed")
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true })
