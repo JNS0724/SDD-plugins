@@ -3,6 +3,109 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
+// src/actions.js
+var require_actions = __commonJS({
+  "src/actions.js"(exports2, module2) {
+    var ACTION_ORDER = ["log", "save_project", "save_session", "refresh_report", "emit_message"];
+    var Actions2 = {
+      log: (event) => ({ type: "log", event }),
+      saveProject: () => ({ type: "save_project" }),
+      saveSession: () => ({ type: "save_session" }),
+      refreshReport: () => ({ type: "refresh_report" }),
+      emitMessage: (payload) => ({ type: "emit_message", payload })
+    };
+    var runOneAction = async (action, ctx) => {
+      if (!action || !action.type) return;
+      switch (action.type) {
+        case "log":
+          await ctx.log?.(action.event);
+          break;
+        case "save_project":
+          await ctx.saveProject?.();
+          break;
+        case "save_session":
+          await ctx.saveSession?.();
+          break;
+        case "refresh_report":
+          await ctx.refreshReport?.();
+          break;
+        case "emit_message":
+          await ctx.emitMessage?.(action.payload);
+          break;
+        default:
+          await ctx.unsupportedAction?.(action);
+          break;
+      }
+    };
+    var runActions2 = async (actions, ctx) => {
+      const buckets = Object.fromEntries(ACTION_ORDER.map((type) => [type, []]));
+      for (const action of actions || []) {
+        if (!action || !buckets[action.type]) continue;
+        buckets[action.type].push(action);
+      }
+      for (const type of ACTION_ORDER) {
+        for (const action of buckets[type]) {
+          await runOneAction(action, ctx);
+        }
+      }
+    };
+    module2.exports = {
+      ACTION_ORDER,
+      Actions: Actions2,
+      runActions: runActions2
+    };
+  }
+});
+
+// src/dispatcher.js
+var require_dispatcher = __commonJS({
+  "src/dispatcher.js"(exports2, module2) {
+    var makeHandlerSpec = (requiresSession, requiresProject, lockPolicy, handle) => ({
+      requiresSession,
+      requiresProject,
+      lockPolicy,
+      handle
+    });
+    var createHookHandlers2 = (handlers = {}) => ({
+      PreToolUse: makeHandlerSpec(
+        "write",
+        "read",
+        { sessionWait: 1e3, projectWait: 500 },
+        handlers.PreToolUse
+      ),
+      PostToolUse: makeHandlerSpec(
+        "write",
+        "write",
+        { sessionWait: 5e3, projectWait: 2e3 },
+        handlers.PostToolUse
+      ),
+      Stop: makeHandlerSpec(
+        "write",
+        "write",
+        { sessionWait: 5e3, projectWait: 2e3 },
+        handlers.Stop
+      ),
+      UserPromptSubmit: makeHandlerSpec(
+        "write",
+        "read",
+        { sessionWait: 1e3, projectWait: 500 },
+        handlers.UserPromptSubmit
+      ),
+      PreCompact: makeHandlerSpec(
+        "read",
+        "read",
+        { sessionWait: 500, projectWait: 500 },
+        handlers.PreCompact
+      )
+    });
+    var HookHandlers2 = createHookHandlers2();
+    module2.exports = {
+      HookHandlers: HookHandlers2,
+      createHookHandlers: createHookHandlers2
+    };
+  }
+});
+
 // src/stdin.js
 var require_stdin = __commonJS({
   "src/stdin.js"(exports2, module2) {
@@ -42,6 +145,8 @@ var crypto = require("crypto");
 var fs = require("fs");
 var os = require("os");
 var path = require("path");
+var { Actions, runActions } = require_actions();
+var { HookHandlers, createHookHandlers } = require_dispatcher();
 var { readStdin } = require_stdin();
 var CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i;
 var SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1";
@@ -2893,8 +2998,11 @@ if (require.main === module) {
     applySessionToProject,
     acquireFileLock,
     ATTRIBUTION_REVIEW_RULES,
+    Actions,
     buildPreCompactSummary,
+    createHookHandlers,
     getToolEventKey,
+    HookHandlers,
     markCarryOverNoticeEmitted,
     markToolEvent,
     pruneStateFiles,
@@ -2903,6 +3011,7 @@ if (require.main === module) {
     resolveTranscriptPath,
     refreshReport,
     releaseFileLock,
+    runActions,
     saveProjectState,
     saveState,
     writeDiagnosticLog,

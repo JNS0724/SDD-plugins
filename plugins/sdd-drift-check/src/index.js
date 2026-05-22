@@ -2,6 +2,8 @@ const crypto = require("crypto")
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
+const { Actions, runActions } = require("./actions")
+const { HookHandlers, createHookHandlers } = require("./dispatcher")
 const { readStdin } = require("./stdin")
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i
@@ -3425,8 +3427,11 @@ if (require.main === module) {
     applySessionToProject,
     acquireFileLock,
     ATTRIBUTION_REVIEW_RULES,
+    Actions,
     buildPreCompactSummary,
+    createHookHandlers,
     getToolEventKey,
+    HookHandlers,
     markCarryOverNoticeEmitted,
     markToolEvent,
     pruneStateFiles,
@@ -3435,6 +3440,7 @@ if (require.main === module) {
     resolveTranscriptPath,
     refreshReport,
     releaseFileLock,
+    runActions,
     saveProjectState,
     saveState,
     writeDiagnosticLog,

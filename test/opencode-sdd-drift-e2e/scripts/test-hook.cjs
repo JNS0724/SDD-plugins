@@ -19,6 +19,7 @@ const edit = (state, fp) => {
   return seq
 }
 
+(async () => {
 try {
   {
     const cwd = path.join(tmpRoot, "existing-peer")
@@ -879,6 +880,48 @@ try {
   }
 
   {
+    const calls = []
+    await hook.runActions(
+      [
+        hook.Actions.emitMessage("message"),
+        hook.Actions.refreshReport(),
+        hook.Actions.saveSession(),
+        hook.Actions.log({ event: "first" }),
+        hook.Actions.saveProject(),
+        hook.Actions.log({ event: "second" }),
+      ],
+      {
+        log: async (event) => calls.push(`log:${event.event}`),
+        saveProject: async () => calls.push("save_project"),
+        saveSession: async () => calls.push("save_session"),
+        refreshReport: async () => calls.push("refresh_report"),
+        emitMessage: async (payload) => calls.push(`emit:${payload}`),
+      }
+    )
+    assert.deepStrictEqual(calls, [
+      "log:first",
+      "log:second",
+      "save_project",
+      "save_session",
+      "refresh_report",
+      "emit:message",
+    ])
+  }
+
+  {
+    for (const hookName of ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit", "PreCompact"]) {
+      assert.ok(hook.HookHandlers[hookName], `${hookName} should be registered`)
+    }
+    assert.deepStrictEqual(hook.HookHandlers.PostToolUse.lockPolicy, {
+      sessionWait: 5000,
+      projectWait: 2000,
+    })
+    assert.strictEqual(hook.HookHandlers.PreCompact.requiresSession, "read")
+    const custom = hook.createHookHandlers({ Stop: () => [hook.Actions.log({ event: "stop" })] })
+    assert.strictEqual(typeof custom.Stop.handle, "function")
+  }
+
+  {
     const cwd = path.join(tmpRoot, "code-notice-repeats")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "zeta")
@@ -1422,3 +1465,7 @@ try {
 } finally {
   fs.rmSync(tmpRoot, { recursive: true, force: true })
 }
+})().catch((err) => {
+  console.error(err)
+  process.exit(1)
+})
