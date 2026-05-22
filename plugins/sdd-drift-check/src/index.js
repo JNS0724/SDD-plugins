@@ -3,6 +3,7 @@ const fs = require("fs")
 const os = require("os")
 const path = require("path")
 const { Actions, runActions } = require("./actions")
+const { Attribution } = require("./attribution")
 const { HookHandlers, createHookHandlers } = require("./dispatcher")
 const { handlePreCompact } = require("./handlers/pre-compact")
 const { handlePostToolUse } = require("./handlers/post-tool-use")
@@ -1905,22 +1906,9 @@ const recordProjectArchiveAction = (cwd, project, fp) => {
   return true
 }
 
-const collectProjectAttributionTargets = (cwd, project, state) => {
-  const activeDirs = Object.values(project.changeDirs || {}).filter((dir) => !dir.archived)
-  if (activeDirs.length <= 1) return activeDirs
-
-  const sessionTouched = activeDirs.filter((dir) =>
-    (state.edited || []).some((file) => toPosix(file).includes(`/${dir.relDir}/`))
-  )
-  if (sessionTouched.length === 1) return sessionTouched
-
-  const now = Date.now()
-  if (project.activeChangeDir && now < Number(project.activeUntilMs || 0)) {
-    const active = activeDirs.find((dir) => dir.relDir === project.activeChangeDir)
-    if (active) return [active]
-  }
-
-  return activeDirs
+const collectProjectAttributionTargets = (cwd, project, state, codeFile) => {
+  const decision = Attribution.decide({ cwd, session: state, project, codeFile })
+  return Attribution.targetsForDecision(decision)
 }
 
 const appendProjectLinkedCode = (dir, cwd, record, sessionID) => {
@@ -1958,7 +1946,7 @@ const applySessionToProject = (cwd, project, state, sessionID) => {
       continue
     }
     if (record.editedSeq && isCodePath(fp)) {
-      const targets = collectProjectAttributionTargets(cwd, project, state)
+      const targets = collectProjectAttributionTargets(cwd, project, state, fp)
       for (const dir of targets) appendProjectLinkedCode(dir, cwd, record, sessionID)
       if (targets.length === 1) {
         project.activeChangeDir = targets[0].relDir
@@ -3251,6 +3239,7 @@ if (require.main === module) {
     applySessionToProject,
     acquireFileLock,
     ATTRIBUTION_REVIEW_RULES,
+    Attribution,
     Actions,
     buildPreCompactSummary,
     createHookHandlers,

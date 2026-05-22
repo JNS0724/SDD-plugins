@@ -57,6 +57,68 @@ var require_actions = __commonJS({
   }
 });
 
+// src/attribution.js
+var require_attribution = __commonJS({
+  "src/attribution.js"(exports2, module2) {
+    var toPosix2 = (fp) => String(fp || "").replace(/\\/g, "/");
+    var splitPath = (fp) => toPosix2(fp).split("/").filter(Boolean);
+    var sharedPrefixDepth = (left, right) => {
+      const leftParts = splitPath(left);
+      const rightParts = splitPath(right);
+      let depth = 0;
+      while (depth < leftParts.length && depth < rightParts.length && leftParts[depth] === rightParts[depth]) {
+        depth += 1;
+      }
+      return depth;
+    };
+    var relFromCwd = (cwd, fp) => {
+      const normalizedCwd = toPosix2(cwd).replace(/\/+$/, "");
+      const normalizedFile = toPosix2(fp);
+      return normalizedFile.startsWith(`${normalizedCwd}/`) ? normalizedFile.slice(normalizedCwd.length + 1) : normalizedFile;
+    };
+    var pathInChangeDir = (cwd, fp, relDir) => {
+      const relFile = relFromCwd(cwd, fp);
+      const normalizedDir = toPosix2(relDir).replace(/\/+$/, "");
+      return relFile === normalizedDir || relFile.startsWith(`${normalizedDir}/`);
+    };
+    var pathSimilar = (cwd, codeFile, linkedCode = []) => {
+      const relCodeFile = relFromCwd(cwd, codeFile);
+      return linkedCode.some((item) => {
+        const linkedPath = toPosix2(item?.path || "");
+        if (!linkedPath) return false;
+        return linkedPath === relCodeFile || sharedPrefixDepth(relCodeFile, linkedPath) >= 2;
+      });
+    };
+    var decide = ({ cwd, session, project, codeFile, now = Date.now() }) => {
+      const candidates = Object.values(project?.changeDirs || {}).filter((dir) => !dir.archived);
+      if (candidates.length === 0) return { kind: "no-attribution" };
+      if (candidates.length === 1) return { kind: "single", target: candidates[0] };
+      const sessionTouched = candidates.filter(
+        (dir) => (session?.edited || []).some((file) => pathInChangeDir(cwd, file, dir.relDir))
+      );
+      if (sessionTouched.length === 1) return { kind: "session-touched", target: sessionTouched[0] };
+      if (project?.activeChangeDir && now < Number(project.activeUntilMs || 0)) {
+        const active = candidates.find((dir) => dir.relDir === project.activeChangeDir);
+        if (active && pathSimilar(cwd, codeFile, active.linkedCode)) {
+          return { kind: "active-ttl", target: active };
+        }
+      }
+      return { kind: "needs-review", candidates };
+    };
+    var targetsForDecision = (decision) => {
+      if (decision?.target) return [decision.target];
+      return decision?.candidates || [];
+    };
+    var Attribution2 = {
+      decide,
+      pathSimilar,
+      sharedPrefixDepth,
+      targetsForDecision
+    };
+    module2.exports = { Attribution: Attribution2 };
+  }
+});
+
 // src/handlers/pre-compact.js
 var require_pre_compact = __commonJS({
   "src/handlers/pre-compact.js"(exports2, module2) {
@@ -558,6 +620,7 @@ var fs = require("fs");
 var os = require("os");
 var path = require("path");
 var { Actions, runActions } = require_actions();
+var { Attribution } = require_attribution();
 var { HookHandlers, createHookHandlers } = require_dispatcher();
 var { handlePreCompact } = require_pre_compact();
 var { handlePostToolUse } = require_post_tool_use();
@@ -2129,19 +2192,9 @@ var recordProjectArchiveAction = (cwd, project, fp) => {
   }
   return true;
 };
-var collectProjectAttributionTargets = (cwd, project, state) => {
-  const activeDirs = Object.values(project.changeDirs || {}).filter((dir) => !dir.archived);
-  if (activeDirs.length <= 1) return activeDirs;
-  const sessionTouched = activeDirs.filter(
-    (dir) => (state.edited || []).some((file) => toPosix(file).includes(`/${dir.relDir}/`))
-  );
-  if (sessionTouched.length === 1) return sessionTouched;
-  const now = Date.now();
-  if (project.activeChangeDir && now < Number(project.activeUntilMs || 0)) {
-    const active = activeDirs.find((dir) => dir.relDir === project.activeChangeDir);
-    if (active) return [active];
-  }
-  return activeDirs;
+var collectProjectAttributionTargets = (cwd, project, state, codeFile) => {
+  const decision = Attribution.decide({ cwd, session: state, project, codeFile });
+  return Attribution.targetsForDecision(decision);
 };
 var appendProjectLinkedCode = (dir, cwd, record, sessionID) => {
   const relPath = rel(cwd, record.path);
@@ -2174,7 +2227,7 @@ var applySessionToProject = (cwd, project, state, sessionID) => {
       continue;
     }
     if (record.editedSeq && isCodePath(fp)) {
-      const targets = collectProjectAttributionTargets(cwd, project, state);
+      const targets = collectProjectAttributionTargets(cwd, project, state, fp);
       for (const dir of targets) appendProjectLinkedCode(dir, cwd, record, sessionID);
       if (targets.length === 1) {
         project.activeChangeDir = targets[0].relDir;
@@ -3280,6 +3333,7 @@ if (require.main === module) {
     applySessionToProject,
     acquireFileLock,
     ATTRIBUTION_REVIEW_RULES,
+    Attribution,
     Actions,
     buildPreCompactSummary,
     createHookHandlers,

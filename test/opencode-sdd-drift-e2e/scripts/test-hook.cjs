@@ -969,6 +969,66 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "attribution")
+    const project = {
+      activeChangeDir: "sdd/changes/alpha",
+      activeUntilMs: 2000,
+      changeDirs: {
+        "sdd/changes/alpha": {
+          relDir: "sdd/changes/alpha",
+          archived: false,
+          linkedCode: [{ path: "src/alpha/feature.ts" }],
+        },
+        "sdd/changes/beta": {
+          relDir: "sdd/changes/beta",
+          archived: false,
+          linkedCode: [{ path: "src/beta/feature.ts" }],
+        },
+      },
+    }
+
+    assert.strictEqual(
+      hook.Attribution.decide({
+        cwd,
+        session: { edited: [path.join(cwd, "sdd", "changes", "beta", "design.md")] },
+        project,
+        codeFile: path.join(cwd, "src", "unrelated.ts"),
+        now: 1000,
+      }).kind,
+      "session-touched"
+    )
+    assert.strictEqual(
+      hook.Attribution.decide({
+        cwd,
+        session: { edited: [] },
+        project,
+        codeFile: path.join(cwd, "src", "alpha", "next.ts"),
+        now: 1000,
+      }).kind,
+      "active-ttl"
+    )
+    const needsReview = hook.Attribution.decide({
+      cwd,
+      session: { edited: [] },
+      project,
+      codeFile: path.join(cwd, "src", "other", "feature.ts"),
+      now: 1000,
+    })
+    assert.strictEqual(needsReview.kind, "needs-review")
+    assert.strictEqual(needsReview.candidates.length, 2)
+    assert.strictEqual(
+      hook.Attribution.decide({
+        cwd,
+        session: { edited: [] },
+        project: { changeDirs: {} },
+        codeFile: path.join(cwd, "src", "none.ts"),
+        now: 1000,
+      }).kind,
+      "no-attribution"
+    )
+  }
+
+  {
     const cwd = path.join(tmpRoot, "dispatch-no-sdd")
     fs.mkdirSync(cwd, { recursive: true })
     await hook.dispatch({
