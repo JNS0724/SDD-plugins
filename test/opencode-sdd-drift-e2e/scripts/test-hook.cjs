@@ -916,9 +916,55 @@ try {
       sessionWait: 5000,
       projectWait: 2000,
     })
+    assert.strictEqual(typeof hook.HookHandlers.PostToolUse.handle, "function")
+    assert.strictEqual(typeof hook.HookHandlers.PreToolUse.handle, "function")
     assert.strictEqual(hook.HookHandlers.PreCompact.requiresSession, "read")
+    assert.strictEqual(typeof hook.HookHandlers.Stop.handle, "function")
+    assert.strictEqual(typeof hook.HookHandlers.UserPromptSubmit.handle, "function")
+    assert.strictEqual(typeof hook.HookHandlers.PreCompact.handle, "function")
     const custom = hook.createHookHandlers({ Stop: () => [hook.Actions.log({ event: "stop" })] })
     assert.strictEqual(typeof custom.Stop.handle, "function")
+  }
+
+  {
+    const calls = []
+    hook.handlePreCompact(
+      { hook_event_name: "PreCompact" },
+      {
+        cwd: tmpRoot,
+        sessionID: "precompact-handler",
+        state: hook.emptyState(),
+        project: {},
+        applySessionToProject: () => calls.push("apply"),
+        buildPreCompactSummary: () => "compact summary",
+        persist: () => calls.push("persist"),
+        writeDiagnosticLog: (_cwd, event) => calls.push(`log:${event.event}`),
+        summarizeInput: () => ({}),
+        limitString: (value) => value,
+        buildClaudeCodeOutput: (_hook, message) => `out:${message}`,
+        writeStdout: (message) => calls.push(message),
+      }
+    )
+    assert.deepStrictEqual(calls, [
+      "apply",
+      "persist",
+      "log:precompact_summary_emit",
+      "out:compact summary",
+    ])
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "dispatch-no-sdd")
+    fs.mkdirSync(cwd, { recursive: true })
+    await hook.dispatch({
+      cwd,
+      session_id: "dispatch-no-sdd",
+      hook_event_name: "PostToolUse",
+      tool_name: "Write",
+      tool_input: { file_path: "src/app.ts" },
+    })
+    assert.strictEqual(hook.hasSddWorkspace(cwd), false)
+    assert.strictEqual(fs.existsSync(hook.projectStatePath(cwd)), false)
   }
 
   {

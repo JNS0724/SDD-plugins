@@ -4,6 +4,11 @@ const os = require("os")
 const path = require("path")
 const { Actions, runActions } = require("./actions")
 const { HookHandlers, createHookHandlers } = require("./dispatcher")
+const { handlePreCompact } = require("./handlers/pre-compact")
+const { handlePostToolUse } = require("./handlers/post-tool-use")
+const { handlePreToolUse } = require("./handlers/pre-tool-use")
+const { handleStop } = require("./handlers/stop")
+const { handleUserPromptSubmit } = require("./handlers/user-prompt-submit")
 const { readStdin } = require("./stdin")
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i
@@ -2920,8 +2925,7 @@ const emitStopEnforcement = (input, message) => {
   process.stdout.write(buildStopOutput(input, message))
 }
 
-const main = async () => {
-  const input = parseHookInput(await readStdin(STDIN_TIMEOUT_MS))
+const dispatch = async (input) => {
   const cwd = input.cwd || process.cwd()
   if (!hasSddWorkspace(cwd)) return
 
@@ -2971,6 +2975,72 @@ const main = async () => {
   }
   const transcriptPathForContext = resolveTranscriptPath(input)
   const dtsContextActive = updateDtsContextFromInput(state, input, transcriptPathForContext)
+  const handlerContext = {
+    cwd,
+    sessionID,
+    state,
+    project,
+    applySessionToProject,
+    applyToolRecord,
+    buildClaudeCodeOutput,
+    buildCodeEnforcement,
+    buildPreCompactSummary,
+    buildQuestionCheckpointEnforcement,
+    buildPendingEnforcement,
+    buildSubagentCheckpointEnforcement,
+    buildToolEnforcement,
+    clearCodeDriftNoticeIfResolved,
+    clearPeerDriftNoticeIfResolved,
+    buildStopEnforcement,
+    clearSubagentCheckpointNoticeIfResolved,
+    clearPeerSyncs,
+    clearStageOnlyRequirements,
+    CODE_REVIEW_STOP_MAX_BLOCKS,
+    codeDriftNoticeEmissionCount,
+    codeReviewToolMaxReminders,
+    collectCombinedCodeGaps,
+    collectCombinedPeerGaps,
+    drift,
+    emitEnforcement,
+    emitStopEnforcement,
+    formatCarryOverReminder,
+    getToolEventKey,
+    getToolFilePath,
+    isDtsContextActive,
+    isOpenCodeHookInput,
+    isQuestionCheckpointTool,
+    limitString,
+    hydrateStateFromTranscript,
+    hydrateStateFromCheckpointOutput,
+    markCarryOverNoticeEmitted,
+    markCodeDriftNoticeEmitted,
+    markCodeReviewNoEditConfirmation,
+    markImplementationFlowConfirmation,
+    markPeerDriftNoticeEmitted,
+    markSubagentCheckpointNoticeEmitted,
+    markStopCodeReviewConfirmation,
+    markToolEvent,
+    OPENCODE_STOP_REPORT_ONLY,
+    persist,
+    persistAndReport,
+    peerDriftSignature,
+    refreshAlignedBaseline,
+    refreshReport,
+    rel,
+    resolveFile,
+    shouldEmitCarryOverNotice,
+    shouldEmitCodeDriftNotice,
+    shouldEmitSubagentCheckpointNotice,
+    isCodeDriftNoticeSuppressed,
+    isSubagentCheckpointTool,
+    summarizeInput,
+    summarizeGaps,
+    SHOW_WARNINGS,
+    STOP_MAX_BLOCKS,
+    transcriptPathForContext,
+    writeDiagnosticLog,
+    writeStdout: (message) => process.stdout.write(message),
+  }
   writeDiagnosticLog(cwd, {
     event: "hook_start",
     input: summarizeInput(input),
@@ -2984,382 +3054,45 @@ const main = async () => {
   })
 
   if (input.hook_event_name === "UserPromptSubmit" || input.hook_event_name === "ChatMessage") {
-    const isFirstEvent = !state.firstEventAt
-    if (isFirstEvent) state.firstEventAt = new Date().toISOString()
-    if (input.parentSessionId) {
-      state.subagentContext = { parentSessionId: input.parentSessionId }
-    }
-    if (project) applySessionToProject(cwd, project, state, sessionID)
-    const reminder =
-      isFirstEvent && !isDtsContextActive(state) && shouldEmitCarryOverNotice(state, project)
-        ? formatCarryOverReminder(project)
-        : ""
-    if (reminder) markCarryOverNoticeEmitted(state, project, input.hook_event_name)
-    persist()
-    writeDiagnosticLog(cwd, {
-      event: reminder ? "carry_over_emitted" : "user_prompt_context_captured",
-      input: summarizeInput(input),
-      firstEvent: isFirstEvent,
-      messagePreview: reminder ? limitString(reminder, 800) : null,
-    })
-    if (reminder && input.hook_event_name === "UserPromptSubmit") {
-      process.stdout.write(buildClaudeCodeOutput("UserPromptSubmit", reminder))
-    }
+    handleUserPromptSubmit(input, handlerContext)
     return
   }
 
   if (input.hook_event_name === "PreCompact") {
-    if (project) applySessionToProject(cwd, project, state, sessionID)
-    const summary = buildPreCompactSummary(project)
-    persist()
-    writeDiagnosticLog(cwd, {
-      event: summary ? "precompact_summary_emit" : "precompact_no_pending",
-      input: summarizeInput(input),
-      messagePreview: summary ? limitString(summary, 800) : null,
-    })
-    if (summary) process.stdout.write(buildClaudeCodeOutput("PreCompact", summary))
+    handlePreCompact(input, handlerContext)
+    return
+  }
+
+  if (input.hook_event_name === "PreToolUse") {
+    handlePreToolUse(input, handlerContext)
     return
   }
 
   if (input.hook_event_name === "Stop") {
-    const transcriptPath = transcriptPathForContext
-    const hydrated = hydrateStateFromTranscript(cwd, state, transcriptPath)
-    if (project) applySessionToProject(cwd, project, state, sessionID)
-    let pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false, project })
-    if (markImplementationFlowConfirmation(cwd, state, pending, project)) {
-      refreshAlignedBaseline(cwd, project, state)
-      pending = buildPendingEnforcement(cwd, state, { includeStageOnly: false, project })
-    }
-    if (!pending) {
-      state.stopBlocks = {}
-      clearPeerSyncs(state)
-      clearStageOnlyRequirements(state)
-      refreshAlignedBaseline(cwd, project, state)
-      persistAndReport()
-      writeDiagnosticLog(cwd, {
-        event: "stop_allow_no_pending",
-        input: summarizeInput(input),
-        transcriptPath: transcriptPath ? limitString(transcriptPath) : null,
-        hydrated,
-      })
-      return
-    }
-
-    const reviewConfirmationReady =
-      pending.type === "code" &&
-      (pending.gaps || []).length > 0 &&
-      (pending.gaps || []).every((gap) => gap.needsConfirmation && gap.reviewReady)
-    if (markStopCodeReviewConfirmation(state, pending)) {
-      state.stopBlocks = {}
-      clearPeerSyncs(state)
-      refreshAlignedBaseline(cwd, project, state)
-      persistAndReport()
-      writeDiagnosticLog(cwd, {
-        event: "stop_allow_review_confirmed",
-        input: summarizeInput(input),
-        pendingType: pending.type,
-        pendingSignature: pending.signature,
-        transcriptPath: transcriptPath ? limitString(transcriptPath) : null,
-        hydrated,
-      })
-      return
-    }
-
-    refreshReport(cwd, state, project)
-
-    if (isOpenCodeHookInput(input) && OPENCODE_STOP_REPORT_ONLY) {
-      persistAndReport()
-      writeDiagnosticLog(cwd, {
-        event: "stop_opencode_report_only",
-        input: summarizeInput(input),
-        pendingType: pending.type,
-        pendingSignature: pending.signature,
-        transcriptPath: transcriptPath ? limitString(transcriptPath) : null,
-        hydrated,
-        messagePreview: limitString(pending.message, 800),
-      })
-      return
-    }
-
-    const configuredMaxBlocks = pending.type === "code" ? CODE_REVIEW_STOP_MAX_BLOCKS : STOP_MAX_BLOCKS
-    const maxBlocks = Number.isFinite(configuredMaxBlocks)
-      ? Math.max(0, configuredMaxBlocks)
-      : pending.type === "code"
-        ? 1
-        : 2
-    const blockCount = state.stopBlocks[pending.signature] || 0
-    if (blockCount >= maxBlocks) {
-      persist()
-      writeDiagnosticLog(cwd, {
-        event: "stop_allow_max_blocks",
-        input: summarizeInput(input),
-        pendingType: pending.type,
-        pendingSignature: pending.signature,
-        blockCount,
-        maxBlocks,
-      })
-      return
-    }
-
-    state.stopBlocks[pending.signature] = blockCount + 1
-    persist()
-    writeDiagnosticLog(cwd, {
-      event: reviewConfirmationReady ? "stop_review_confirmation_requested" : "stop_block_emit",
-      input: summarizeInput(input),
-      pendingType: pending.type,
-      pendingSignature: pending.signature,
-      blockCount: blockCount + 1,
-      maxBlocks,
-      messagePreview: limitString(pending.message, 800),
-    })
-    emitStopEnforcement(input, buildStopEnforcement(pending.message))
+    handleStop(input, handlerContext)
     return
   }
 
-  const isPostToolUse = input.hook_event_name === "PostToolUse"
-  const isPreToolUse = input.hook_event_name === "PreToolUse"
-  if (!isPostToolUse && !isPreToolUse) {
-    persistAndReport()
-    writeDiagnosticLog(cwd, {
-      event: "ignored_event",
-      input: summarizeInput(input),
-    })
+  if (input.hook_event_name === "PostToolUse") {
+    handlePostToolUse(input, handlerContext)
     return
-  }
-
-  const tool = String(input.tool_name || "").toLowerCase()
-  const toolInput = input.tool_input || {}
-  const fp = getToolFilePath(toolInput)
-  if (!fp || typeof fp !== "string") {
-    const subagentCheckpoint = isPostToolUse && isSubagentCheckpointTool(tool, toolInput)
-    const questionCheckpoint = isQuestionCheckpointTool(tool)
-    const checkpoint = subagentCheckpoint || questionCheckpoint
-    if (checkpoint && !markToolEvent(state, getToolEventKey(input))) {
-      persistAndReport()
-      writeDiagnosticLog(cwd, {
-        event: "ignored_duplicate_checkpoint_event",
-        input: summarizeInput(input),
-        tool,
-        subagentCheckpoint,
-        questionCheckpoint,
-      })
-      return
-    }
-
-    const hydratedFromCheckpointOutput = subagentCheckpoint
-      ? hydrateStateFromCheckpointOutput(cwd, state, input)
-      : false
-    if (project) applySessionToProject(cwd, project, state, sessionID)
-    const pending = subagentCheckpoint
-      ? buildSubagentCheckpointEnforcement(cwd, state, project)
-      : questionCheckpoint
-        ? buildQuestionCheckpointEnforcement(cwd, state, project)
-        : null
-    clearSubagentCheckpointNoticeIfResolved(state, pending)
-    if (pending && shouldEmitSubagentCheckpointNotice(state, pending)) {
-      markSubagentCheckpointNoticeEmitted(state, pending, tool)
-      persistAndReport()
-      writeDiagnosticLog(cwd, {
-        event: questionCheckpoint
-          ? "emit_question_checkpoint_enforcement"
-          : "emit_subagent_checkpoint_enforcement",
-        input: summarizeInput(input),
-        tool,
-        subagentCheckpoint,
-        questionCheckpoint,
-        hydratedFromCheckpointOutput,
-        pendingType: pending.type,
-        pendingSignature: pending.signature,
-        messagePreview: limitString(pending.message, 800),
-      })
-      emitEnforcement(input, pending.message)
-      return
-    }
-
-    const carryOverFallback =
-      isPostToolUse &&
-      state.noEditSession &&
-      !isDtsContextActive(state) &&
-      shouldEmitCarryOverNotice(state, project)
-        ? formatCarryOverReminder(project, { prefix: "[Carry-over] " })
-        : ""
-    if (carryOverFallback) {
-      if (!state.firstEventAt) state.firstEventAt = new Date().toISOString()
-      markCarryOverNoticeEmitted(state, project, "PostToolUse")
-      persistAndReport()
-      writeDiagnosticLog(cwd, {
-        event: "emit_carry_over_fallback",
-        input: summarizeInput(input),
-        tool,
-        subagentCheckpoint,
-        questionCheckpoint,
-        hydratedFromCheckpointOutput,
-        messagePreview: limitString(carryOverFallback, 800),
-      })
-      emitEnforcement(input, carryOverFallback)
-      return
-    }
-
-    persistAndReport()
-    writeDiagnosticLog(cwd, {
-      event: "ignored_no_file_path",
-      input: summarizeInput(input),
-      tool,
-      subagentCheckpoint,
-      questionCheckpoint,
-      hydratedFromCheckpointOutput,
-      pendingCheckpoint: Boolean(pending),
-    })
-    return
-  }
-
-  if (!isPostToolUse) {
-    persistAndReport()
-    writeDiagnosticLog(cwd, {
-      event: "ignored_pretooluse_file_path",
-      input: summarizeInput(input),
-      tool,
-      file: fp,
-    })
-    return
-  }
-
-  const abs = resolveFile(cwd, fp)
-  const isEdit = tool === "edit" || tool === "write" || tool === "multiedit"
-
-  if (!markToolEvent(state, getToolEventKey(input))) {
-    persistAndReport()
-    writeDiagnosticLog(cwd, {
-      event: "ignored_duplicate_tool_event",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-    })
-    return
-  }
-
-  if (!applyToolRecord(cwd, state, tool, toolInput)) {
-    persistAndReport()
-    writeDiagnosticLog(cwd, {
-      event: "ignored_unsupported_tool_record",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-    })
-    return
-  }
-
-  if (project) applySessionToProject(cwd, project, state, sessionID)
-  const warnings = isEdit ? drift(cwd, abs, state) : []
-  const peerGaps = collectCombinedPeerGaps(cwd, state, project)
-  const hardPeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false })
-  const stagePeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeHard: false })
-  let codeGaps = collectCombinedCodeGaps(cwd, state, project)
-  const codeReviewNoEditConfirmed =
-    !hardPeerGaps.length && markCodeReviewNoEditConfirmation(state, codeGaps)
-  if (codeReviewNoEditConfirmed) {
-    codeGaps = collectCombinedCodeGaps(cwd, state, project)
-  }
-  const noticePeerGaps = hardPeerGaps.length ? hardPeerGaps : stagePeerGaps
-  clearPeerDriftNoticeIfResolved(state, noticePeerGaps)
-  clearCodeDriftNoticeIfResolved(state, codeGaps)
-  clearSubagentCheckpointNoticeIfResolved(state, buildSubagentCheckpointEnforcement(cwd, state, project))
-  const emitCodeGap = !hardPeerGaps.length && shouldEmitCodeDriftNotice(state, codeGaps)
-  const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && isCodeDriftNoticeSuppressed(state, codeGaps)
-  const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
-  const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : []
-  const peerSignature = emitPeerGaps.length ? peerDriftSignature(emitPeerGaps) : null
-  const compactPeerGap =
-    emitPeerGaps.length > 0 &&
-    Boolean(state.peerDriftNotice?.active) &&
-    state.peerDriftNotice.signature === peerSignature
-  const compactCodeGap = emitCodeGap && Boolean(state.codeDriftNotice?.active)
-  const carryOverFallback =
-    !emitPeerGaps.length &&
-    !emitCodeGap &&
-    state.noEditSession &&
-    !isDtsContextActive(state) &&
-    shouldEmitCarryOverNotice(state, project)
-      ? formatCarryOverReminder(project, { prefix: "[Carry-over] " })
-      : ""
-  if (emitPeerGaps.length) {
-    markPeerDriftNoticeEmitted(state, emitPeerGaps)
-  }
-  if (emitCodeGap) {
-    markCodeDriftNoticeEmitted(cwd, state, codeGaps)
-  }
-  if (carryOverFallback) {
-    if (!state.firstEventAt) state.firstEventAt = new Date().toISOString()
-    markCarryOverNoticeEmitted(state, project, "PostToolUse")
   }
 
   persistAndReport()
-
-  if (emitPeerGaps.length) {
-    writeDiagnosticLog(cwd, {
-      event: emitPeerGaps.every((gap) => gap.stageOnly)
-        ? "emit_peer_stage_reminder"
-        : "emit_peer_enforcement",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-      tool,
-      isEdit,
-      ...summarizeGaps(cwd, peerGaps, codeGaps),
-    })
-    emitEnforcement(input, buildToolEnforcement(emitPeerGaps, { compact: compactPeerGap }))
-  } else if (emitCodeGap) {
-    writeDiagnosticLog(cwd, {
-      event: compactCodeGap ? "emit_code_reminder_compact" : "emit_code_enforcement",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-      tool,
-      isEdit,
-      ...summarizeGaps(cwd, peerGaps, codeGaps),
-    })
-    emitEnforcement(input, buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap }))
-  } else if (SHOW_WARNINGS && warnings.length) {
-    writeDiagnosticLog(cwd, {
-      event: "emit_warning",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-      tool,
-      warnings,
-      ...summarizeGaps(cwd, peerGaps, codeGaps),
-    })
-    emitEnforcement(input, warnings.join("\n"))
-  } else if (carryOverFallback) {
-    writeDiagnosticLog(cwd, {
-      event: "emit_carry_over_fallback",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-      tool,
-      isEdit,
-      messagePreview: limitString(carryOverFallback, 800),
-      ...summarizeGaps(cwd, peerGaps, codeGaps),
-    })
-    emitEnforcement(input, carryOverFallback)
-  } else {
-    writeDiagnosticLog(cwd, {
-      event: codeReviewNoEditConfirmed
-        ? "posttooluse_code_review_no_edit_confirmed"
-        : suppressCodeGap
-          ? "posttooluse_code_review_reminder_suppressed"
-          : "posttooluse_no_output",
-      input: summarizeInput(input),
-      file: rel(cwd, abs),
-      tool,
-      isEdit,
-      ...(suppressCodeGap
-        ? {
-            codeReviewToolReminderCount: codeDriftNoticeEmissionCount(state),
-            codeReviewToolMaxReminders: codeReviewToolMaxReminders(),
-          }
-        : {}),
-      ...summarizeGaps(cwd, peerGaps, codeGaps),
-    })
-  }
+  writeDiagnosticLog(cwd, {
+    event: "ignored_event",
+    input: summarizeInput(input),
+  })
+  return
   } finally {
     releaseFileLock(projectLock)
     releaseFileLock(stateLock)
   }
+}
+
+const main = async () => {
+  const input = parseHookInput(await readStdin(STDIN_TIMEOUT_MS))
+  await dispatch(input)
 }
 
 if (require.main === module) {
@@ -3399,6 +3132,7 @@ if (require.main === module) {
     computeProjectState,
     codeReviewSignature,
     diagnosticLogPath,
+    dispatch,
     drift,
     emptyState,
     findSdd,
@@ -3430,6 +3164,11 @@ if (require.main === module) {
     Actions,
     buildPreCompactSummary,
     createHookHandlers,
+    handlePreCompact,
+    handlePostToolUse,
+    handlePreToolUse,
+    handleStop,
+    handleUserPromptSubmit,
     getToolEventKey,
     HookHandlers,
     markCarryOverNoticeEmitted,

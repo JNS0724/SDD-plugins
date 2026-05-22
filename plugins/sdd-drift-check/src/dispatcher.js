@@ -1,3 +1,9 @@
+const { handlePreCompact } = require("./handlers/pre-compact")
+const { handlePreToolUse } = require("./handlers/pre-tool-use")
+const { handlePostToolUse } = require("./handlers/post-tool-use")
+const { handleStop } = require("./handlers/stop")
+const { handleUserPromptSubmit } = require("./handlers/user-prompt-submit")
+
 const makeHandlerSpec = (requiresSession, requiresProject, lockPolicy, handle) => ({
   requiresSession,
   requiresProject,
@@ -38,7 +44,13 @@ const createHookHandlers = (handlers = {}) => ({
   ),
 })
 
-const HookHandlers = createHookHandlers()
+const HookHandlers = createHookHandlers({
+  PreCompact: handlePreCompact,
+  PostToolUse: handlePostToolUse,
+  PreToolUse: handlePreToolUse,
+  Stop: handleStop,
+  UserPromptSubmit: handleUserPromptSubmit,
+})
 
 module.exports = {
   HookHandlers,
