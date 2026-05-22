@@ -1,0 +1,2 @@
+{"contains":["deferred review checkpoint","sdd/changes/j4/design.md","sdd/changes/j4/tasks.md","src/carry.ts"]}
+{"jsonContains":{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}},"contains":["SDD carry-over drift from prior sessions","sdd/changes/j4: CODE_PENDING_REVIEW"]}

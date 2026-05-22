@@ -1,0 +1,2 @@
+{"tool_use_id":"j8-1","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"src/handoff.ts"}}
+{"tool_use_id":"j8-2","hook_event_name":"PreToolUse","tool_name":"question","tool_input":{"prompt":"Commit now?"}}

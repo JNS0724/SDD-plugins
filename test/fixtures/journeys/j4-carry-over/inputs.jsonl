@@ -1,0 +1,2 @@
+{"session_id":"session-j4-a","tool_use_id":"j4-1","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"src/carry.ts"}}
+{"session_id":"session-j4-b","hook_event_name":"UserPromptSubmit","prompt":"Continue the existing implementation."}

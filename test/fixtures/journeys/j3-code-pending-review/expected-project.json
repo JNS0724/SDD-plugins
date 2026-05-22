@@ -1,0 +1,13 @@
+{
+  "states": {
+    "sdd/changes/j3": "CODE_PENDING_REVIEW"
+  },
+  "linkedCodeContains": {
+    "sdd/changes/j3": ["src/app.ts"]
+  },
+  "conditions": {
+    "sdd/changes/j3": {
+      "codeAheadOfDocs": true
+    }
+  }
+}

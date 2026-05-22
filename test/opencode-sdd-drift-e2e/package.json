@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "test": "node ./scripts/test-hook.cjs && node ./scripts/test-opencode-native.cjs",
+    "test": "npm --prefix ../../plugins/sdd-drift-check run build:check && node ./scripts/test-hook.cjs && node ./scripts/test-opencode-native.cjs && node ./scripts/test-journeys.cjs",
     "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-e2e.ps1",
     "e2e:real": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-real-e2e.ps1",
     "e2e:real:native": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-real-native.ps1",

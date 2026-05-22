@@ -1,0 +1,5 @@
+{"contains":["SDD proposal stage reminder","sdd/changes/j1/design.md"],"notContains":["create or edit tasks.md directly from proposal.md directly"]}
+{"contains":["This assistant turn is incomplete","sdd/changes/j1/tasks.md","preserve its existing Markdown template"]}
+{"empty":true}
+{"contains":["deferred review checkpoint","sdd/changes/j1/design.md","sdd/changes/j1/tasks.md","src/j1.ts"]}
+{"empty":true}

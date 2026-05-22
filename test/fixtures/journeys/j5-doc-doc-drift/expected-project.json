@@ -1,0 +1,10 @@
+{
+  "states": {
+    "sdd/changes/j5": "DESIGN_PENDING_TASKS"
+  },
+  "conditions": {
+    "sdd/changes/j5": {
+      "designAheadOfTasks": true
+    }
+  }
+}

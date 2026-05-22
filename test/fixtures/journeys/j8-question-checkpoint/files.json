@@ -1,0 +1,5 @@
+{
+  "sdd/changes/j8/design.md": "# Design\n",
+  "sdd/changes/j8/tasks.md": "# Tasks\n",
+  "src/handoff.ts": "export const handoff = true\n"
+}

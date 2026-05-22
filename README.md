@@ -18,9 +18,17 @@ test harnesses under `test/`.
 ```text
 plugins/
   sdd-drift-check/
+    src/
+      index.js
+      stdin.js
+    build.mjs
+    package.json
     sdd-drift-check-hook.js
     sdd-drift-check-opencode.js
+docs/
+  sdd-drift-check/
     sdd-drift-check.md
+    opencode-omo-getting-started.md
 test/
   opencode-sdd-drift-e2e/
   claude-code-sdd-drift-e2e/
@@ -66,7 +74,7 @@ It supports:
 See the plugin documentation for installation and behavior details:
 
 ```text
-plugins/sdd-drift-check/sdd-drift-check.md
+docs/sdd-drift-check/sdd-drift-check.md
 ```
 
 ## Testing

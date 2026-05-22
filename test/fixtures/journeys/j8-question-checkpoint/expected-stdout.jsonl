@@ -1,0 +1,2 @@
+{"contains":["deferred review checkpoint","sdd/changes/j8/design.md","sdd/changes/j8/tasks.md","src/handoff.ts"]}
+{"jsonContains":{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}},"contains":["SDD drift question checkpoint","Do not ask about commit","src/handoff.ts"]}

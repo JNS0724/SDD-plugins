@@ -863,6 +863,22 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "record-file-mtime-monotonic")
+    const state = hook.emptyState()
+    const code = path.join(cwd, "src", "future.ts")
+    write(code, "export const future = 1\n")
+    const future = new Date(Date.now() + 5000)
+    fs.utimesSync(code, future, future)
+
+    hook.recordFile(state, code, true)
+    const record = state.files[hook.normalizeKey(code)]
+    assert.ok(
+      Number(record.editedAtMs) > Math.round(fs.statSync(code).mtimeMs * 1000),
+      "recordFile editedAtMs should remain ahead of file mtime to keep project ordering deterministic"
+    )
+  }
+
+  {
     const cwd = path.join(tmpRoot, "code-notice-repeats")
     const state = hook.emptyState()
     const dir = path.join(cwd, "sdd", "changes", "zeta")

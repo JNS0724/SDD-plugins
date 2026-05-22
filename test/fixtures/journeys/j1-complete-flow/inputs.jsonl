@@ -1,0 +1,5 @@
+{"tool_use_id":"j1-1","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"sdd/changes/j1/proposal.md"}}
+{"tool_use_id":"j1-2","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"sdd/changes/j1/design.md"}}
+{"tool_use_id":"j1-3","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"sdd/changes/j1/tasks.md"}}
+{"tool_use_id":"j1-4","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"src/j1.ts"}}
+{"hook_event_name":"Stop"}

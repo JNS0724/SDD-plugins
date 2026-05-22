@@ -1,0 +1,11 @@
+{
+  "name": "sdd-drift-check",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "build:check": "node build.mjs --check"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.5"
+  }
+}

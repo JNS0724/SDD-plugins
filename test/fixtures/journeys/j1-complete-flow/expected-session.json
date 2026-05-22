@@ -1,0 +1,11 @@
+{
+  "editedRel": [
+    "sdd/changes/j1/proposal.md",
+    "sdd/changes/j1/design.md",
+    "sdd/changes/j1/tasks.md",
+    "src/j1.ts"
+  ],
+  "pendingType": null,
+  "codeReviewConfirmationsMin": 1,
+  "reportExists": false
+}

@@ -1,0 +1,5 @@
+{
+  "sdd/changes/j3/design.md": "# Design\n",
+  "sdd/changes/j3/tasks.md": "# Tasks\n",
+  "src/app.ts": "export const app = 1\n"
+}

@@ -1,0 +1,13 @@
+{
+  "sessions": {
+    "session-j4-a": {
+      "editedRel": ["src/carry.ts"],
+      "pendingType": "code"
+    },
+    "session-j4-b": {
+      "editedRel": [],
+      "pendingType": "code",
+      "carryOverNotice": true
+    }
+  }
+}

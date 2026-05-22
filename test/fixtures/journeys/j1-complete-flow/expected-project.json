@@ -1,0 +1,15 @@
+{
+  "states": {
+    "sdd/changes/j1": "ALIGNED"
+  },
+  "linkedCodeContains": {
+    "sdd/changes/j1": ["src/j1.ts"]
+  },
+  "conditions": {
+    "sdd/changes/j1": {
+      "designAheadOfTasks": false,
+      "tasksAheadOfDesign": false,
+      "codeAheadOfDocs": false
+    }
+  }
+}

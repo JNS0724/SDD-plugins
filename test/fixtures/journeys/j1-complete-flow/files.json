@@ -1,0 +1,6 @@
+{
+  "sdd/changes/j1/proposal.md": "# Proposal\n",
+  "sdd/changes/j1/design.md": "# Design\n",
+  "sdd/changes/j1/tasks.md": "# Tasks\n",
+  "src/j1.ts": "export const j1 = 1\n"
+}
