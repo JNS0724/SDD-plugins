@@ -1,10 +1,18 @@
 # `sdd-drift-check-hook.js` 方案设计
 
-**版本:** 1.0
+**版本:** 1.1
 **日期:** 2026-05-22
+**修订记录:** v1.1 — 修正状态机 peer-exists 与 per-doc review 规则；补齐 `PreToolUse` 提问检查点；统一 ProjectState 存储路径为 `<stateDir(cwd)>/project.json`；修正实施阶段依赖顺序
 **作者:** Claude（Opus 4.7）+ 用户协同
-**输入文档:** [sdd-drift-check-hook.prd.zh.md](./sdd-drift-check-hook.prd.zh.md) v1.1
+**输入文档:** [sdd-drift-check-hook.prd.zh.md](./sdd-drift-check-hook.prd.zh.md) v1.2
 **版本锁定:** `oh-my-opencode@3.17.2` + `opencode-ai@1.2.27` + `@opencode-ai/plugin@1.2.27`
+
+**文档更新日志:**
+
+| 版本 | 日期 | 内容 |
+|---|---|---|
+| v1.1 | 2026-05-22 | 修正状态机 peer-exists 与 per-doc review 规则；补齐 `PreToolUse` 提问检查点；统一 ProjectState 存储路径；修正实施阶段依赖 |
+| v1.0 | 2026-05-22 | 初版方案设计 |
 
 本文档回答"怎么做"，PRD 回答"做什么"。每个 FR/NFR/旅程都映射到本文的具体实施位置（见附录 A、B）。
 
@@ -17,7 +25,7 @@
 3. [数据模型](#三数据模型)
 4. [命名空间布局](#四命名空间布局)
 5. [Hook Dispatcher](#五hook-dispatcher)
-6. [4 个 Hook Handler 实现](#六4-个-hook-handler-实现)
+6. [5 个 Hook Handler 实现](#六5-个-hook-handler-实现)
 7. [状态机与完成基线](#七状态机与完成基线)
 8. [代码归属与 LLM 评审](#八代码归属与-llm-评审)
 9. [跨会话 carry-over](#九跨会话-carry-over)
@@ -60,6 +68,10 @@
    │ PostTU  │      │  Stop   │      │   UPS   │    │ PreCompct│
    └────┬────┘      └────┬────┘      └────┬────┘    └────┬─────┘
         │                │                │              │
+   ┌────▼────┐           │                │              │
+   │ PreTU   │           │                │              │
+   │Question │           │                │              │
+   └────┬────┘           │                │              │
         └────────────────┴────────────────┴──────────────┘
                          │
                 ┌────────▼────────┐
@@ -177,6 +189,7 @@ interface ChangeDir {
     designAheadOfTasks: boolean
     tasksAheadOfDesign: boolean
     codeAheadOfDocs: boolean
+    codePendingDocs: ("design" | "tasks")[]
   }
 }
 
@@ -208,14 +221,14 @@ type ChangeDirState =
 ### 3.3 文件路径
 
 ```
-.sdd-drift-hook-state/
+<stateDir(cwd)>/
 ├── project.json                             ★ 新增（项目级权威）
 ├── <hash>-<sessionID>.json                  现有（会话级；扁平不动）
 ├── sdd-drift-check.log.jsonl                现有
 └── *.corrupt-<ts>                           破损归档（R7）
 ```
 
-保持扁平结构避免 migration 风险。`project.json` 与会话 state 并列。
+`<stateDir(cwd)>` 必须复用现有 `stateDir(cwd)` 解析逻辑：优先写入最近的 `.git/sdd-drift-hook-state`，再降级到 cwd 下 `.sdd-drift-hook-state`，最后才写入临时目录。保持扁平结构避免 migration 风险。`project.json` 与会话 state 并列，不能把项目级状态硬编码回仓库根目录，避免污染 `git status`。
 
 ### 3.4 Schema 迁移
 
@@ -276,7 +289,7 @@ loadProjectState(cwd):
 §18  Notices             三套通知去重 + AttributionReview 节流
 §19  Report              refreshReport（始终先写盘再 emit）
 §20  Output              Claude / OpenCode 输出适配
-§21  HookHandlers        4 个 hook 各一个 handler，统一签名 (input, ctx) → Action[]
+§21  HookHandlers        5 个 hook 各一个 handler，统一签名 (input, ctx) → Action[]
 §22  Dispatcher          注册表式分派 + 熔断（R11）
 §23  Main                ~40 行 wiring
 §24  Exports             保留 module.exports 契约 + 新增导出
@@ -292,6 +305,12 @@ loadProjectState(cwd):
 
 ```js
 const HookHandlers = {
+  PreToolUse: {
+    requiresSession: "write",
+    requiresProject: "read",
+    lockPolicy: { sessionWait: 1000, projectWait: 500 },
+    handle: handlePreToolUse,
+  },
   PostToolUse: {
     requiresSession: "write",
     requiresProject: "write",
@@ -320,6 +339,8 @@ const HookHandlers = {
 ```
 
 未列出的事件名 → log `unsupported_event`、退出。
+
+`PreToolUse` 只用于**提问/交接类工具的 checkpoint**，例如 agent 准备询问“是否提交代码”“是否继续下一步”时，在真正把控制权交还用户前检查 SDD drift。它不是通用的工具前置阻断，也不用于普通 Edit/Write/Read 的许可控制。
 
 ### 5.2 Dispatch 流程
 
@@ -359,9 +380,31 @@ const Actions = {
 
 ---
 
-## 六、4 个 Hook Handler 实现
+## 六、5 个 Hook Handler 实现
 
-### 6.1 `handlePostToolUse`
+### 6.1 `handlePreToolUse`（question checkpoint）
+
+```
+1. 仅识别 question-like / handoff-like 工具：
+    - OMO task/plan 相关的用户确认工具
+    - commit / continue / ask-user 类语义的交接动作
+    - 非提问类工具直接 silent
+2. 加载 ProjectState，聚合所有未归档 ChangeDir 的 pending drift
+3. 若无 pending:
+    - log pretooluse_question_allow_no_pending
+    - return [SAVE_SESSION]
+4. 若有 pending:
+    - 生成 question checkpoint prompt
+    - Claude Code 输出 permissionDecision="deny"
+    - reason/additionalContext 要求 agent 在提问或提交前先完成 SDD review / sync
+5. 节流：
+    - 同一 signature 在一次会话内最多 deny 一次
+    - 之后仍未解决时交给 Stop / UserPromptSubmit 聚合提醒，避免交互死循环
+```
+
+该 handler 的目的只覆盖 J8：agent 准备把问题抛给用户时，先给它一次处理 SDD drift 的机会。它不改变 `PostToolUse` 的实时观察职责，也不替代 `Stop` 的最终兜底。
+
+### 6.2 `handlePostToolUse`
 
 ```
 1. markToolEvent: 重复事件 → return
@@ -388,9 +431,10 @@ const Actions = {
 7. 子代理 checkpoint 路径（task / call_omo_agent / delegate_task / background_output）：
     - hydrateStateFromCheckpointOutput
     - 若有 pending → emit subagent checkpoint enforcement
+8. 提问/交接 checkpoint 不在 PostToolUse 处理；统一由 PreToolUse 处理，避免工具结果里重复注入同类提示。
 ```
 
-### 6.2 `handleStop`
+### 6.3 `handleStop`
 
 ```
 1. 增量 hydration (R2):
@@ -425,7 +469,7 @@ const Actions = {
 9. Stop 允许后清理 stopBlocks / peerSyncs / stageOnlyRequirements
 ```
 
-### 6.3 `handleUserPromptSubmit`（opt-in）
+### 6.4 `handleUserPromptSubmit`（opt-in）
 
 ```
 1. DTS 单次检测 (R3):
@@ -447,7 +491,7 @@ const Actions = {
     - log + return [SAVE_SESSION]
 ```
 
-### 6.4 `handlePreCompact`（opt-in）
+### 6.5 `handlePreCompact`（opt-in）
 
 ```
 1. 不需要锁项目级（只读）
@@ -475,25 +519,41 @@ const Actions = {
 
 ```js
 StateMachine.computeConditions = (dir) => {
+  const designExists = dir.docs.design?.exists === true
+  const tasksExists = dir.docs.tasks?.exists === true
   const designEdited = dir.docs.design?.lastEditedMs ?? 0
   const tasksEdited = dir.docs.tasks?.lastEditedMs ?? 0
   const designReviewed = max(designEdited, dir.docs.design?.lastReviewedMs ?? 0)
   const tasksReviewed = max(tasksEdited, dir.docs.tasks?.lastReviewedMs ?? 0)
   const codeEdited = max(0, ...dir.linkedCode.map(c => c.lastEditedMs))
+  const reviewTargets = [
+    designExists && ["design", designReviewed],
+    tasksExists && ["tasks", tasksReviewed],
+  ].filter(Boolean)
+  const codePendingDocs = reviewTargets
+    .filter(([_, reviewedAt]) => codeEdited > reviewedAt)
+    .map(([doc]) => doc)
 
   return {
     proposalOnly: dir.docs.proposal?.exists
-                && !dir.docs.design?.exists
-                && !dir.docs.tasks?.exists,
-    designAheadOfTasks: designEdited > tasksEdited && designEdited > 0,
-    tasksAheadOfDesign: tasksEdited > designEdited && tasksEdited > 0,
-    codeAheadOfDocs: codeEdited > max(designReviewed, tasksReviewed)
+                && !designExists
+                && !tasksExists,
+    designAheadOfTasks: designExists && tasksExists
+                   && designEdited > tasksEdited && designEdited > 0,
+    tasksAheadOfDesign: designExists && tasksExists
+                   && tasksEdited > designEdited && tasksEdited > 0,
+    codeAheadOfDocs: codePendingDocs.length > 0
                    && codeEdited > (dir.alignedAtMs ?? 0),
+    codePendingDocs,
   }
 }
 ```
 
-注意 `codeAheadOfDocs` 的第二个 AND 子句——这是 FR3 完成基线的核心：**alignedAtMs 之前的代码不算 drift**。
+注意：
+
+- `designAheadOfTasks` / `tasksAheadOfDesign` 必须要求 peer 文件存在。若用户还在 proposal→design 的前期打磨阶段，不能强行要求创建 `tasks.md`。
+- `codeAheadOfDocs` 必须逐个已有目标文档检查，不能用 `max(designReviewed, tasksReviewed)` 折叠。否则只评审了一个文档就会掩盖另一个文档未评审。
+- `codeAheadOfDocs` 的第二个 AND 子句是 FR3 完成基线的核心：**alignedAtMs 之前的代码不算 drift**。
 
 ### 7.2 状态派生
 
@@ -819,6 +879,7 @@ e.g., alignedAtMs 回退 → 保留较大值
 | 能力 | CC | OMO 3.17.2 |
 |------|----|-----|
 | PostToolUse emit | 完整 | 完整 |
+| PreToolUse question checkpoint | 完整（permissionDecision deny） | 取决于 OMO 桥接；未支持时降级到 Stop / UserPromptSubmit |
 | Stop block | 完整 | error / interrupt session 静默丢；`canStopBlock=false` 时降级 + 写报告 |
 | UserPromptSubmit emit | 完整 | 完整（chat.message 桥接）|
 | PreCompact emit | 完整 | 完整（experimental.session.compacting）|
@@ -899,18 +960,18 @@ J13 fixture（multi-dir，LLM 选 X）:
 | **P1** | 结构重排（§1-§7 / §9-§12 / §15-§20） + R7 R9 R10 | NFR1 NFR6 | – |
 | **P2** | Dispatcher（§22）+ 熔断 + R11 + 不变量断言 | NFR1 NFR5 | – |
 | **P3** | 容量与时延：R1 R2 R3 R8 | NFR2 NFR4 | – |
-| **P4** | UserPromptSubmit handler + PreCompact handler + R6 parentSessionId | FR5（部分）FR6（CC 路径）NFR3 | J5 J12 |
-| **P5** | ProjectState（§8）+ StateMachine（§13）+ alignedAtMs（FR2/FR3）+ FR12 归档即时反映 + FR13 纯讨论静默 | FR1 FR2 FR3 FR7 FR9 FR10 FR12 FR13 NFR7 | J1 J2 J3 J4 J5 J9 J10 J15 |
+| **P4** | ProjectState（§8）基础 + StateMachine（§13）+ alignedAtMs（FR2/FR3）+ FR12 归档即时反映 + FR13 纯讨论静默 | FR1 FR2 FR3 FR7 FR9 FR10 FR12 FR13 NFR7 | J1 J2 J3 J4 J5 J9 J10 J15 |
+| **P5** | UserPromptSubmit handler + PreCompact handler + R6 parentSessionId + PreToolUse question checkpoint | FR5（部分）FR6（CC 路径）FR7 NFR3 | J5 J8 J12 |
 | **P6** | Attribution（§14）+ LLM 评审（FR11）+ `ATTRIBUTION_REVIEW_RULES` 常量 + FR6 carry-over（完整）+ FR8 active TTL | FR4 FR6（完整）FR8 FR11 | J6 J7 J8 J11 J13 J14 J16 |
 
 **关键依赖**：
 - P0 是所有后续阶段的安全网（**必须先做**）
 - P1–P3 = 结构 + 健壮性（pre-PRD 范围）
-- P4 引入新 hook，但功能 opt-in，对未配置用户透明
-- P5 引入 ProjectState，是 P6 的前置
+- P4 引入 ProjectState，是 P5 / P6 的前置
+- P5 引入新 hook，但功能 opt-in，对未配置用户透明
 - P6 引入 LLM 评审，依赖 P5 的 active 概念
 
-每阶段独立可发布。P4 / P5 之间无依赖（可并行）。
+每阶段独立可发布。P5 依赖 P4，因为 UserPromptSubmit / PreCompact / PreToolUse 都需要读取 ProjectState 才能可靠聚合跨会话 drift。
 
 ---
 
@@ -926,7 +987,7 @@ J13 fixture（multi-dir，LLM 选 X）:
 | 诊断日志 event 名 | 既有名不改；新事件用新名 |
 | `SDD_DRIFT_*` env 变量名 | 既有名不改；新变量加新前缀 |
 | `.sdd-drift-report.md` 格式 | snapshot |
-| `.sdd-drift-hook-state/` 目录布局 | 现有文件路径不变；新增 project.json 并列 |
+| `<stateDir(cwd)>/` 目录布局 | 复用现有 stateDir 解析；新增 project.json 与 session state 并列 |
 
 新增导出（不破坏既有）：
 - `loadProjectState` / `saveProjectState`
@@ -943,39 +1004,39 @@ J13 fixture（multi-dir，LLM 选 X）:
 
 | FR | 实施位置 | 阶段 |
 |----|----------|------|
-| FR1 ProjectState 持久化 | §8 ProjectState | P5 |
-| FR2 实现阶段识别 | §13 StateMachine + handleStop | P5 |
-| FR3 完成基线 alignedAtMs | §13 StateMachine + handleStop | P5 |
-| FR4 双向 doc-doc drift（跨会话）| §15 Gaps + §8 ProjectState | P5 / P6 |
-| FR5 子代理归属 | §16 Checkpoint + §21 UPS handler | P4 |
-| FR6 跨会话 carry-over | §21 UPS handler + PostToolUse 兜底 | P4 / P6 |
-| FR7 Stop 强制检测 | §21 Stop handler | 现有，配合 P5 |
-| FR8 active TTL | §14 Attribution + §8 ProjectState | P5 / P6 |
+| FR1 ProjectState 持久化 | §8 ProjectState | P4 |
+| FR2 实现阶段识别 | §13 StateMachine + handleStop | P4 |
+| FR3 完成基线 alignedAtMs | §13 StateMachine + handleStop | P4 |
+| FR4 双向 doc-doc drift（跨会话）| §15 Gaps + §8 ProjectState | P4 / P6 |
+| FR5 子代理归属 | §16 Checkpoint + §21 UPS handler | P5 |
+| FR6 跨会话 carry-over | §21 UPS handler + PostToolUse 兜底 | P5 / P6 |
+| FR7 Stop 强制检测 | §21 Stop handler + PreToolUse question checkpoint | 现有，配合 P4 / P5 |
+| FR8 active TTL | §14 Attribution + §8 ProjectState | P4 / P6 |
 | FR9 归档跳过 | §11 Sdd.isArchivedChangeDir | 现有 |
-| FR10 多 change-dir | §13 / §15 | 现有 + P5 |
+| FR10 多 change-dir | §13 / §15 | 现有 + P4 |
 | FR11 LLM 评审 | §14 Attribution + §17 Messages | P6 |
-| FR12 归档即时反映 | §11 Sdd.detectArchiveAction | P5 |
-| FR13 纯讨论 Stop 静默 | §21 Stop handler | P5 |
+| FR12 归档即时反映 | §11 Sdd.detectArchiveAction | P4 |
+| FR13 纯讨论 Stop 静默 | §21 Stop handler | P4 |
 
 ### 附录 B：旅程 → FR 覆盖
 
 | Journey | 主要 FR | 主要阶段 |
 |---------|---------|----------|
-| J1 | FR2 FR3 FR7 | P5 |
-| J2 | FR2 FR3 FR5 FR7 | P5 |
-| J3 | FR3 FR7 | P5 |
-| J4 | FR1 FR6 FR7 FR8 | P5 / P6 |
-| J5 | FR4 FR7 | P5 |
-| J6 | FR5 FR6 FR7 FR8 | P4 / P6 |
-| J7 | FR5 FR6 FR7 FR8 | P4 / P6 |
-| J8 | FR5 FR6 FR7 FR8 | P4 / P6 |
+| J1 | FR2 FR3 FR7 | P4 |
+| J2 | FR2 FR3 FR5 FR7 | P4 / P5 |
+| J3 | FR3 FR7 | P4 |
+| J4 | FR1 FR6 FR7 FR8 | P4 / P5 / P6 |
+| J5 | FR4 FR7 | P4 |
+| J6 | FR5 FR6 FR7 FR8 | P5 / P6 |
+| J7 | FR5 FR6 FR7 FR8 | P5 / P6 |
+| J8 | FR5 FR6 FR7 FR8 | P5 / P6 |
 | J9 | （现有 stage reminder）| 现有 |
-| J10 | FR2 FR3 | P5 |
+| J10 | FR2 FR3 | P4 |
 | J11 | FR11 | P6 |
-| J12 | FR1（lastReviewedMs） | P5 |
+| J12 | FR1（lastReviewedMs） | P4 / P5 |
 | J13 | FR11 | P6 |
 | J14 | FR8 FR11 | P6 |
-| J15 | FR12 | P5 |
+| J15 | FR12 | P4 |
 | J16 | （现有 DTS） | 现有 + R3 优化 P3 |
 
 ### 附录 C：诊断日志事件名清单
@@ -1000,6 +1061,9 @@ J13 fixture（multi-dir，LLM 选 X）:
 - `stdin_timeout`（R9）
 - `handler_exception`
 - `carry_over_emitted`（FR6）
+- `pretooluse_question_checkpoint_emit`（J8）
+- `pretooluse_question_allow_no_pending`（J8）
+- `pretooluse_question_throttled`（J8）
 
 ### 附录 D：版本锁与升级路径
 
@@ -1022,8 +1086,8 @@ opencode-ai       1.2.27 (locked)
 2. **阶段 1 PR**：§1-§7 命名空间重排 + R7/R9/R10
 3. **阶段 2 PR**：Dispatcher + 熔断
 4. **阶段 3 PR**：性能修复
-5. **阶段 4 PR**：UPS + PreCompact handler
-6. **阶段 5 PR**：ProjectState + StateMachine + alignedAtMs
+5. **阶段 4 PR**：ProjectState + StateMachine + alignedAtMs
+6. **阶段 5 PR**：UPS + PreCompact + PreToolUse question checkpoint
 7. **阶段 6 PR**：Attribution + LLM 评审 + carry-over 完整
 
 每个 PR 单独评审；P0 fixture 在每个 PR 中作为回归测试基线。
