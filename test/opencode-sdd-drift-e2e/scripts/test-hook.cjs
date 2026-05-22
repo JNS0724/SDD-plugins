@@ -954,6 +954,21 @@ try {
   }
 
   {
+    const state = hook.emptyState()
+    assert.strictEqual(hook.CircuitBreaker.isOpen(state, "PostToolUse", 1000), false)
+    for (let i = 0; i < 4; i += 1) {
+      assert.strictEqual(hook.CircuitBreaker.recordFailure(state, "PostToolUse", 1000 + i), false)
+    }
+    assert.strictEqual(hook.CircuitBreaker.isOpen(state, "PostToolUse", 1004), false)
+    assert.strictEqual(hook.CircuitBreaker.recordFailure(state, "PostToolUse", 1005), true)
+    assert.strictEqual(hook.CircuitBreaker.isOpen(state, "PostToolUse", 1006), true)
+    assert.strictEqual(hook.CircuitBreaker.isOpen(state, "PostToolUse", 1000 + 60 * 1000 + 10), false)
+    assert.strictEqual(hook.CircuitBreaker.recordSuccess(state, "PostToolUse"), true)
+    assert.strictEqual(state.circuitBreaker.PostToolUse.failures, 0)
+    assert.strictEqual(state.circuitBreaker.PostToolUse.openUntilMs, 0)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "dispatch-no-sdd")
     fs.mkdirSync(cwd, { recursive: true })
     await hook.dispatch({
@@ -965,6 +980,39 @@ try {
     })
     assert.strictEqual(hook.hasSddWorkspace(cwd), false)
     assert.strictEqual(fs.existsSync(hook.projectStatePath(cwd)), false)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "dispatch-circuit-breaker")
+    write(path.join(cwd, "sdd", "changes", "cb", "design.md"), "# Design\n")
+    const throwingInput = {
+      cwd,
+      session_id: "dispatch-circuit",
+      hook_event_name: "PostToolUse",
+      tool_name: "Write",
+      tool_input: {},
+    }
+    Object.defineProperty(throwingInput.tool_input, "file_path", {
+      enumerable: true,
+      get() {
+        throw new Error("intentional circuit-breaker test failure")
+      },
+    })
+
+    for (let i = 0; i < 5; i += 1) {
+      await hook.dispatch(throwingInput)
+    }
+    const state = hook.loadState(cwd, "dispatch-circuit")
+    assert.strictEqual(hook.CircuitBreaker.isOpen(state, "PostToolUse"), true)
+
+    await hook.dispatch({
+      cwd,
+      session_id: "dispatch-circuit",
+      hook_event_name: "PostToolUse",
+      tool_name: "Read",
+      tool_input: { file_path: "sdd/changes/cb/design.md" },
+    })
+    assert.strictEqual(hook.CircuitBreaker.isOpen(hook.loadState(cwd, "dispatch-circuit"), "PostToolUse"), true)
   }
 
   {

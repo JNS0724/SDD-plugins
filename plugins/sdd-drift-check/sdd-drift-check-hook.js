@@ -624,6 +624,14 @@ var PROJECT_LINKED_CODE_CAP = Number.parseInt(
   process.env.SDD_DRIFT_PROJECT_LINKED_CODE_CAP || "200",
   10
 );
+var CIRCUIT_MAX_FAILURES = Number.parseInt(
+  process.env.SDD_DRIFT_CIRCUIT_MAX_FAILURES || "5",
+  10
+);
+var CIRCUIT_COOLDOWN_MS = Number.parseInt(
+  process.env.SDD_DRIFT_CIRCUIT_COOLDOWN_MS || String(60 * 1e3),
+  10
+);
 var ACTIVE_CHANGE_DIR_TTL_MS = Number.parseInt(
   process.env.SDD_DRIFT_ACTIVE_TTL_MS || String(7 * 24 * 60 * 60 * 1e3),
   10
@@ -1090,6 +1098,37 @@ var normalizeState = (parsed) => {
   }
   pruneStateFiles(state);
   return state;
+};
+var circuitMaxFailures = () => Number.isFinite(CIRCUIT_MAX_FAILURES) ? Math.max(1, CIRCUIT_MAX_FAILURES) : 5;
+var circuitCooldownMs = () => Number.isFinite(CIRCUIT_COOLDOWN_MS) ? Math.max(1, CIRCUIT_COOLDOWN_MS) : 60 * 1e3;
+var CircuitBreaker = {
+  isOpen(state, hookName, now = Date.now()) {
+    const bucket = state?.circuitBreaker?.[hookName];
+    return Boolean(bucket && Number(bucket.openUntilMs || 0) > now);
+  },
+  recordFailure(state, hookName, now = Date.now()) {
+    if (!state?.circuitBreaker || !hookName) return false;
+    const bucket = state.circuitBreaker[hookName] || { failures: 0, openUntilMs: 0 };
+    bucket.failures = Number(bucket.failures || 0) + 1;
+    let opened = false;
+    if (bucket.failures >= circuitMaxFailures()) {
+      bucket.failures = 0;
+      bucket.openUntilMs = now + circuitCooldownMs();
+      bucket.openedAt = new Date(now).toISOString();
+      opened = true;
+    }
+    state.circuitBreaker[hookName] = bucket;
+    return opened;
+  },
+  recordSuccess(state, hookName) {
+    const bucket = state?.circuitBreaker?.[hookName];
+    if (!bucket) return false;
+    const changed = Number(bucket.failures || 0) !== 0 || Number(bucket.openUntilMs || 0) !== 0;
+    bucket.failures = 0;
+    bucket.openUntilMs = 0;
+    delete bucket.openedAt;
+    return changed;
+  }
 };
 var loadState = (cwd, sessionID) => {
   try {
@@ -3098,32 +3137,72 @@ var dispatch = async (input) => {
       strictBlock: STRICT_BLOCK,
       dtsContextActive
     });
-    if (input.hook_event_name === "UserPromptSubmit" || input.hook_event_name === "ChatMessage") {
-      handleUserPromptSubmit(input, handlerContext);
+    if (CircuitBreaker.isOpen(state, input.hook_event_name)) {
+      writeDiagnosticLog(cwd, {
+        event: "circuit_open_skip",
+        input: summarizeInput(input)
+      });
+      saveState(cwd, sessionID, state);
       return;
     }
-    if (input.hook_event_name === "PreCompact") {
-      handlePreCompact(input, handlerContext);
+    const recordCircuitSuccess = () => {
+      if (CircuitBreaker.recordSuccess(state, input.hook_event_name)) {
+        saveState(cwd, sessionID, state);
+        writeDiagnosticLog(cwd, {
+          event: "circuit_close",
+          input: summarizeInput(input)
+        });
+      }
+    };
+    try {
+      if (input.hook_event_name === "UserPromptSubmit" || input.hook_event_name === "ChatMessage") {
+        handleUserPromptSubmit(input, handlerContext);
+        recordCircuitSuccess();
+        return;
+      }
+      if (input.hook_event_name === "PreCompact") {
+        handlePreCompact(input, handlerContext);
+        recordCircuitSuccess();
+        return;
+      }
+      if (input.hook_event_name === "PreToolUse") {
+        handlePreToolUse(input, handlerContext);
+        recordCircuitSuccess();
+        return;
+      }
+      if (input.hook_event_name === "Stop") {
+        handleStop(input, handlerContext);
+        recordCircuitSuccess();
+        return;
+      }
+      if (input.hook_event_name === "PostToolUse") {
+        handlePostToolUse(input, handlerContext);
+        recordCircuitSuccess();
+        return;
+      }
+      persistAndReport();
+      writeDiagnosticLog(cwd, {
+        event: "ignored_event",
+        input: summarizeInput(input)
+      });
+      recordCircuitSuccess();
+      return;
+    } catch (err) {
+      const opened = CircuitBreaker.recordFailure(state, input.hook_event_name);
+      saveState(cwd, sessionID, state);
+      writeDiagnosticLog(cwd, {
+        event: "handler_exception",
+        input: summarizeInput(input),
+        error: limitString(err?.stack || err, 2e3)
+      });
+      if (opened) {
+        writeDiagnosticLog(cwd, {
+          event: "circuit_open",
+          input: summarizeInput(input)
+        });
+      }
       return;
     }
-    if (input.hook_event_name === "PreToolUse") {
-      handlePreToolUse(input, handlerContext);
-      return;
-    }
-    if (input.hook_event_name === "Stop") {
-      handleStop(input, handlerContext);
-      return;
-    }
-    if (input.hook_event_name === "PostToolUse") {
-      handlePostToolUse(input, handlerContext);
-      return;
-    }
-    persistAndReport();
-    writeDiagnosticLog(cwd, {
-      event: "ignored_event",
-      input: summarizeInput(input)
-    });
-    return;
   } finally {
     releaseFileLock(projectLock);
     releaseFileLock(stateLock);
@@ -3169,6 +3248,7 @@ if (require.main === module) {
     collectReviewTargets,
     computeProjectConditions,
     computeProjectState,
+    CircuitBreaker,
     codeReviewSignature,
     diagnosticLogPath,
     dispatch,
