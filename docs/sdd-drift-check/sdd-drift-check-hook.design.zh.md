@@ -1,8 +1,8 @@
 # `sdd-drift-check-hook.js` 方案设计
 
-**版本:** 1.1
+**版本:** 1.2
 **日期:** 2026-05-22
-**修订记录:** v1.1 — 修正状态机 peer-exists 与 per-doc review 规则；补齐 `PreToolUse` 提问检查点；统一 ProjectState 存储路径为 `<stateDir(cwd)>/project.json`；修正实施阶段依赖顺序
+**修订记录:** v1.2 — ProjectState 文档同步证据改名为 `docSyncs`；补齐 Dispatcher / CircuitBreaker / Attribution 实施记录；补充 R8 诊断日志采样约束
 **作者:** Claude（Opus 4.7）+ 用户协同
 **输入文档:** [sdd-drift-check-hook.prd.zh.md](./sdd-drift-check-hook.prd.zh.md) v1.2
 **版本锁定:** `oh-my-opencode@3.17.2` + `opencode-ai@1.2.27` + `@opencode-ai/plugin@1.2.27`
@@ -11,6 +11,7 @@
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.2 | 2026-05-22 | ProjectState 文档同步证据改名为 `docSyncs`；补齐 Dispatcher / CircuitBreaker / Attribution 实施记录；补充 R8 诊断日志采样约束 |
 | v1.1 | 2026-05-22 | 修正状态机 peer-exists 与 per-doc review 规则；补齐 `PreToolUse` 提问检查点；统一 ProjectState 存储路径；修正实施阶段依赖 |
 | v1.0 | 2026-05-22 | 初版方案设计 |
 
@@ -178,6 +179,9 @@ interface ChangeDir {
 
   linkedCode: LinkedCodeRecord[]
 
+  // 跨会话 doc-doc 同步证据，用于避免 design↔tasks ping-pong
+  docSyncs: Record<"design" | "tasks", DocSyncRecord>
+
   // FR3 完成基线
   alignedAt?: string                          // ISO
   alignedAtMs?: number                        // 快速比较用
@@ -206,6 +210,12 @@ interface LinkedCodeRecord {
   lastEditedMs: number
   lastEditedSession: string
   linkedAt: number                            // 首次归属到该 change-dir 的时刻
+}
+
+interface DocSyncRecord {
+  sourceFile: "design.md" | "tasks.md"
+  sourceEditedMs: number
+  targetEditedMs: number
 }
 
 type ChangeDirState =
@@ -253,6 +263,7 @@ loadProjectState(cwd):
         relDir, archived: detectArchived(dir),
         docs: { ... FS mtime 初始化 ... },
         linkedCode: [],
+        docSyncs: {},
         conditions: computeConditions(...),
         state: computeState(...),
       }
@@ -377,6 +388,12 @@ const Actions = {
 ```
 
 执行顺序保证：LOG → SAVE_PROJECT → SAVE_SESSION → REFRESH_REPORT → EMIT_MESSAGE。这样即便 EMIT_MESSAGE 后进程崩，state 也已落盘。
+
+### 5.4 R8 诊断日志采样
+
+`writeDiagnosticLog` 对高风险事件维护进程内滚动窗口计数，目前采样事件包括 `handler_exception`、`hook_exception`、`circuit_open`、`circuit_open_skip`。窗口默认 60 秒，可用 `SDD_DRIFT_LOG_SUMMARY_WINDOW_MS` 调整。
+
+当下一次高风险事件进入新窗口时，先写入一行 `diagnostic_summary`，包含上一窗口内各事件名计数，再写当前事件。普通事件仍逐条记录，不进入采样计数，避免改变排查细节。
 
 ---
 

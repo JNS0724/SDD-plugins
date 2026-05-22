@@ -1279,6 +1279,54 @@ try {
   }
 
   {
+    const summaryState = { windowStartMs: 0, counts: {} }
+    assert.deepStrictEqual(
+      hook.recordDiagnosticSummaryEvent(
+        summaryState,
+        "handler_exception",
+        1000,
+        100,
+        new Set(["handler_exception", "circuit_open"])
+      ),
+      []
+    )
+    assert.deepStrictEqual(
+      hook.recordDiagnosticSummaryEvent(
+        summaryState,
+        "circuit_open",
+        1050,
+        100,
+        new Set(["handler_exception", "circuit_open"])
+      ),
+      []
+    )
+    const summaries = hook.recordDiagnosticSummaryEvent(
+      summaryState,
+      "handler_exception",
+      1200,
+      100,
+      new Set(["handler_exception", "circuit_open"])
+    )
+    assert.strictEqual(summaries.length, 1)
+    assert.strictEqual(summaries[0].event, "diagnostic_summary")
+    assert.deepStrictEqual(summaries[0].counts, {
+      handler_exception: 1,
+      circuit_open: 1,
+    })
+    assert.deepStrictEqual(summaryState.counts, { handler_exception: 1 })
+    assert.deepStrictEqual(
+      hook.recordDiagnosticSummaryEvent(
+        summaryState,
+        "posttooluse_no_output",
+        1300,
+        100,
+        new Set(["handler_exception", "circuit_open"])
+      ),
+      []
+    )
+  }
+
+  {
     const cwd = path.join(tmpRoot, "diagnostic-log-retention")
     fs.mkdirSync(cwd, { recursive: true })
     const logPath = hook.diagnosticLogPath(cwd)
@@ -1621,7 +1669,7 @@ try {
 
     edit(state, design)
     hook.applySessionToProject(cwd, project, state, "project-peer-session")
-    project.changeDirs["sdd/changes/project-peer"].peerSyncs.design = {
+    project.changeDirs["sdd/changes/project-peer"].docSyncs.design = {
       sourceFile: "tasks.md",
       sourceEditedMs: Date.now() * 1000,
       targetEditedMs: Date.now() * 1000 + 1,
@@ -1648,6 +1696,58 @@ try {
     const reloaded = hook.loadProjectState(cwd)
     assert.ok(reloaded.changeDirs["sdd/changes/persist"])
     assert.match(hook.projectStatePath(cwd).replace(/\\/g, "/"), /sdd-drift-hook-state\/project\.json$/)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "project-state-doc-sync-migration")
+    const dir = path.join(cwd, "sdd", "changes", "migrate")
+    write(path.join(dir, "design.md"), "# Design\n")
+    write(path.join(dir, "tasks.md"), "# Tasks\n")
+
+    const projectPath = hook.projectStatePath(cwd)
+    fs.mkdirSync(path.dirname(projectPath), { recursive: true })
+    fs.writeFileSync(
+      projectPath,
+      JSON.stringify(
+        {
+          version: 1,
+          lastUpdatedAt: new Date().toISOString(),
+          changeDirs: {
+            "sdd/changes/migrate": {
+              relDir: "sdd/changes/migrate",
+              archived: false,
+              docs: {
+                design: { exists: true, lastEditedMs: 200, lastReviewedMs: 200 },
+                tasks: { exists: true, lastEditedMs: 300, lastReviewedMs: 300 },
+              },
+              linkedCode: [],
+              alignedAt: null,
+              alignedAtMs: 0,
+              peerSyncs: {
+                design: {
+                  sourceFile: "tasks.md",
+                  sourceEditedMs: 300,
+                  targetEditedMs: 301,
+                },
+              },
+            },
+          },
+        },
+        null,
+        2
+      )
+    )
+
+    const project = hook.loadProjectState(cwd)
+    const changeDir = project.changeDirs["sdd/changes/migrate"]
+    assert.strictEqual(changeDir.peerSyncs, undefined)
+    assert.strictEqual(changeDir.docSyncs.design.sourceFile, "tasks.md")
+    assert.strictEqual(hook.computeProjectConditions(changeDir).tasksAheadOfDesign, false)
+
+    hook.saveProjectState(cwd, project)
+    const raw = fs.readFileSync(projectPath, "utf8")
+    assert.match(raw, /"docSyncs"/)
+    assert.doesNotMatch(raw, /"peerSyncs"/)
   }
 
   {

@@ -677,6 +677,10 @@ var DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
 var DIAGNOSTIC_LOG_RETENTION_DAYS = Number.parseFloat(
   process.env.SDD_DRIFT_LOG_RETENTION_DAYS || "3"
 );
+var DIAGNOSTIC_SUMMARY_WINDOW_MS = Number.parseInt(
+  process.env.SDD_DRIFT_LOG_SUMMARY_WINDOW_MS || String(60 * 1e3),
+  10
+);
 var DTS_CONTEXT_SKIP = process.env.SDD_DRIFT_DTS_SKIP !== "0";
 var DTS_CONTEXT_OVERRIDE = String(process.env.SDD_DRIFT_DTS_CONTEXT || "").toLowerCase();
 var TOOL_EVENT_CAP = 200;
@@ -788,6 +792,12 @@ var ACTIVE_SDD_ALIGNMENT_RULES = [
   "If you choose no SDD edit, explicitly state which active design.md/tasks.md files you reviewed and why the code change has no design or task impact.",
   "Modify only content relevant to the current code batch; do not invent future requirements or broaden the scope."
 ];
+var DIAGNOSTIC_SUMMARY_EVENTS = /* @__PURE__ */ new Set([
+  "handler_exception",
+  "hook_exception",
+  "circuit_open",
+  "circuit_open_skip"
+]);
 var ATTRIBUTION_REVIEW_RULES = [
   "Purely mechanical changes (formatting, comment-only edits, test-scaffolding, dependency bumps, lint fixes) do not require any SDD document update. State this conclusion explicitly in your response and continue.",
   "If the code change implements behavior already described in a candidate change-dir's design.md, and that change-dir's tasks.md already reflects the implementation, no SDD action is needed.",
@@ -950,6 +960,34 @@ var summarizeGaps = (cwd, peerGaps, codeGaps) => ({
     needsConfirmation: Boolean(gap.needsConfirmation)
   }))
 });
+var diagnosticSummaryState = {
+  windowStartMs: 0,
+  counts: {}
+};
+var diagnosticSummaryWindowMs = (value = DIAGNOSTIC_SUMMARY_WINDOW_MS) => Number.isFinite(value) && value > 0 ? value : 60 * 1e3;
+var diagnosticSummaryLine = (state, windowMs) => ({
+  event: "diagnostic_summary",
+  windowStart: new Date(state.windowStartMs).toISOString(),
+  windowEnd: new Date(state.windowStartMs + windowMs).toISOString(),
+  counts: { ...state.counts || {} }
+});
+var recordDiagnosticSummaryEvent = (state, eventName, nowMs = Date.now(), windowMsValue = DIAGNOSTIC_SUMMARY_WINDOW_MS, trackedEvents = DIAGNOSTIC_SUMMARY_EVENTS) => {
+  if (!trackedEvents.has(eventName)) return [];
+  const windowMs = diagnosticSummaryWindowMs(windowMsValue);
+  const summaries = [];
+  if (!state.windowStartMs) {
+    state.windowStartMs = nowMs;
+    state.counts = {};
+  } else if (nowMs >= state.windowStartMs + windowMs) {
+    if (Object.keys(state.counts || {}).length > 0) {
+      summaries.push(diagnosticSummaryLine(state, windowMs));
+    }
+    state.windowStartMs = nowMs;
+    state.counts = {};
+  }
+  state.counts[eventName] = Number(state.counts[eventName] || 0) + 1;
+  return summaries;
+};
 var rotateDiagnosticLog = (target) => {
   const maxBytes = Number.isFinite(DIAGNOSTIC_LOG_MAX_BYTES) ? Math.max(64 * 1024, DIAGNOSTIC_LOG_MAX_BYTES) : 2 * 1024 * 1024;
   try {
@@ -1074,15 +1112,19 @@ var writeDiagnosticLog = (cwd, event) => {
     if (!lock) return;
     cleanupDiagnosticLogs(target);
     rotateDiagnosticLog(target);
-    fs.appendFileSync(
-      target,
-      `${JSON.stringify({
-        ts: (/* @__PURE__ */ new Date()).toISOString(),
+    const nowMs = Date.now();
+    const lines = [
+      ...recordDiagnosticSummaryEvent(diagnosticSummaryState, event?.event, nowMs),
+      event
+    ].map(
+      (entry) => JSON.stringify({
+        ts: new Date(nowMs).toISOString(),
         pid: process.pid,
-        ...event
-      })}
-`
+        ...entry
+      })
     );
+    fs.appendFileSync(target, `${lines.join("\n")}
+`);
   } catch {
   } finally {
     releaseFileLock(lock);
@@ -1976,7 +2018,7 @@ var createChangeDirFromFs = (cwd, dir) => {
       codeAheadOfDocs: false,
       codePendingDocs: []
     },
-    peerSyncs: {}
+    docSyncs: {}
   };
   changeDir.conditions = computeProjectConditions(changeDir);
   changeDir.state = computeProjectState(changeDir.conditions, changeDir.archived);
@@ -2011,8 +2053,9 @@ var normalizeProjectChangeDir = (cwd, relDirValue, value) => {
     })) : [],
     alignedAt: typeof value?.alignedAt === "string" ? value.alignedAt : null,
     alignedAtMs: Number.isFinite(value?.alignedAtMs) ? Number(value.alignedAtMs) : 0,
-    peerSyncs: value?.peerSyncs && typeof value.peerSyncs === "object" ? value.peerSyncs : {}
+    docSyncs: value?.docSyncs && typeof value.docSyncs === "object" ? value.docSyncs : value?.peerSyncs && typeof value.peerSyncs === "object" ? value.peerSyncs : {}
   };
+  delete changeDir.peerSyncs;
   changeDir.conditions = computeProjectConditions(changeDir);
   changeDir.state = computeProjectState(changeDir.conditions, changeDir.archived);
   return changeDir;
@@ -2030,8 +2073,9 @@ var computeProjectConditions = (dir) => {
   const designReviewed = Math.max(designEdited, Number(design.lastReviewedMs || 0));
   const tasksReviewed = Math.max(tasksEdited, Number(tasks.lastReviewedMs || 0));
   const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)));
-  const tasksSyncedFromDesign = dir.peerSyncs?.tasks?.sourceFile === DESIGN_FILE && Number(dir.peerSyncs.tasks.sourceEditedMs || 0) >= designEdited && Number(dir.peerSyncs.tasks.targetEditedMs || 0) >= Number(dir.peerSyncs.tasks.sourceEditedMs || 0);
-  const designSyncedFromTasks = dir.peerSyncs?.design?.sourceFile === TASKS_FILE && Number(dir.peerSyncs.design.sourceEditedMs || 0) >= tasksEdited && Number(dir.peerSyncs.design.targetEditedMs || 0) >= Number(dir.peerSyncs.design.sourceEditedMs || 0);
+  const docSyncs = dir.docSyncs || {};
+  const tasksSyncedFromDesign = docSyncs.tasks?.sourceFile === DESIGN_FILE && Number(docSyncs.tasks.sourceEditedMs || 0) >= designEdited && Number(docSyncs.tasks.targetEditedMs || 0) >= Number(docSyncs.tasks.sourceEditedMs || 0);
+  const designSyncedFromTasks = docSyncs.design?.sourceFile === TASKS_FILE && Number(docSyncs.design.sourceEditedMs || 0) >= tasksEdited && Number(docSyncs.design.targetEditedMs || 0) >= Number(docSyncs.design.sourceEditedMs || 0);
   const reviewTargets = [
     designExists ? [DESIGN_FILE, designReviewed] : null,
     tasksExists ? [TASKS_FILE, tasksReviewed] : null
@@ -2243,6 +2287,7 @@ var updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record) =
   const dir = project.changeDirs[relDirValue] || createChangeDirFromFs(cwd, doc.dir);
   const key = docKeyForFile(doc.file);
   if (!key) return;
+  dir.docSyncs = dir.docSyncs && typeof dir.docSyncs === "object" ? dir.docSyncs : {};
   const edited = Number(record.editedSeq || 0) > 0;
   const eventMs = eventMsForFileRecord(record, edited);
   const target = {
@@ -2267,25 +2312,25 @@ var updateProjectDocFromRecord = (cwd, project, state, sessionID, doc, record) =
     const sessionPeerSync = getPeerSyncBucket(state, doc.dir, false)?.files?.[doc.file];
     const sessionSyncedFromDesign = key === "tasks" && sessionPeerSync?.sourceFile === DESIGN_FILE;
     const sessionSyncedFromTasks = key === "design" && sessionPeerSync?.sourceFile === TASKS_FILE;
-    const tasksWasSyncedFromPriorDesign = key === "design" && dir.peerSyncs?.tasks?.sourceFile === DESIGN_FILE;
-    const designWasSyncedFromPriorTasks = key === "tasks" && dir.peerSyncs?.design?.sourceFile === TASKS_FILE;
-    if (designWasSyncedFromPriorTasks) delete dir.peerSyncs.design;
-    if (tasksWasSyncedFromPriorDesign) delete dir.peerSyncs.tasks;
+    const tasksWasSyncedFromPriorDesign = key === "design" && dir.docSyncs?.tasks?.sourceFile === DESIGN_FILE;
+    const designWasSyncedFromPriorTasks = key === "tasks" && dir.docSyncs?.design?.sourceFile === TASKS_FILE;
+    if (designWasSyncedFromPriorTasks) delete dir.docSyncs.design;
+    if (tasksWasSyncedFromPriorDesign) delete dir.docSyncs.tasks;
     if (key === "tasks" && (sessionSyncedFromDesign || previousConditions.designAheadOfTasks || designEditedInSession) && !(!sessionSyncedFromDesign && designWasSyncedFromPriorTasks)) {
-      dir.peerSyncs.tasks = {
+      dir.docSyncs.tasks = {
         sourceFile: DESIGN_FILE,
         sourceEditedMs: designEdited,
         targetEditedMs: target.lastEditedMs
       };
     } else if (key === "design" && (sessionSyncedFromTasks || previousConditions.tasksAheadOfDesign || tasksEditedInSession) && !(!sessionSyncedFromTasks && tasksWasSyncedFromPriorDesign)) {
-      dir.peerSyncs.design = {
+      dir.docSyncs.design = {
         sourceFile: TASKS_FILE,
         sourceEditedMs: tasksEdited,
         targetEditedMs: target.lastEditedMs
       };
     } else {
-      if (key === "tasks") delete dir.peerSyncs.design;
-      if (key === "design") delete dir.peerSyncs.tasks;
+      if (key === "tasks") delete dir.docSyncs.design;
+      if (key === "design") delete dir.docSyncs.tasks;
     }
     project.activeChangeDir = relDirValue;
     project.activeUntilMs = Date.now() + ACTIVE_CHANGE_DIR_TTL_MS;
@@ -3517,6 +3562,7 @@ if (require.main === module) {
     pruneStateFiles,
     refreshAlignedBaseline,
     recordFile,
+    recordDiagnosticSummaryEvent,
     resolveTranscriptPath,
     refreshReport,
     releaseFileLock,
