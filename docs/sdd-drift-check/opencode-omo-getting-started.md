@@ -56,7 +56,9 @@ sdd/changes/<change-id>/
 OpenCode + OMO 建议启用：
 
 - `UserPromptSubmit`：捕获用户原始意图，用于识别 DTS / 问题单上下文。
+- `PreCompact`：上下文压缩前注入未完成的 SDD 状态摘要。
 - `PostToolUse`：工具调用后提醒模型，OpenCode 场景最可靠。
+- `PreToolUse`：只拦截提问/确认类工具，避免模型把“要不要提交/继续”抛给用户前漏掉 SDD 检查。
 - `Stop`：模型准备结束时再做一次收尾检查。
 
 不要只依赖 Stop。真实验证里，OpenCode + OMO 的 Stop-only 不能稳定让模型继续当轮处理。`PostToolUse` 才是当前更可靠的级联提醒点。
@@ -125,9 +127,30 @@ Set-Content .opencode\plugin\oh-my-opencode.ts 'export { default } from "oh-my-o
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",
@@ -151,7 +174,16 @@ Set-Content .opencode\plugin\oh-my-opencode.ts 'export { default } from "oh-my-o
 }
 ```
 
-`PostToolUse.matcher` 不建议写 `*`。文件工具和 subagent 结果工具够用，也能减少长会话里的噪音。
+`PostToolUse.matcher` 不建议写 `*`。文件工具、subagent 结果工具、提问/确认工具够用，也能减少长会话里的噪音。
+
+这些 matcher 不要漏：
+
+```text
+Task|task|call_omo_agent|background_output|delegate_task
+Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm
+```
+
+第一行让 OMO plan/task/subagent 返回后还能触发 SDD 检查；第二行用于捕获“要不要提交/继续”这类交接点。
 
 ## 建议忽略文件
 
@@ -170,6 +202,22 @@ Set-Content .opencode\plugin\oh-my-opencode.ts 'export { default } from "oh-my-o
 ```
 
 `.sdd-drift-report.md` 留在项目根目录，是为了让人能看到待确认项。
+
+安装后先确认 hook 有被调用：
+
+```powershell
+Get-ChildItem -Force .git\sdd-drift-hook-state
+Get-Content .git\sdd-drift-hook-state\sdd-drift-check.log.jsonl -Tail 20
+```
+
+如果项目不是 Git 仓库，再看：
+
+```powershell
+Get-ChildItem -Force .sdd-drift-hook-state
+Get-ChildItem -Force "$env:TEMP\sdd-drift-check"
+```
+
+正常日志会出现 `hook_start`、`user_prompt_context_captured`、`posttooluse_no_output`、`emit_subagent_checkpoint_enforcement` 或 `stop_allow_no_pending` 这类事件。
 
 ## 快速验证
 

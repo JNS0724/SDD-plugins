@@ -217,8 +217,8 @@ Create `.opencode/oh-my-openagent.jsonc`:
 
 ### Claude Code Or Claude-Compatible Hook Config
 
-Claude Code Stop-only config, with `UserPromptSubmit` context capture and no
-`PostToolUse`:
+For Claude Code, this minimal Stop-only config captures `UserPromptSubmit`
+context and does not enable `PostToolUse`:
 
 ```powershell
 New-Item -ItemType Directory -Force .claude
@@ -254,11 +254,14 @@ New-Item -ItemType Directory -Force .claude
 }
 ```
 
-Reliable OpenCode/OMO cascade mode, with `PostToolUse` enabled and `Stop`
-kept as a best-effort final continuation checkpoint. `PreToolUse` is only used
-for question-like handoff tools, so a model that asks whether to commit or
-continue is denied that question call and receives the pending SDD work as the
-tool-denial reason before control returns to the user:
+For OpenCode through `oh-my-opencode`, use the full cascade config below.
+It enables `PostToolUse` for reliable model-visible reminders, keeps `Stop`
+as a best-effort final continuation checkpoint, captures prior-session drift
+through `UserPromptSubmit`, and adds `PreCompact` so context compaction can
+carry SDD state forward. `PreToolUse` is only used for question-like handoff
+tools, so a model that asks whether to commit or continue is denied that
+question call and receives the pending SDD work as the tool-denial reason before
+control returns to the user:
 
 ```json
 {
@@ -273,9 +276,19 @@ tool-denial reason before control returns to the user:
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",
@@ -286,7 +299,7 @@ tool-denial reason before control returns to the user:
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",
@@ -313,8 +326,9 @@ tool-denial reason before control returns to the user:
 Use an explicit `PostToolUse` matcher for OpenCode through oh-my-opencode:
 include file tools plus subagent result tools such as `Task`, `task`,
 `call_omo_agent`, `background_output`, and `delegate_task`; also include
-question-like tools such as `question` / `AskUserQuestion` so commit-or-continue
-handoffs become SDD checkpoints. Avoid `matcher: "*"` unless you are debugging,
+question-like tools such as `question` / `AskUserQuestion` / `Confirm` so
+commit-or-continue handoffs become SDD checkpoints. Avoid `matcher: "*"` unless
+you are debugging,
 because it makes every tool result run the command hook and can amplify
 oh-my-opencode/Bun instability in long sessions. File tools let the hook record
 actual Read/Edit/Write state, subagent result tools provide a checkpoint where
@@ -332,6 +346,26 @@ The hook treats
 as review evidence. It deduplicates repeated file-tool `PostToolUse` calls by
 `tool_use_id`, so having a user-level and project-level hook config should not
 create duplicate enforcement or design/tasks ping-pong.
+
+After installing in a real project, verify that the hook is being called:
+
+```powershell
+Get-ChildItem -Force .git\sdd-drift-hook-state
+Get-Content .git\sdd-drift-hook-state\sdd-drift-check.log.jsonl -Tail 20
+```
+
+If the project has no `.git` directory, check the fallback locations:
+
+```powershell
+Get-ChildItem -Force .sdd-drift-hook-state
+Get-ChildItem -Force "$env:TEMP\sdd-drift-check"
+```
+
+Useful diagnostic events include `hook_start`,
+`user_prompt_context_captured`, `posttooluse_no_output`,
+`emit_subagent_checkpoint_enforcement`, and `stop_allow_no_pending`. If none
+of them appear after an OpenCode/OMO conversation, the hook bridge or command
+path is not wired correctly.
 
 Code-ahead-of-doc drift is batched at session level. The first code edit that
 gets ahead of SDD emits a full model-visible deferred review reminder. The
