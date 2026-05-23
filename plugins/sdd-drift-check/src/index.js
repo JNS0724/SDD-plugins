@@ -2335,12 +2335,42 @@ const formatCarryOverReminder = (project, options = {}) => {
   ].join("\n")
 }
 
-const buildPreCompactSummary = (project) => {
+const buildPreCompactSummary = (cwdOrProject, stateOrNull = null, projectOrNull = null) => {
+  const legacyCall = typeof cwdOrProject !== "string"
+  const cwd = legacyCall ? "" : cwdOrProject
+  const state = legacyCall ? null : stateOrNull
+  const project = legacyCall ? cwdOrProject : projectOrNull
   const driftDirs = collectCarryOverDrift(project)
-  if (!driftDirs.length) return ""
+  const pending = cwd && state ? buildQuestionCheckpointEnforcement(cwd, state, project) : null
+  const checkpointActive =
+    Boolean(pending?.signature) &&
+    state?.subagentCheckpointNotice?.active &&
+    state.subagentCheckpointNotice.signature === pending.signature
+
+  if (!driftDirs.length && !checkpointActive) return ""
+
+  if (checkpointActive) {
+    return [
+      "SDD drift checkpoint preserved across compaction:",
+      "Before compaction, the assistant was blocked from asking the user or handing control back because SDD synchronization/review was pending.",
+      "After compaction resumes, continue by handling this SDD work before other tasks, commit questions, or final answers.",
+      "",
+      pending.message,
+      ...(driftDirs.length
+        ? [
+            "",
+            "Active SDD change-dir states:",
+            ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`),
+          ]
+        : []),
+    ].join("\n")
+  }
+
   return [
     "SDD drift summary preserved across compaction:",
     ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`),
+    "",
+    "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed.",
   ].join("\n")
 }
 

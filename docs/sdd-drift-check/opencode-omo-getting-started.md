@@ -63,6 +63,49 @@ OpenCode + OMO 建议启用：
 
 不要只依赖 Stop。真实验证里，OpenCode + OMO 的 Stop-only 不能稳定让模型继续当轮处理。`PostToolUse` 才是当前更可靠的级联提醒点。
 
+## 使用后会看到什么
+
+这个插件大部分时间应该是安静的。它只在模型准备把代码、SDD 文档或会话控制权推进到下一个阶段时插一句“先把 SDD 对齐”。
+
+| 使用场景 | 你可能看到的现象 | 这是不是问题 |
+| --- | --- | --- |
+| 项目没有 `sdd/` 或 `.sdd/` | 没有提醒，通常也不会有业务状态变化 | 正常，插件没有 SDD 工作区可检查 |
+| 新开或继续一个会话 | 一般无感；如果上次有未处理 drift，模型开局可能收到 carry-over 提醒 | 正常，这是跨会话恢复 |
+| 模型改了普通代码 | 工具结果后，模型可能被提醒先读 `design.md` / `tasks.md` 做评审 | 正常，属于 `PostToolUse` 提醒 |
+| 模型改了 `design.md` | 如果同目录 `tasks.md` 已存在，模型会被提醒同步 `tasks.md` | 正常，属于文档 peer 同步 |
+| 模型改了 `tasks.md` | 如果同目录 `design.md` 已存在，模型会被提醒同步 `design.md` | 正常，属于文档 peer 同步 |
+| OMO plan/task/subagent 改了代码 | 子 agent 返回后，主 agent 可能收到 SDD checkpoint 提醒 | 正常，但要求 matcher 包含 `Task|task|call_omo_agent|background_output|delegate_task` |
+| 模型准备问“要不要提交/继续” | 可能出现红字 `Error`，内容以 `SDD drift question checkpoint` 开头 | 通常正常，这是 `PreToolUse` 主动 deny 这个提问工具，让模型先继续 SDD 审查 |
+| checkpoint 后立刻发生上下文压缩 | 压缩摘要会保留未完成 SDD checkpoint；恢复后模型应先继续 SDD 审查 | 正常；如果恢复后仍忘记，查看日志确认 `PreCompact` 是否触发 |
+| 模型准备结束 | `Stop` 可能做最后一次兜底提醒；OpenCode 里它不一定能让模型继续当轮执行 | 正常限制，可靠路径仍是 `PostToolUse` |
+| 模型评审后认为文档不用改 | 可以结束；可能留下 `.sdd-drift-report.md` 供人确认 | 正常，最终由人决定是否接受 |
+| 问题单 / DTS 修复 | 可设置 `SDD_DRIFT_DTS_CONTEXT=1` 跳过代码领先文档提醒 | 正常例外，但直接改 SDD 文档仍会触发 peer 同步 |
+
+红字 `SDD drift question checkpoint` 容易误导。它不是 `console.error`，也不是 JS 异常；它是 hook 返回了结构化的 `permissionDecision: "deny"`，OpenCode/OMO 把“工具被拒绝”渲染成红色。它的目标是阻止模型在 SDD 还没处理时把问题抛给你。
+
+需要当成问题排查的情况是：
+
+- 红字后模型没有继续 SDD 审查，也没有任何后续工具调用。
+- 同一个 checkpoint 反复出现，模型一直绕不开。
+- 日志里出现 `handler_exception`、`circuit_open`，或红字内容是 JS stack trace。
+
+排查时先看：
+
+```powershell
+Get-Content .git\sdd-drift-hook-state\sdd-drift-check.log.jsonl -Tail 40
+```
+
+常见正常事件：
+
+```text
+emit_question_checkpoint_enforcement
+precompact_summary_emit
+emit_subagent_checkpoint_enforcement
+emit_peer_enforcement
+emit_code_enforcement
+stop_allow_no_pending
+```
+
 ## 安装
 
 ### 1. 安装 OMO
@@ -218,6 +261,8 @@ Get-ChildItem -Force "$env:TEMP\sdd-drift-check"
 ```
 
 正常日志会出现 `hook_start`、`user_prompt_context_captured`、`posttooluse_no_output`、`emit_subagent_checkpoint_enforcement` 或 `stop_allow_no_pending` 这类事件。
+
+如果 `SDD drift question checkpoint` 刚出现就遇到上下文压缩，`PreCompact` 会把这个未完成检查写入压缩上下文。恢复后模型应先继续 SDD 审查/同步，再处理提交、继续任务或最终回复。
 
 ## 快速验证
 

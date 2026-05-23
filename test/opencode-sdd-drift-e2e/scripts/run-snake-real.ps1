@@ -206,9 +206,29 @@ Set-ContentWithRetry -LiteralPath (Join-Path $workRoot ".opencode\oh-my-openagen
 $settings = @"
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",
@@ -219,7 +239,7 @@ $settings = @"
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",

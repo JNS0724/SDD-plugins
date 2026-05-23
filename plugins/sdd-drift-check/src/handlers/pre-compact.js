@@ -1,7 +1,7 @@
 const handlePreCompact = (input, ctx) => {
   const { state, project } = ctx
   if (project) ctx.applySessionToProject(ctx.cwd, project, state, ctx.sessionID)
-  const summary = ctx.buildPreCompactSummary(project)
+  const summary = ctx.buildPreCompactSummary(ctx.cwd, state, project)
   ctx.persist()
   ctx.writeDiagnosticLog(ctx.cwd, {
     event: summary ? "precompact_summary_emit" : "precompact_no_pending",

@@ -367,6 +367,11 @@ Useful diagnostic events include `hook_start`,
 of them appear after an OpenCode/OMO conversation, the hook bridge or command
 path is not wired correctly.
 
+If compaction happens immediately after a question checkpoint, `PreCompact`
+preserves that active checkpoint explicitly. The compacted context tells the
+model to resume the interrupted SDD review/synchronization before continuing
+other work, asking commit/continue questions, or producing the final answer.
+
 Code-ahead-of-doc drift is batched at session level. The first code edit that
 gets ahead of SDD emits a full model-visible deferred review reminder. The
 review target set is every existing `design.md` and `tasks.md` under active

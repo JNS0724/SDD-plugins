@@ -227,9 +227,29 @@ $ohmyConfig = @'
 $hookCommand = "node ../../plugins/sdd-drift-check/sdd-drift-check-hook.js"
 $hooksJson = if ($HookMode -eq "posttooluse-and-stop") {
   @"
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hookCommand"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hookCommand"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",
@@ -240,7 +260,7 @@ $hooksJson = if ($HookMode -eq "posttooluse-and-stop") {
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           {
             "type": "command",

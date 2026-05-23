@@ -199,9 +199,16 @@ $settings = @"
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node $hookPath" }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
-        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           { "type": "command", "command": "node $hookPath" }
         ]
@@ -209,7 +216,7 @@ $settings = @"
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion",
+        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
         "hooks": [
           { "type": "command", "command": "node $hookPath" }
         ]

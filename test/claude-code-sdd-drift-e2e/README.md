@@ -57,9 +57,11 @@ The script uses Claude Code print mode with project settings only:
 claude --print --output-format stream-json --include-hook-events --setting-sources project
 ```
 
-The checked-in `.claude/settings.json` enables `UserPromptSubmit`, `PreToolUse`,
-`PostToolUse`, and `Stop`. `UserPromptSubmit` lets the hook persist issue-ticket
-context before later tool events. `PreToolUse` only matches question-like
+The checked-in `.claude/settings.json` enables `UserPromptSubmit`,
+`PreCompact`, `PreToolUse`, `PostToolUse`, and `Stop`. `UserPromptSubmit` lets
+the hook persist issue-ticket context before later tool events. `PreCompact`
+preserves active SDD drift or question-checkpoint state across compaction.
+`PreToolUse` only matches question-like
 handoff tools, so a pending SDD reminder can deny the question call before the
 model asks the user about commit/next steps. `PostToolUse` uses an explicit
 matcher for file tools, subagent result checkpoints, and question tools,

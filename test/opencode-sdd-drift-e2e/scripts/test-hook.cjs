@@ -468,6 +468,10 @@ try {
     assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), true)
     hook.markSubagentCheckpointNoticeEmitted(state, pending, "question")
     assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), false)
+    const compactSummary = hook.buildPreCompactSummary(cwd, state, null)
+    assert.match(compactSummary, /SDD drift checkpoint preserved across compaction/)
+    assert.match(compactSummary, /After compaction resumes/)
+    assert.match(compactSummary, /SDD drift question checkpoint/)
 
     hook.recordFile(state, design, false)
     hook.recordFile(state, tasks, false)
@@ -936,7 +940,10 @@ try {
         state: hook.emptyState(),
         project: {},
         applySessionToProject: () => calls.push("apply"),
-        buildPreCompactSummary: () => "compact summary",
+        buildPreCompactSummary: (...args) => {
+          calls.push(`summary_args:${args.length}`)
+          return "compact summary"
+        },
         persist: () => calls.push("persist"),
         writeDiagnosticLog: (_cwd, event) => calls.push(`log:${event.event}`),
         summarizeInput: () => ({}),
@@ -947,6 +954,7 @@ try {
     )
     assert.deepStrictEqual(calls, [
       "apply",
+      "summary_args:3",
       "persist",
       "log:precompact_summary_emit",
       "out:compact summary",
