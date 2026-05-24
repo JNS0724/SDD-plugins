@@ -1063,7 +1063,7 @@ J13 fixture（multi-dir，LLM 选 X）:
 既有（保留）：
 - `hook_start` / `hook_exception`
 - `stop_allow_no_pending` / `stop_allow_max_blocks` / `stop_block_emit` / `stop_allow_review_confirmed`
-- `emit_peer_enforcement` / `emit_peer_stage_reminder` / `emit_code_enforcement`
+- `emit_peer_enforcement` / `emit_peer_stage_reminder` / `emit_code_tool_reminder`
 - `emit_subagent_checkpoint_enforcement`
 - `ignored_*`
 

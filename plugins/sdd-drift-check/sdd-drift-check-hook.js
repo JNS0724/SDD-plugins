@@ -308,7 +308,8 @@ var require_post_tool_use = __commonJS({
         return;
       }
       if (project) ctx.applySessionToProject(cwd, project, state, ctx.sessionID);
-      const attributionReviewPrompts = ctx.takeAttributionReviewPrompts(state);
+      const codeToolReminderEnabled = ctx.codeReviewToolMaxReminders() > 0 && ctx.codeReviewToolSessionMaxReminders() > 0 && ctx.codeDriftToolSessionEmissionCount(state) < ctx.codeReviewToolSessionMaxReminders();
+      const attributionReviewPrompts = codeToolReminderEnabled ? ctx.takeAttributionReviewPrompts(state) : [];
       const warnings = isEdit ? ctx.drift(cwd, abs, state) : [];
       const peerGaps = ctx.collectCombinedPeerGaps(cwd, state, project);
       const hardPeerGaps = ctx.collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false });
@@ -326,8 +327,9 @@ var require_post_tool_use = __commonJS({
         ctx.buildSubagentCheckpointEnforcement(cwd, state, project)
       );
       const emitAttributionReview = attributionReviewPrompts.length > 0;
-      const emitCodeGap = !hardPeerGaps.length && (emitAttributionReview || ctx.shouldEmitCodeDriftNotice(state, codeGaps));
+      const emitCodeGap = !hardPeerGaps.length && codeToolReminderEnabled && (emitAttributionReview || ctx.shouldEmitCodeDriftNotice(state, codeGaps));
       const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && ctx.isCodeDriftNoticeSuppressed(state, codeGaps);
+      const deferredCodeGap = !hardPeerGaps.length && !emitCodeGap && codeGaps.some((gap) => !gap.reviewReady) && !codeToolReminderEnabled;
       const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0;
       const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : [];
       const peerSignature = emitPeerGaps.length ? ctx.peerDriftSignature(emitPeerGaps) : null;
@@ -357,7 +359,7 @@ var require_post_tool_use = __commonJS({
         ctx.emitEnforcement(input, ctx.buildToolEnforcement(emitPeerGaps, { compact: compactPeerGap }));
       } else if (emitCodeGap) {
         ctx.writeDiagnosticLog(cwd, {
-          event: emitAttributionReview ? "emit_attribution_review" : compactCodeGap ? "emit_code_reminder_compact" : "emit_code_enforcement",
+          event: emitAttributionReview ? "emit_attribution_review" : compactCodeGap ? "emit_code_reminder_compact" : "emit_code_tool_reminder",
           input: ctx.summarizeInput(input),
           file: ctx.rel(cwd, abs),
           tool,
@@ -369,7 +371,7 @@ var require_post_tool_use = __commonJS({
           input,
           [
             ...attributionReviewPrompts.map((item) => item.prompt),
-            ctx.buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap })
+            ctx.buildCodeToolReminder(cwd, codeGaps, { compact: compactCodeGap })
           ].filter(Boolean).join("\n\n")
         );
       } else if (ctx.SHOW_WARNINGS && warnings.length) {
@@ -395,13 +397,16 @@ var require_post_tool_use = __commonJS({
         ctx.emitEnforcement(input, carryOverFallback);
       } else {
         ctx.writeDiagnosticLog(cwd, {
-          event: codeReviewNoEditConfirmed ? "posttooluse_code_review_no_edit_confirmed" : suppressCodeGap ? "posttooluse_code_review_reminder_suppressed" : "posttooluse_no_output",
+          event: codeReviewNoEditConfirmed ? "posttooluse_code_review_no_edit_confirmed" : deferredCodeGap ? "posttooluse_code_review_deferred_to_checkpoint" : suppressCodeGap ? "posttooluse_code_review_reminder_suppressed" : "posttooluse_no_output",
           input: ctx.summarizeInput(input),
           file: ctx.rel(cwd, abs),
           tool,
           isEdit,
           ...suppressCodeGap ? {
             codeReviewToolReminderCount: ctx.codeDriftNoticeEmissionCount(state),
+            codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders()
+          } : {},
+          ...deferredCodeGap ? {
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders()
           } : {},
           ...ctx.summarizeGaps(cwd, peerGaps, codeGaps)
@@ -669,6 +674,10 @@ var CODE_REVIEW_TOOL_MAX_REMINDERS = Number.parseInt(
   process.env.SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS || "1",
   10
 );
+var CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS = Number.parseInt(
+  process.env.SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS || "1",
+  10
+);
 var DIAGNOSTIC_LOG = process.env.SDD_DRIFT_LOG !== "0";
 var DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
   process.env.SDD_DRIFT_LOG_MAX_BYTES || String(2 * 1024 * 1024),
@@ -806,6 +815,11 @@ var ATTRIBUTION_REVIEW_RULES = [
   "If multiple candidate change-dirs could apply, choose the most specific match based on design.md content and briefly document the reasoning in your response. Do not edit unrelated change-dirs."
 ];
 var SUBAGENT_REVIEW_RULE = "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits.";
+var RESUME_ORIGINAL_TASK_RULES = [
+  "Treat SDD review/synchronization as a checkpoint inside the current user task, not as the whole task.",
+  "After the required SDD work is complete, resume the original user task/request from where you paused if any implementation, verification, cleanup, or response work remains.",
+  "Only give the final answer when both the original user task and the required SDD review/synchronization are complete."
+];
 var formatAttributionReviewRules = () => [
   "When deciding whether SDD documents need edits, apply these attribution review rules in order:",
   ...ATTRIBUTION_REVIEW_RULES.map((rule, index) => `${index + 1}. ${rule}`)
@@ -1143,6 +1157,7 @@ var emptyState = () => ({
   toolEvents: {},
   peerSyncs: {},
   codeDriftNotice: null,
+  codeDriftToolNotice: null,
   peerDriftNotice: null,
   subagentCheckpointNotice: null,
   codeReviewConfirmations: {},
@@ -1192,6 +1207,7 @@ var normalizeState = (parsed) => {
   state.toolEvents = parsed.toolEvents && typeof parsed.toolEvents === "object" ? parsed.toolEvents : {};
   state.peerSyncs = parsed.peerSyncs && typeof parsed.peerSyncs === "object" ? parsed.peerSyncs : {};
   state.codeDriftNotice = parsed.codeDriftNotice && typeof parsed.codeDriftNotice === "object" ? parsed.codeDriftNotice : null;
+  state.codeDriftToolNotice = parsed.codeDriftToolNotice && typeof parsed.codeDriftToolNotice === "object" ? parsed.codeDriftToolNotice : null;
   state.peerDriftNotice = parsed.peerDriftNotice && typeof parsed.peerDriftNotice === "object" ? parsed.peerDriftNotice : null;
   state.subagentCheckpointNotice = parsed.subagentCheckpointNotice && typeof parsed.subagentCheckpointNotice === "object" ? parsed.subagentCheckpointNotice : null;
   state.codeReviewConfirmations = parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object" ? parsed.codeReviewConfirmations : {};
@@ -2591,7 +2607,8 @@ var buildPreCompactSummary = (cwdOrProject, stateOrNull = null, projectOrNull = 
     return [
       "SDD drift checkpoint preserved across compaction:",
       "Before compaction, the assistant was blocked from asking the user or handing control back because SDD synchronization/review was pending.",
-      "After compaction resumes, continue by handling this SDD work before other tasks, commit questions, or final answers.",
+      "After compaction resumes, handle this SDD work first, then return to the original user task from where it was interrupted.",
+      ...RESUME_ORIGINAL_TASK_RULES,
       "",
       pending.message,
       ...driftDirs.length ? [
@@ -2605,7 +2622,8 @@ var buildPreCompactSummary = (cwdOrProject, stateOrNull = null, projectOrNull = 
     "SDD drift summary preserved across compaction:",
     ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`),
     "",
-    "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed."
+    "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed.",
+    ...RESUME_ORIGINAL_TASK_RULES
   ].join("\n");
 };
 var refreshAlignedBaseline = (cwd, project, state) => {
@@ -2758,7 +2776,8 @@ var buildToolEnforcement = (gaps, options = {}) => {
       "SDD drift reminder.",
       "Peer SDD document synchronization is still pending:",
       detail,
-      "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage."
+      "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
+      ...RESUME_ORIGINAL_TASK_RULES
     ].join("\n");
   }
   return [
@@ -2769,6 +2788,7 @@ var buildToolEnforcement = (gaps, options = {}) => {
     "This assistant turn is incomplete until the required peer document(s) are synchronized.",
     "Before any final answer, read each listed required peer file, then use edit or write to synchronize it with the edited SDD change document(s). If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
     ...DOCUMENT_SYNC_RULES,
+    ...RESUME_ORIGINAL_TASK_RULES,
     "Do not stop or summarize completion until the required peer document(s) are updated."
   ].join("\n");
 };
@@ -2793,7 +2813,8 @@ var buildCodeEnforcement = (cwd, gaps, options = {}) => {
       ...ACTIVE_SDD_ALIGNMENT_RULES,
       ...formatAttributionReviewRules(),
       "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
-      "After both documents have been reviewed, you may finish normally; the hook records the no-edit review decision and leaves a human confirmation note.",
+      "After both documents have been reviewed, resume the original user task if anything remains; finish only if the original task is already complete.",
+      ...RESUME_ORIGINAL_TASK_RULES,
       SUBAGENT_REVIEW_RULE
     ].join("\n");
   }
@@ -2813,7 +2834,26 @@ var buildCodeEnforcement = (cwd, gaps, options = {}) => {
     ...DOCUMENT_SYNC_RULES,
     "Do not create a no-op edit or add a new section just to satisfy this hook.",
     SUBAGENT_REVIEW_RULE,
+    ...RESUME_ORIGINAL_TASK_RULES,
     "Do not give the final answer while this code-change batch still has unreviewed SDD documents."
+  ].join("\n");
+};
+var buildCodeToolReminder = (cwd, gaps) => {
+  const detail = gaps.map((gap) => {
+    const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ");
+    const reviewList = formatCodeReviewTargets(cwd, gap.reviewTargets || []);
+    return `- changed code file(s) [${codeList}]. Review before final answer: ${reviewList}`;
+  }).join("\n");
+  return [
+    "SDD drift code review noted.",
+    "Implementation code changed, so SDD review will be required before the final answer.",
+    detail,
+    "",
+    "Do not stop coding just because this reminder appeared. If more implementation, verification, cleanup, or requested edits remain, continue the original task now.",
+    "When the implementation batch is complete, and before final answer or before asking the user what to do next, read/review the listed active design.md and tasks.md files.",
+    "Update only the SDD documents that are stale; if no document needs changes, leave them unchanged and say which files you reviewed.",
+    SUBAGENT_REVIEW_RULE,
+    ...RESUME_ORIGINAL_TASK_RULES
   ].join("\n");
 };
 var serializablePeerGap = (gap) => ({
@@ -2859,16 +2899,24 @@ var codeReviewToolMaxReminders = () => {
   if (!Number.isFinite(CODE_REVIEW_TOOL_MAX_REMINDERS)) return 1;
   return Math.max(0, CODE_REVIEW_TOOL_MAX_REMINDERS);
 };
+var codeReviewToolSessionMaxReminders = () => {
+  if (!Number.isFinite(CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS)) return 1;
+  return Math.max(0, CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS);
+};
 var codeDriftNoticeEmissionCount = (state) => Math.max(0, Number(state.codeDriftNotice?.emissionCount || 0));
+var codeDriftToolSessionEmissionCount = (state) => Math.max(0, Number(state.codeDriftToolNotice?.emissionCount || 0));
 var hasPendingCodeReview = (codeGaps) => codeGaps.some((gap) => !gap.reviewReady);
 var shouldEmitCodeDriftNotice = (state, codeGaps) => {
   if (!hasPendingCodeReview(codeGaps)) return false;
   const maxReminders = codeReviewToolMaxReminders();
   if (maxReminders === 0) return false;
+  const sessionMaxReminders = codeReviewToolSessionMaxReminders();
+  if (sessionMaxReminders === 0) return false;
+  if (codeDriftToolSessionEmissionCount(state) >= sessionMaxReminders) return false;
   if (!state.codeDriftNotice?.active) return true;
   return codeDriftNoticeEmissionCount(state) < maxReminders;
 };
-var isCodeDriftNoticeSuppressed = (state, codeGaps) => hasPendingCodeReview(codeGaps) && Boolean(state.codeDriftNotice?.active) && codeDriftNoticeEmissionCount(state) >= codeReviewToolMaxReminders();
+var isCodeDriftNoticeSuppressed = (state, codeGaps) => hasPendingCodeReview(codeGaps) && (Boolean(state.codeDriftNotice?.active) && codeDriftNoticeEmissionCount(state) >= codeReviewToolMaxReminders() || codeDriftToolSessionEmissionCount(state) >= codeReviewToolSessionMaxReminders());
 var markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
   if (!codeGaps.length) return;
   const existing = state.codeDriftNotice || {};
@@ -2881,6 +2929,13 @@ var markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
     emittedAt: existing.emittedAt || (/* @__PURE__ */ new Date()).toISOString(),
     lastEmittedAt: (/* @__PURE__ */ new Date()).toISOString(),
     emissionCount: codeDriftNoticeEmissionCount(state) + 1
+  };
+  const sessionNotice = state.codeDriftToolNotice || {};
+  state.codeDriftToolNotice = {
+    ...sessionNotice,
+    emittedAt: sessionNotice.emittedAt || (/* @__PURE__ */ new Date()).toISOString(),
+    lastEmittedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    emissionCount: codeDriftToolSessionEmissionCount(state) + 1
   };
 };
 var normalizeCheckpointToolName = (tool) => String(tool || "").trim().toLowerCase().replace(/[-\s.]+/g, "_");
@@ -3076,6 +3131,8 @@ var buildQuestionCheckpointMessage = (message) => [
   "The assistant is about to ask the user a question or hand control back while SDD synchronization or review is still pending.",
   "Do not ask about commit, next action, or whether to continue before resolving the SDD reminder below.",
   "Continue the current turn now and handle the pending SDD work first.",
+  "After the pending SDD work is resolved, return to the original user task from where you paused; do not treat this checkpoint itself as task completion.",
+  ...RESUME_ORIGINAL_TASK_RULES,
   "",
   message
 ].join("\n");
@@ -3185,6 +3242,7 @@ var buildStopEnforcement = (pendingMessage) => [
   pendingMessage,
   "",
   "Continue the current task now. Do not ask the user for permission to continue.",
+  "After the required SDD work is resolved, resume the original user task if anything remains; do not stop only because the SDD checkpoint is resolved.",
   "For code-review gaps, read/review the listed SDD document(s), then update only the files that actually need changes.",
   "If those documents have already been reviewed and no edit is needed, stop again with a concise final answer; the hook will record the review confirmation marker.",
   "For peer-sync gaps, use read, then edit or write, to synchronize the listed SDD document(s) before trying to stop again."
@@ -3351,6 +3409,7 @@ var dispatch = async (input) => {
       applyToolRecord,
       buildClaudeCodeOutput,
       buildCodeEnforcement,
+      buildCodeToolReminder,
       buildAttributionReviewPrompt,
       buildPreCompactSummary,
       buildQuestionCheckpointEnforcement,
@@ -3365,7 +3424,9 @@ var dispatch = async (input) => {
       clearStageOnlyRequirements,
       CODE_REVIEW_STOP_MAX_BLOCKS,
       codeDriftNoticeEmissionCount,
+      codeDriftToolSessionEmissionCount,
       codeReviewToolMaxReminders,
+      codeReviewToolSessionMaxReminders,
       collectCombinedCodeGaps,
       collectCombinedPeerGaps,
       drift,
@@ -3513,6 +3574,7 @@ if (require.main === module) {
     buildToolEnforcement,
     buildClaudeCodeOutput,
     buildCodeEnforcement,
+    buildCodeToolReminder,
     buildAttributionReviewPrompt,
     buildPendingEnforcement,
     buildPreToolUseDenyOutput,

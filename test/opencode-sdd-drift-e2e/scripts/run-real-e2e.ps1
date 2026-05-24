@@ -2,7 +2,7 @@ param(
   [ValidateSet("deepseek", "minimax")]
   [string]$Provider = "deepseek",
 
-  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "multi-change-review", "optimization-doc-required", "behavior-doc-required", "api-contract-doc-required", "error-handling-doc-required", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
+  [ValidateSet("design-cascade", "code-cascade", "multi-code-cascade", "continue-after-sdd", "continue-after-sdd-code", "multi-change-review", "optimization-doc-required", "behavior-doc-required", "api-contract-doc-required", "error-handling-doc-required", "code-no-doc-change", "design-no-peer", "proposal-no-peer", "dts-code", "no-sdd-code")]
   [string]$Scenario = "design-cascade",
 
   [ValidateSet("stop-only", "posttooluse-and-stop")]
@@ -297,6 +297,9 @@ $config = Get-Content -LiteralPath $configTemplate -Raw
 if ($Provider -eq "minimax") {
   $config = $config -replace "https://api\.minimax(?:i)?\.com/v1", $minimaxBaseUrl.TrimEnd("/")
 }
+if ($Scenario -eq "continue-after-sdd-code") {
+  $config = $config -replace '"steps"\s*:\s*12', '"steps": 20'
+}
 $restrictedPermission = @'
 "permission": {
   "read": "allow",
@@ -357,6 +360,8 @@ $archivedTasksPath = Join-Path $workRoot "sdd\changes\archived-feat\tasks.md"
 $archivedMarkerPath = Join-Path $workRoot "sdd\changes\archived-feat\.archived"
 $appPath = Join-Path $workRoot "src\app.ts"
 $helperPath = Join-Path $workRoot "src\helper.ts"
+$notesDir = Join-Path $workRoot "notes"
+$continuationPath = Join-Path $notesDir "after-sdd.txt"
 $docRequiredConfig = switch ($Scenario) {
   "optimization-doc-required" {
     @{
@@ -443,6 +448,8 @@ if ($hasSddWorkspace) {
 }
 Set-Content -LiteralPath $appPath -Value "export function greet(name: string) {`n  return `"hello `" + name`n}"
 Set-Content -LiteralPath $helperPath -Value "export function helper() {`n  return `"helper`"`n}"
+New-Item -ItemType Directory -Force $notesDir | Out-Null
+Set-Content -LiteralPath $continuationPath -Value "pending continuation"
 
 $env:HOME = $opencodeHome
 $env:USERPROFILE = $opencodeHome
@@ -456,7 +463,7 @@ if ($Scenario -eq "dts-code") {
   Remove-Item Env:\SDD_DRIFT_DTS_CONTEXT -ErrorAction SilentlyContinue
 }
 
-$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "multi-change-review" -or $isDocRequiredScenario -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
+$isCodeScenario = $Scenario -eq "code-cascade" -or $Scenario -eq "multi-code-cascade" -or $Scenario -eq "continue-after-sdd" -or $Scenario -eq "continue-after-sdd-code" -or $Scenario -eq "multi-change-review" -or $isDocRequiredScenario -or $Scenario -eq "code-no-doc-change" -or $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeNoDocScenario = $Scenario -eq "dts-code" -or $Scenario -eq "no-sdd-code"
 $isCodeReviewNoEditScenario = $Scenario -eq "code-no-doc-change"
 $isNoPeerScenario = $Scenario -eq "design-no-peer" -or $Scenario -eq "proposal-no-peer"
@@ -485,6 +492,10 @@ $taskMarker = if ($isCodeScenario) {
 }
 $codeMarker = "hi-$Provider-$runId"
 $helperMarker = "helper-$Provider-$runId"
+$continuationMarker = "continued-after-sdd-$Provider-$runId"
+$secondCodeMarker = "helper-after-sdd-$Provider-$runId"
+$secondDesignMarker = "Real $Provider second code drift verification $runId"
+$secondTaskMarker = "Synchronized after $Provider second code drift design update $runId"
 $parallelMarker = "Real $Provider parallel SDD review $runId"
 $parallelTaskMarker = "Synchronized parallel change after $Provider code drift review $runId"
 $prompt = if ($isStopOnly -and $Scenario -eq "multi-change-review") {
@@ -635,6 +646,36 @@ $prompt = if ($isStopOnly -and $Scenario -eq "multi-change-review") {
     "11. Write sdd/changes/test-feat/tasks.md so it contains this exact task line: - [x] $taskMarker."
     "Use only read and write tools. Finish only after app.ts, helper.ts, design.md, and tasks.md are synchronized."
   ) -join " "
+} elseif ($Scenario -eq "continue-after-sdd") {
+  @(
+    "Execute this exact long-task continuation validation now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Use this sequence exactly: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Wait for the src/app.ts write tool result and inspect it."
+    "4. If the tool result contains `"SDD drift tool result enforcement`" or `"SDD reconciliation review`", read sdd/changes/test-feat/design.md."
+    "5. Write sdd/changes/test-feat/design.md so it contains this exact section heading: ## $marker."
+    "6. Wait for the design.md write tool result and inspect it."
+    "7. If the design.md write tool result asks you to synchronize peer documents, read sdd/changes/test-feat/tasks.md."
+    "8. Write sdd/changes/test-feat/tasks.md so it contains this exact task line: - [x] $taskMarker."
+    "9. After SDD synchronization is complete, continue the original task: read notes/after-sdd.txt."
+    "10. Write notes/after-sdd.txt so it contains this exact marker: $continuationMarker."
+    "Use only read and write tools. Do not finish after SDD synchronization; finish only after notes/after-sdd.txt is also updated."
+  ) -join " "
+} elseif ($Scenario -eq "continue-after-sdd-code") {
+  @(
+    "Execute this exact long-task repeated-code validation now."
+    "Do not ask a question, do not explore directories, and do not inspect logs or environment/config files."
+    "Initial implementation pass: 1. Read src/app.ts."
+    "2. Write src/app.ts so it contains this exact string literal: `"$codeMarker`"."
+    "3. Continue the same implementation task by changing more TypeScript: read src/helper.ts."
+    "4. Write src/helper.ts so it contains this exact string literal: `"$secondCodeMarker`"."
+    "5. Then stop with a brief final answer. Do not read or write any SDD document during this initial implementation pass."
+    "If a later hook continuation containing `"SDD drift stop enforcement`" asks for SDD review, read sdd/changes/test-feat/design.md and sdd/changes/test-feat/tasks.md."
+    "Then write sdd/changes/test-feat/design.md with full Markdown content that preserves the existing # Design heading and also contains these exact section headings: ## $marker and ## $secondDesignMarker."
+    "Then write sdd/changes/test-feat/tasks.md with full Markdown content that preserves the existing # Tasks heading and also contains these exact task lines: - [x] $taskMarker and - [x] $secondTaskMarker."
+    "Use only read and write tools. Finish only after app.ts, helper.ts, design.md, and tasks.md are synchronized."
+  ) -join " "
 } elseif ($Scenario -eq "code-cascade") {
   @(
     "Execute this exact local file-editing validation task now."
@@ -744,6 +785,8 @@ Write-Output "--- src/app.ts ---"
 Get-Content -LiteralPath $appPath
 Write-Output "--- src/helper.ts ---"
 Get-Content -LiteralPath $helperPath
+Write-Output "--- notes/after-sdd.txt ---"
+Get-Content -LiteralPath $continuationPath
 Write-Output "--- .sdd-drift-report.md ---"
 if (Test-Path -LiteralPath $report) {
   Get-Content -LiteralPath $report
@@ -772,6 +815,7 @@ $archivedDesignText = if (Test-Path -LiteralPath $archivedDesignPath) { Get-Cont
 $archivedTasksText = if (Test-Path -LiteralPath $archivedTasksPath) { Get-Content -LiteralPath $archivedTasksPath -Raw } else { "" }
 $appText = Get-Content -LiteralPath $appPath -Raw
 $helperText = Get-Content -LiteralPath $helperPath -Raw
+$continuationText = Get-Content -LiteralPath $continuationPath -Raw
 $outText = if (Test-Path -LiteralPath $outLog) { Get-Content -LiteralPath $outLog -Raw } else { "" }
 $errText = if (Test-Path -LiteralPath $errLog) { Get-Content -LiteralPath $errLog -Raw } else { "" }
 $reportText = if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Raw } else { "" }
@@ -794,6 +838,12 @@ if ($isCodeScenario -and $appText -notmatch [regex]::Escape($codeMarker)) {
 }
 if (($Scenario -eq "multi-code-cascade" -or $Scenario -eq "code-no-doc-change") -and $helperText -notmatch [regex]::Escape($helperMarker)) {
   throw "expected src/helper.ts to contain real model helper marker"
+}
+if ($Scenario -eq "continue-after-sdd-code" -and $helperText -notmatch [regex]::Escape($secondCodeMarker)) {
+  throw "expected src/helper.ts to contain second code marker after SDD synchronization"
+}
+if ($Scenario -eq "continue-after-sdd" -and $continuationText -notmatch [regex]::Escape($continuationMarker)) {
+  throw "expected notes/after-sdd.txt to contain continuation marker after SDD synchronization"
 }
 if ($isNoPeerScenario) {
   if ($outText -match "SDD drift tool result enforcement") {
@@ -837,6 +887,14 @@ if ($Scenario -eq "multi-code-cascade") {
   ).Count
   if ($codeEnforcementCount -ne 1) {
     throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
+  }
+}
+if ($Scenario -eq "continue-after-sdd-code") {
+  if ($designText -notmatch [regex]::Escape($secondDesignMarker)) {
+    throw "expected design.md to contain second SDD marker after continued TypeScript change"
+  }
+  if ($tasksText -notmatch [regex]::Escape($secondTaskMarker)) {
+    throw "expected tasks.md to contain second SDD marker after continued TypeScript change"
   }
 }
 if ($Scenario -eq "multi-change-review") {

@@ -36,7 +36,7 @@ sdd/changes/<change-id>/
 | 改了 `tasks.md`，同目录 `design.md` 已存在但未同步 | 提醒同步 `design.md` |
 | 改了 `proposal.md` | 只在 `design.md` 已存在时给软提醒 |
 | `tasks.md` 还不存在 | 认为仍在设计阶段，不强迫创建 |
-| 改了普通代码 | 提醒最终回复前评审活跃 `design.md` / `tasks.md` |
+| 改了普通代码 | 每个会话最多一次弱提醒；后续代码改动先记录，等 `Stop` / 提问 / 压缩前统一评审活跃 `design.md` / `tasks.md` |
 | 多个 change 同时存在 | 检查所有未归档的活跃 change |
 | 跨会话遗留 drift | 通过项目级 `project.json` 继续识别并提醒 |
 | 模型判断无需改文档 | 允许结束，并写 `.sdd-drift-report.md` 让人确认 |
@@ -57,11 +57,29 @@ OpenCode + OMO 建议启用：
 
 - `UserPromptSubmit`：捕获用户原始意图，用于识别 DTS / 问题单上下文。
 - `PreCompact`：上下文压缩前注入未完成的 SDD 状态摘要。
-- `PostToolUse`：工具调用后提醒模型，OpenCode 场景最可靠。
+- `PostToolUse`：记录工具调用结果；直接改 SDD 文档时会即时提醒 peer 同步。
 - `PreToolUse`：只拦截提问/确认类工具，避免模型把“要不要提交/继续”抛给用户前漏掉 SDD 检查。
 - `Stop`：模型准备结束时再做一次收尾检查。
 
-不要只依赖 Stop。真实验证里，OpenCode + OMO 的 Stop-only 不能稳定让模型继续当轮处理。`PostToolUse` 才是当前更可靠的级联提醒点。
+代码文件变更默认采用“一次弱提醒 + 阶段末聚合审查”，而不是每次 `.ts` 写入后都打断模型。这样长任务里连续改代码不会被 SDD 审查切碎；到模型准备停止、提问、进入子任务 checkpoint 或上下文压缩前，hook 再统一提醒它评审并同步 SDD。
+
+### 多轮改代码时会怎样
+
+插件不会把每一次代码写入都变成一次 SDD 审查。它更像一个阶段检查员：先让模型把当前实现做完，再提醒它回头看活跃 SDD 是否落后。
+
+例子一：你让模型“实现登录功能”。
+
+模型可能连续修改 `src/auth.ts`、`src/routes.ts`、`src/session.ts`。第一次代码写入后，你可能看到一次 `SDD drift code review noted`；后面几个文件继续改时通常不会再提醒。等模型准备结束、提问或压缩上下文前，插件会要求它统一 review 活跃的 `design.md` / `tasks.md`，该同步就同步。
+
+例子二：同一个会话里，你又说“再加一个忘记密码入口”。
+
+模型继续改 `src/auth.ts` 或 `src/password-reset.ts` 时，默认不一定再出现新的 `SDD drift code review noted`，因为代码工具结果里的弱提醒默认是每个会话最多一次。这不代表插件没记录。新的代码事实仍会进入检查状态，模型准备结束、提问或压缩上下文前，仍应该再次评审 SDD。
+
+例子三：模型评审后说“这次不用改 SDD”。
+
+如果只是格式化、注释、测试脚手架这类没有设计影响的改动，模型可以在读过 `design.md` / `tasks.md` 后说明无需修改。之后你继续让它改新功能时，之前的“无需修改”不会永久生效；只要又发生新的代码改动，阶段末仍会重新检查。
+
+如果你希望同一个会话里每次追加需求后都更明显地提醒模型，可以把后面的 `SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS` 调大。默认值更克制，目的是减少长任务里的重复打断。
 
 ## 使用后会看到什么
 
@@ -71,15 +89,18 @@ OpenCode + OMO 建议启用：
 | --- | --- | --- |
 | 项目没有 `sdd/` 或 `.sdd/` | 没有提醒，通常也不会有业务状态变化 | 正常，插件没有 SDD 工作区可检查 |
 | 新开或继续一个会话 | 一般无感；如果上次有未处理 drift，模型开局可能收到 carry-over 提醒 | 正常，这是跨会话恢复 |
-| 模型改了普通代码 | 工具结果后，模型可能被提醒先读 `design.md` / `tasks.md` 做评审 | 正常，属于 `PostToolUse` 提醒 |
+| 模型改了普通代码 | 本会话第一次代码批次可能出现一次 `SDD drift code review noted`；后续代码改动通常静默记录 | 正常，这是弱提醒，不要求立刻停下编码；最终仍会在阶段末聚合检查 |
+| 用户在同一会话里多次追加需求并继续改代码 | 后续改动可能没有新的 `PostToolUse` 弱提醒，但会更新内部代码修改序号，并在 `Stop` / 提问 / 压缩前重新检查 | 正常限制；当前按 session 聚合，不按每次用户消息强切提醒窗口 |
 | 模型改了 `design.md` | 如果同目录 `tasks.md` 已存在，模型会被提醒同步 `tasks.md` | 正常，属于文档 peer 同步 |
 | 模型改了 `tasks.md` | 如果同目录 `design.md` 已存在，模型会被提醒同步 `design.md` | 正常，属于文档 peer 同步 |
 | OMO plan/task/subagent 改了代码 | 子 agent 返回后，主 agent 可能收到 SDD checkpoint 提醒 | 正常，但要求 matcher 包含 `Task|task|call_omo_agent|background_output|delegate_task` |
 | 模型准备问“要不要提交/继续” | 可能出现红字 `Error`，内容以 `SDD drift question checkpoint` 开头 | 通常正常，这是 `PreToolUse` 主动 deny 这个提问工具，让模型先继续 SDD 审查 |
 | checkpoint 后立刻发生上下文压缩 | 压缩摘要会保留未完成 SDD checkpoint；恢复后模型应先继续 SDD 审查 | 正常；如果恢复后仍忘记，查看日志确认 `PreCompact` 是否触发 |
-| 模型准备结束 | `Stop` 可能做最后一次兜底提醒；OpenCode 里它不一定能让模型继续当轮执行 | 正常限制，可靠路径仍是 `PostToolUse` |
+| 模型准备结束 | `Stop` 会对未评审的代码批次做阶段末兜底提醒；OpenCode 里如果运行时没有继续当轮执行，会在报告里留下未处理项 | 正常限制；问题排查看日志和 `.sdd-drift-report.md` |
 | 模型评审后认为文档不用改 | 可以结束；可能留下 `.sdd-drift-report.md` 供人确认 | 正常，最终由人决定是否接受 |
 | 问题单 / DTS 修复 | 可设置 `SDD_DRIFT_DTS_CONTEXT=1` 跳过代码领先文档提醒 | 正常例外，但直接改 SDD 文档仍会触发 peer 同步 |
+
+SDD 审查完成后，模型应该回到原始用户任务/请求继续推进；只有原任务也完成时才应该最终回复。若你看到模型“审查完 SDD 就结束会话”，优先看日志里最后一次提醒是否来自 `emit_code_tool_reminder`、`emit_question_checkpoint_enforcement` 或 `stop_block_emit`，这些路径的提示词都会要求模型回到原任务。
 
 红字 `SDD drift question checkpoint` 容易误导。它不是 `console.error`，也不是 JS 异常；它是 hook 返回了结构化的 `permissionDecision: "deny"`，OpenCode/OMO 把“工具被拒绝”渲染成红色。它的目标是阻止模型在 SDD 还没处理时把问题抛给你。
 
@@ -101,8 +122,8 @@ Get-Content .git\sdd-drift-hook-state\sdd-drift-check.log.jsonl -Tail 40
 emit_question_checkpoint_enforcement
 precompact_summary_emit
 emit_subagent_checkpoint_enforcement
+emit_code_tool_reminder
 emit_peer_enforcement
-emit_code_enforcement
 stop_allow_no_pending
 ```
 
@@ -399,14 +420,15 @@ $env:SDD_DRIFT_LOG_RETENTION_DAYS = "7"
 opencode
 ```
 
-调整同一代码批次的工具结果提醒次数，默认 1 次：
+调整代码工具结果提醒次数。默认每个会话最多 1 次弱提醒，后续代码改动只记录状态，等 `Stop` / 提问 / 压缩前这类阶段检查点再统一触发 SDD 审查：
 
 ```powershell
-$env:SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS = "2"
+$env:SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS = "1"
+$env:SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS = "1"
 opencode
 ```
 
-如果遇到重复提醒或限流，保持默认 `1` 更稳。
+如果你想完全不在代码工具结果里提醒，把任意一个值设成 `0`。如果你想恢复更频繁的旧体验，可以把 session 上限调大。`design.md` / `tasks.md` 互相同步仍然会即时提醒。
 
 ## 边界
 

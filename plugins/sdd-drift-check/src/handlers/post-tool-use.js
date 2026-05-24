@@ -35,7 +35,13 @@ const handlePostToolUse = (input, ctx) => {
   }
 
   if (project) ctx.applySessionToProject(cwd, project, state, ctx.sessionID)
-  const attributionReviewPrompts = ctx.takeAttributionReviewPrompts(state)
+  const codeToolReminderEnabled =
+    ctx.codeReviewToolMaxReminders() > 0 &&
+    ctx.codeReviewToolSessionMaxReminders() > 0 &&
+    ctx.codeDriftToolSessionEmissionCount(state) < ctx.codeReviewToolSessionMaxReminders()
+  const attributionReviewPrompts = codeToolReminderEnabled
+    ? ctx.takeAttributionReviewPrompts(state)
+    : []
   const warnings = isEdit ? ctx.drift(cwd, abs, state) : []
   const peerGaps = ctx.collectCombinedPeerGaps(cwd, state, project)
   const hardPeerGaps = ctx.collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false })
@@ -56,9 +62,15 @@ const handlePostToolUse = (input, ctx) => {
   const emitAttributionReview = attributionReviewPrompts.length > 0
   const emitCodeGap =
     !hardPeerGaps.length &&
+    codeToolReminderEnabled &&
     (emitAttributionReview || ctx.shouldEmitCodeDriftNotice(state, codeGaps))
   const suppressCodeGap =
     !hardPeerGaps.length && !emitCodeGap && ctx.isCodeDriftNoticeSuppressed(state, codeGaps)
+  const deferredCodeGap =
+    !hardPeerGaps.length &&
+    !emitCodeGap &&
+    codeGaps.some((gap) => !gap.reviewReady) &&
+    !codeToolReminderEnabled
   const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
   const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : []
   const peerSignature = emitPeerGaps.length ? ctx.peerDriftSignature(emitPeerGaps) : null
@@ -106,7 +118,7 @@ const handlePostToolUse = (input, ctx) => {
         ? "emit_attribution_review"
         : compactCodeGap
           ? "emit_code_reminder_compact"
-          : "emit_code_enforcement",
+          : "emit_code_tool_reminder",
       input: ctx.summarizeInput(input),
       file: ctx.rel(cwd, abs),
       tool,
@@ -118,7 +130,7 @@ const handlePostToolUse = (input, ctx) => {
       input,
       [
         ...attributionReviewPrompts.map((item) => item.prompt),
-        ctx.buildCodeEnforcement(cwd, codeGaps, { compact: compactCodeGap }),
+        ctx.buildCodeToolReminder(cwd, codeGaps, { compact: compactCodeGap }),
       ]
         .filter(Boolean)
         .join("\n\n")
@@ -148,7 +160,9 @@ const handlePostToolUse = (input, ctx) => {
     ctx.writeDiagnosticLog(cwd, {
       event: codeReviewNoEditConfirmed
         ? "posttooluse_code_review_no_edit_confirmed"
-        : suppressCodeGap
+        : deferredCodeGap
+          ? "posttooluse_code_review_deferred_to_checkpoint"
+          : suppressCodeGap
           ? "posttooluse_code_review_reminder_suppressed"
           : "posttooluse_no_output",
       input: ctx.summarizeInput(input),
@@ -158,6 +172,11 @@ const handlePostToolUse = (input, ctx) => {
       ...(suppressCodeGap
         ? {
             codeReviewToolReminderCount: ctx.codeDriftNoticeEmissionCount(state),
+            codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders(),
+          }
+        : {}),
+      ...(deferredCodeGap
+        ? {
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders(),
           }
         : {}),

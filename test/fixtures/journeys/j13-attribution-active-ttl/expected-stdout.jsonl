@@ -1,4 +1,4 @@
 {"contains":["This assistant turn is incomplete","sdd/changes/alpha/tasks.md"]}
 {"empty":true}
-{"contains":["deferred review checkpoint","sdd/changes/alpha/design.md","src/alpha/feature.ts"],"notContains":["sdd/changes/beta/design.md"]}
-{"contains":["deferred review checkpoint","sdd/changes/alpha/design.md","src/alpha/next.ts"],"notContains":["sdd/changes/beta/design.md"]}
+{"contains":["SDD drift code review noted","sdd/changes/alpha/design.md","src/alpha/feature.ts"],"notContains":["sdd/changes/beta/design.md"]}
+{"contains":["SDD drift code review noted","sdd/changes/alpha/design.md","src/alpha/next.ts"],"notContains":["sdd/changes/beta/design.md"]}

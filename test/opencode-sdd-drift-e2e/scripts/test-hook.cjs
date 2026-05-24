@@ -19,6 +19,22 @@ const edit = (state, fp) => {
   return seq
 }
 
+const captureStdout = async (fn) => {
+  const original = process.stdout.write
+  let output = ""
+  process.stdout.write = (chunk, ...args) => {
+    output += String(chunk)
+    if (typeof args[args.length - 1] === "function") args[args.length - 1]()
+    return true
+  }
+  try {
+    await fn()
+    return output
+  } finally {
+    process.stdout.write = original
+  }
+}
+
 (async () => {
 try {
   {
@@ -45,8 +61,10 @@ try {
     assert.match(enforcement, /Do not add a new section/)
     assert.match(enforcement, /Do not remove unrelated existing paragraphs/)
     assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
+    assert.match(enforcement, /resume the original user task\/request/)
     const compact = hook.buildToolEnforcement(gaps, { compact: true })
     assert.match(compact, /SDD drift reminder/)
+    assert.match(compact, /resume the original user task\/request/)
     assert.doesNotMatch(compact, /This assistant turn is incomplete/)
   }
 
@@ -341,6 +359,7 @@ try {
     assert.match(enforcement, /Do not replace the whole document/)
     assert.match(enforcement, /Do not add a new section/)
     assert.match(enforcement, /most appropriate existing heading, paragraph, list item, or task item/)
+    assert.match(enforcement, /resume the original user task\/request/)
 
     edit(state, readOnlyDesign)
     const afterDesignEditCodeGaps = hook.collectCodeGaps(cwd, state)
@@ -352,6 +371,50 @@ try {
     edit(state, tasks)
     assert.strictEqual(hook.collectCodeGaps(cwd, state).length, 0)
     assert.strictEqual(hook.collectReportLines(cwd, state).length, 0)
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "posttooluse-code-deferred")
+    const dir = path.join(cwd, "sdd", "changes", "epsilon-deferred")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "app.ts")
+    write(design, "# Design\n")
+    write(tasks, "# Tasks\n")
+    write(code, "export const value = 1\n")
+
+    const postToolOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "deferred-code",
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_use_id: "write-code-1",
+        tool_input: { file_path: "src/app.ts" },
+      })
+    )
+    assert.match(postToolOutput, /SDD drift code review noted/)
+    assert.match(postToolOutput, /continue the original task now/)
+
+    const state = hook.loadState(cwd, "deferred-code")
+    const project = hook.loadProjectState(cwd)
+    const pending = hook.buildQuestionCheckpointEnforcement(cwd, state, project)
+    assert.strictEqual(pending.type, "code")
+    assert.match(pending.message, /SDD drift question checkpoint/)
+    assert.match(pending.message, /src\/app\.ts/)
+
+    const checkpointOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "deferred-code",
+        hook_event_name: "PreToolUse",
+        tool_name: "Question",
+        tool_use_id: "question-1",
+        tool_input: { question: "Should I commit?" },
+      })
+    )
+    assert.match(checkpointOutput, /SDD drift question checkpoint/)
+    assert.match(checkpointOutput, /src\/app\.ts/)
   }
 
   {
@@ -431,6 +494,7 @@ try {
     assert.strictEqual(pending.type, "code")
     assert.match(pending.message, /pending SDD review/)
     assert.match(pending.message, /read-only review subagent/)
+    assert.match(pending.message, /resume the original user task\/request/)
     assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), true)
     hook.markSubagentCheckpointNoticeEmitted(state, pending, "background_output")
     assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), false)
@@ -464,6 +528,7 @@ try {
     assert.strictEqual(pending.type, "code")
     assert.match(pending.message, /SDD drift question checkpoint/)
     assert.match(pending.message, /Do not ask about commit/)
+    assert.match(pending.message, /return to the original user task/)
     assert.match(pending.message, /src\/handoff\.ts/)
     assert.strictEqual(hook.shouldEmitSubagentCheckpointNotice(state, pending), true)
     hook.markSubagentCheckpointNoticeEmitted(state, pending, "question")
@@ -471,6 +536,7 @@ try {
     const compactSummary = hook.buildPreCompactSummary(cwd, state, null)
     assert.match(compactSummary, /SDD drift checkpoint preserved across compaction/)
     assert.match(compactSummary, /After compaction resumes/)
+    assert.match(compactSummary, /resume the original user task\/request/)
     assert.match(compactSummary, /SDD drift question checkpoint/)
 
     hook.recordFile(state, design, false)
@@ -1203,7 +1269,7 @@ try {
 
     hook.recordFile(state, thirdCode, true)
     codeGaps = hook.collectCodeGaps(cwd, state)
-    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), true)
+    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
   }
 
   {

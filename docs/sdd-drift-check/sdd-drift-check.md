@@ -372,20 +372,30 @@ preserves that active checkpoint explicitly. The compacted context tells the
 model to resume the interrupted SDD review/synchronization before continuing
 other work, asking commit/continue questions, or producing the final answer.
 
-Code-ahead-of-doc drift is batched at session level. The first code edit that
-gets ahead of SDD emits a full model-visible deferred review reminder. The
-review target set is every existing `design.md` and `tasks.md` under active
+SDD review is a checkpoint inside the current user task, not the task endpoint.
+After the required SDD review or synchronization is complete, the model should
+return to the original user task/request from where it paused. It should only
+produce the final answer after both the original work and SDD checkpoint are
+complete.
+
+Code-ahead-of-doc drift is batched at session level. Implementation-code edits
+are recorded during `PostToolUse`, and by default the hook emits at most one
+weak code-review reminder per session. The reminder tells the model to continue
+coding if implementation work remains, then review SDD before the final answer.
+This keeps long coding batches from being interrupted after every `.ts`/code
+edit while still giving OpenCode models a model-visible constraint before they
+try to finish.
+
+The review target set is every existing `design.md` and `tasks.md` under active
 root-level `sdd/changes/*` and `.sdd/changes/*` directories. This covers
 multiple change proposals in progress at the same time instead of only the
 change directory touched in the current turn. Archived change directories are
-excluded. Later tool calls in the same unreviewed batch may emit compact
-reminders until the listed SDD documents have been reviewed. To avoid
-issue-ticket or rate-limit loops when context inference fails, tool-result
-reminders are capped by
-`SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS`, default `1` total reminder per
-unreviewed code batch. After the cap, the hook stays silent for tool results and
-keeps the unresolved review visible in the diagnostic log/report instead of
-continuing to inject model-visible text.
+excluded. `SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS` controls the per-batch
+cap, and `SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS` controls the
+session-wide cap; both default to `1`. Set either to `0` to fully defer code
+review to `Stop` / question / compaction checkpoints. Peer SDD document
+synchronization still emits immediately because a `design.md`/`tasks.md` edit
+should be kept consistent with its existing peer in the same turn.
 
 The code-review prompt treats active SDD files as live planning records, not
 optional commentary. Until a change directory is archived, `design.md` and
@@ -633,15 +643,18 @@ $env:SDD_DRIFT_LOG_MAX_BYTES = "5242880"
 opencode
 ```
 
-Change the maximum number of model-visible tool-result reminders for one
-unreviewed code batch, default `1`. Set `2` if you prefer one compact follow-up
-reminder; set `0` to disable tool-result reminders for code-ahead-of-doc review
-while keeping peer SDD synchronization active:
+Change the maximum number of model-visible code-review tool-result reminders.
+The per-batch and per-session defaults are both `1`, so ordinary code changes
+get one weak reminder and later code edits in the same session stay quiet:
 
 ```powershell
-$env:SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS = "2"
+$env:SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS = "1"
+$env:SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS = "1"
 opencode
 ```
+
+Set either value to `0` to fully defer code review to `Stop` / question /
+compaction checkpoints.
 
 Change diagnostic log retention, default `3` days. Set `0` to disable age-based
 cleanup temporarily:
