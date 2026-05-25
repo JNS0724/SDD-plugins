@@ -19,16 +19,24 @@ test harnesses under `test/`.
 plugins/
   sdd-drift-check/
     src/
-      index.js
-      stdin.js
-    build.mjs
+      adapters/
+        claude-code/
+          command-hook.js
+        opencode/
+          native-plugin.js
+      core/
+        output.js
+        runtime-config.js
+        sdd-rules.js
+        tool-events.js
+      handlers/
+      build.mjs
     package.json
     sdd-drift-check-hook.js
     sdd-drift-check-opencode.js
 docs/
   sdd-drift-check/
     sdd-drift-check.md
-    opencode-omo-getting-started.md
 test/
   opencode-sdd-drift-e2e/
   claude-code-sdd-drift-e2e/
@@ -46,22 +54,27 @@ Use this plugin in one of these hook-capable runtimes:
 
 - Claude Code with its native hook configuration.
 - OpenCode with the native OpenCode plugin entrypoint.
-- OpenCode with `oh-my-opencode` installed and Claude Code hook bridging
-  enabled.
 
-The shared hook implementation is `sdd-drift-check-hook.js`. Claude Code and
-`oh-my-opencode` call it as a command hook. Native OpenCode uses
-`sdd-drift-check-opencode.js`, which adapts OpenCode plugin events to the shared
-hook implementation.
+The two runtime faces are peers in source:
+
+- `src/adapters/claude-code/command-hook.js` builds the Claude Code command
+  hook artifact `sdd-drift-check-hook.js`.
+- `src/adapters/opencode/native-plugin.js` builds the native OpenCode plugin
+  artifact `sdd-drift-check-opencode.js`.
+
+The OpenCode adapter still invokes the shared command hook artifact for the core
+drift rules in this phase; the source layout now separates the runtime adapter
+boundary so a later core extraction can happen without changing user-facing
+install paths. Shared logic that is already runtime-neutral lives under
+`src/core/`, including tool event classification, runtime config parsing, output
+protocol helpers, and SDD rule text/constants.
 
 It supports:
 
 - OpenCode native plugin hooks through `tool.execute.after` and `session.idle`.
-- OpenCode through `oh-my-opencode` hook bridging.
 - Claude Code compatible hook settings.
 - `UserPromptSubmit` context capture for Claude Code issue-ticket detection.
 - `PostToolUse` model-visible reminders for reliable OpenCode cascades.
-- Subagent result checkpoints for OpenCode + `oh-my-opencode`.
 - Question/tool handoff checkpoints before commit-or-continue prompts.
 - `Stop` hook checks for Claude-compatible final review behavior.
 - Session-level batching for code changes before SDD reconciliation.
@@ -79,15 +92,16 @@ docs/sdd-drift-check/sdd-drift-check.md
 
 ## Build And Package
 
-`plugins/sdd-drift-check/src/` is the development source. The distributable
-hook file is committed at:
+`plugins/sdd-drift-check/src/adapters/` contains the runtime adapter sources.
+The committed distributable files are:
 
 ```text
 plugins/sdd-drift-check/sdd-drift-check-hook.js
+plugins/sdd-drift-check/sdd-drift-check-opencode.js
 ```
 
 After changing files under `plugins/sdd-drift-check/src/`, rebuild the
-single-file hook before testing or committing:
+distributable artifacts before testing or committing:
 
 ```powershell
 cd plugins\sdd-drift-check
@@ -96,9 +110,9 @@ npm run build
 npm run build:check
 ```
 
-`npm run build` updates `sdd-drift-check-hook.js`. `npm run build:check`
-generates a temporary bundle and compares it with the committed hook file; a
-non-zero exit means the package artifact is stale.
+`npm run build` updates both distributable files. `npm run build:check`
+generates temporary artifacts and compares them with the committed files; a
+non-zero exit means a package artifact is stale.
 
 ## Testing
 

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "test": "npm --prefix ../../plugins/sdd-drift-check run build:check && node ./scripts/test-hook.cjs && node ./scripts/test-opencode-native.cjs && node ./scripts/test-journeys.cjs",
+    "test": "npm --prefix ../../plugins/sdd-drift-check run build:check && node ./scripts/test-adapter-structure.cjs && node ./scripts/test-core-tool-events.cjs && node ./scripts/test-core-runtime-config.cjs && node ./scripts/test-core-paths.cjs && node ./scripts/test-core-file-classifier.cjs && node ./scripts/test-core-storage.cjs && node ./scripts/test-core-diagnostics.cjs && node ./scripts/test-core-session-state.cjs && node ./scripts/test-core-project-state.cjs && node ./scripts/test-core-attribution.cjs && node ./scripts/test-core-drift-engine.cjs && node ./scripts/test-core-output.cjs && node ./scripts/test-core-prompts.cjs && node ./scripts/test-core-report.cjs && node ./scripts/test-core-hydration.cjs && node ./scripts/test-core-sdd-rules.cjs && node ./scripts/test-hook.cjs && node ./scripts/test-opencode-native.cjs && node ./scripts/test-journeys.cjs",
     "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-e2e.ps1",
     "e2e:real": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-real-e2e.ps1",
     "e2e:real:native": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/run-real-native.ps1",

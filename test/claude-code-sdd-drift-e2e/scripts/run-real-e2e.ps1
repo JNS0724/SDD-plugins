@@ -465,11 +465,15 @@ if (!$isDtsScenario -and $combinedText -notmatch "SDD drift tool result enforcem
   throw "expected Claude Code hook stream to include SDD drift tool result enforcement"
 }
 if ($Scenario -eq "multi-code-cascade" -or $Scenario -eq "continue-after-sdd") {
-  $codeEnforcementCount = Count-HookResponsesContaining `
-    $outText `
-    "SDD reconciliation review is now pending for this code-change batch"
+  $codeEnforcementCount =
+    (Count-HookResponsesContaining `
+      $outText `
+      "SDD reconciliation review is now pending for this code-change batch") +
+    (Count-HookResponsesContaining `
+      $outText `
+      "SDD drift code review noted.")
   if ($codeEnforcementCount -ne 1) {
-    throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
+    throw "expected exactly one code drift enforcement/reminder for consecutive code edits, got $codeEnforcementCount"
   }
 }
 if (!$isDtsScenario -and $Scenario -ne "continue-after-sdd-code" -and $tasksText -notmatch [regex]::Escape($taskMarker)) {

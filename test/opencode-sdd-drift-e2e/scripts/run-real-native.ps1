@@ -155,10 +155,10 @@ $prompt = @(
   "Do not ask a question, do not inspect .opencode, .git, logs, provider config, environment variables, or hook files."
   "Use only read and write tools."
   "1. Read sdd/changes/native-test/design.md."
-  "2. Write sdd/changes/native-test/design.md while preserving the existing # Design heading, and make it also contain this exact heading: ## $marker."
+  "2. Write sdd/changes/native-test/design.md while preserving the existing # Design heading and all existing body text, and make it also contain this exact heading: ## $marker."
   "3. Wait for the design.md write tool result and inspect that tool result text."
   "4. If the tool result contains SDD drift enforcement or SDD drift reminder, read sdd/changes/native-test/tasks.md."
-  "5. Write sdd/changes/native-test/tasks.md so it contains this exact task line: - [x] $taskMarker."
+  "5. Write sdd/changes/native-test/tasks.md while preserving the existing # Tasks heading and all existing checklist items, and make it also contain this exact task line: - [x] $taskMarker."
   "Finish only after design.md and tasks.md are synchronized."
 ) -join " "
 
@@ -216,8 +216,14 @@ if ($designText -notmatch [regex]::Escape($marker)) {
 if ($designText -notmatch "(?m)^# Design\s*$") {
   throw "expected design.md to preserve the top-level # Design heading"
 }
+if ($designText -notmatch "Initial design") {
+  throw "expected design.md to preserve existing body text"
+}
 if ($tasksText -notmatch [regex]::Escape($taskMarker)) {
   throw "expected tasks.md to contain native real model synchronization marker"
+}
+if ($tasksText -notmatch [regex]::Escape("- [ ] Initial task.")) {
+  throw "expected tasks.md to preserve existing checklist item"
 }
 if ($outText -notmatch "SDD drift") {
   throw "expected OpenCode output to include native SDD drift reminder"

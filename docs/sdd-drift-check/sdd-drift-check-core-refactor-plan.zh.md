@@ -1,5 +1,12 @@
 # sdd-drift-check 核心重构方案
 
+## 文档更新记录
+
+| 版本 | 日期 | 说明 |
+| --- | --- | --- |
+| v1.1 | 2026-05-26 | 根据评审记录补充 PRD/design 对齐关系、FR11 当前状态、核心模块依赖图、3A 安全网拆分、阶段回滚约定和 OMO 边界。 |
+| v1.0 | 2026-05-22 | 初始核心重构方案。 |
+
 ## 目标
 
 将 `sdd-drift-check` 从“Claude command hook 承载大部分核心逻辑”的结构，重构为“Claude Code / OpenCode 两个 adapter 共享 core”的结构。
@@ -21,6 +28,7 @@ plugins/sdd-drift-check/src/
 │  └─ opencode/
 │     └─ native-plugin.js
 ├─ core/
+│  ├─ attribution.js
 │  ├─ diagnostics.js
 │  ├─ drift-engine.js
 │  ├─ file-classifier.js
@@ -39,6 +47,52 @@ plugins/sdd-drift-check/src/
 └─ index.js
 ```
 
+## 与 PRD / Design 的关系
+
+本方案是对 PRD / design 的工程拆分细化，不替代原需求和设计文档：
+
+- PRD：[sdd-drift-check-hook.prd.zh.md](./sdd-drift-check-hook.prd.zh.md)
+- Design：[sdd-drift-check-hook.design.zh.md](./sdd-drift-check-hook.design.zh.md)
+
+阶段对应关系：
+
+| 本方案阶段 | 对应 design 阶段 | 说明 |
+| --- | --- | --- |
+| 3A-1 core 安全网 | P0 snapshot baseline | 先固定 core 行为，不移动代码。 |
+| 3A-2 adapter 安全网 | P0 + adapter baseline | 固定 Claude Code / OpenCode 输出和事件适配行为。 |
+| 3B 路径与文件分类 | P1 结构重排 | 抽离跨平台路径、文件类型和 SDD 目录识别。 |
+| 3C 诊断、锁和存储 | P1 / P2 基础设施 | 抽离日志、状态目录、原子写和锁。 |
+| 3D Session State | P1 / P5 部分 | 保留同会话内的工具事件、peer sync、question checkpoint 和 review 状态。 |
+| 3E Project State | P5 | 抽离跨会话 project drift、active change-dir、doc sync 和 carry-over。 |
+| 3F Drift Engine / Attribution | P5 / P6 | 合并 session + project 视角，处理 drift gap、code review 和 FR11 attribution。 |
+| 3G Prompts / Report / Hydration | P4 / P5 / P6 | 抽离模型可见提示词、报告生成、transcript/checkpoint hydration。 |
+| 最终验收 | P6 | 两个用户面真实模型回归。 |
+
+FR11 LLM 评审归属在本方案范围内，但采用“迁移现有能力 + 补测试”的方式推进。当前仓库已有 `src/attribution.js`，包含 `no-attribution` / `single` / `session-touched` / `active-ttl` / `needs-review` 决策雏形；重构时应迁入 `src/core/attribution.js`，并在 3F / 3G 中补齐 attribution review prompt、后续动作观察和 Stop 兜底的 characterization tests。若测试暴露需要新增行为，必须在对应阶段补测试后再实现。
+
+## 核心模块依赖图
+
+目标是单向依赖，避免 adapter 和 core 之间重新长出循环引用：
+
+```text
+L0  runtime-config | paths
+L1  file-classifier | sdd-rules | diagnostics | locks | state-storage
+L2  tool-events | session-state | attribution
+L3  project-state | hydration
+L4  drift-engine
+L5  prompts | report
+L6  output
+L7  adapters/claude-code | adapters/opencode | handlers | index
+```
+
+约束：
+
+- `core/*` 不依赖 adapter。
+- `output` 只负责按运行时协议输出，不反向读取状态。
+- `prompts` 只接收 drift-engine 产生的结构化 gap，不直接扫描文件系统。
+- `project-state` 可以读取文件系统事实，但不直接生成模型提示词。
+- `adapters/*` 负责输入归一化和运行时协议，不承载 drift 业务判断。
+
 ## 当前基础
 
 已完成的结构基础：
@@ -49,6 +103,15 @@ src/core/
 ├─ runtime-config.js
 ├─ sdd-rules.js
 └─ tool-events.js
+```
+
+待迁移的现有能力：
+
+```text
+src/attribution.js
+src/dispatcher.js
+src/handlers/*
+src/adapters/claude-code/command-hook.js 中仍承载的大部分状态、drift、prompt、report、hydration 逻辑
 ```
 
 已完成的 adapter 分层：
@@ -70,7 +133,20 @@ src/adapters/opencode/native-plugin.js
 
 禁止一次性大搬迁状态机。状态、project state、drift engine、prompt/report/hydration 必须分阶段拆。
 
-## 阶段 3A：扩展安全网
+每阶段提交约定：
+
+- 每阶段完成后单独 commit，提交信息使用 `refactor(core/3X): ...` 或 `test(core/3X): ...`。
+- 阶段失败时先在当前分支修复；若需要回退，未推送提交可在明确确认后回到上一阶段提交，已推送提交优先使用 `git revert` 或新分支重做。
+- 发布件 `sdd-drift-check-hook.js` 和 `sdd-drift-check-opencode.js` 必须随源码同步构建。
+- `src/index.js` 是模块导出聚合入口，测试可通过它访问稳定导出的 core / adapter 能力。
+
+测试位置约定：
+
+- 短期继续复用 `test/opencode-sdd-drift-e2e/scripts/test-core-*.cjs`，但测试内容必须保持 runtime-agnostic，不得依赖 OpenCode 专属行为。
+- adapter 专属测试继续放在对应 e2e 工程中。
+- 若 core 测试继续增多，后续单独迁到 `test/core/`；本轮重构不把测试目录迁移作为阻塞项。
+
+## 阶段 3A-1：Core 行为安全网
 
 先补测试，不移动核心代码。
 
@@ -85,9 +161,6 @@ src/adapters/opencode/native-plugin.js
 - DTS / 问题单上下文跳过。
 - project.json carry-over drift。
 - `.sdd-drift-report.md` 内容不变时不刷新 timestamp。
-- checkpoint output hydration。
-- transcript hydration。
-- OpenCode native adapter before-cache / Stop inject / tool result append。
 
 新增或扩展测试：
 
@@ -95,13 +168,50 @@ src/adapters/opencode/native-plugin.js
 test-core-drift-characterization.cjs
 test-core-project-carryover.cjs
 test-core-report-idempotent.cjs
-test-core-hydration.cjs
+test-core-attribution.cjs
 ```
 
 验收：
 
 ```powershell
 cd test\opencode-sdd-drift-e2e
+npm test
+```
+
+```bash
+cd test/opencode-sdd-drift-e2e
+npm test
+```
+
+## 阶段 3A-2：Adapter 行为安全网
+
+只补 Claude Code / OpenCode adapter characterization，不移动核心代码。
+
+覆盖场景：
+
+- checkpoint output hydration。
+- transcript hydration。
+- OpenCode native adapter before-cache / Stop inject / tool result append。
+- Claude Code Stop / PreCompact / PreToolUse 输出协议。
+- OpenCode session.idle / session.status idle best-effort continuation。
+
+新增或扩展测试：
+
+```text
+test-core-hydration.cjs
+test-adapter-claude-output.cjs
+test-adapter-opencode-native.cjs
+```
+
+验收：
+
+```powershell
+cd test\opencode-sdd-drift-e2e
+npm test
+```
+
+```bash
+cd test/opencode-sdd-drift-e2e
 npm test
 ```
 
@@ -116,17 +226,27 @@ src/core/file-classifier.js
 
 迁移内容：
 
+`src/core/paths.js` 只承载跨平台路径工具：
+
 - `toPosix`
 - `normalizeKey`
 - `samePath`
 - `rel`
 - `resolveFile`
+
+`src/core/file-classifier.js` 只承载纯路径分类：
+
 - `isSddPath`
 - `isSddChangePath`
+- `isCodePath`
+
+`src/core/sdd-rules.js` 承载 SDD 业务规则：
+
 - `findSdd`
 - `getChangeDoc`
-- `isCodePath`
-- archive change-dir 判断
+- `CHANGE_DOC_REQUIREMENTS`
+- archive marker / status 判断。
+- DTS / 问题单上下文模式。
 
 新增测试：
 
@@ -147,6 +267,11 @@ test-core-file-classifier.cjs
 验收：
 
 ```powershell
+npm run build
+npm test
+```
+
+```bash
 npm run build
 npm test
 ```
@@ -215,6 +340,12 @@ src/core/session-state.js
 - question checkpoint 状态。
 - PreCompact 需要的 interrupted-review 状态。
 
+边界：
+
+- session peer sync 只表示同一会话内已经观察到的 design/tasks/proposal 同步关系。
+- session state 不直接判断跨会话 carry-over drift；跨会话事实由 3E project-state 负责。
+- PreCompact 读取 session 中未完成的 checkpoint 状态，但 handler 注册仍留在 adapter/dispatcher 层。
+
 新增测试：
 
 ```text
@@ -237,6 +368,11 @@ npm run build
 npm test
 ```
 
+```bash
+npm run build
+npm test
+```
+
 ## 阶段 3E：抽 Project State
 
 新增模块：
@@ -255,6 +391,15 @@ src/core/project-state.js
 - `linkedCode`
 - active change-dir TTL。
 - carry-over drift 基线。
+- project-level peer drift。
+- `docSyncs` 跨会话文档同步证据。
+- 旧 `peerSyncs` 字段到 `docSyncs` 的兼容迁移。
+
+边界：
+
+- project state 是 session state 的补充，不替代 session 内的 peer requirement。
+- `docSyncs` 用来避免 design/tasks ping-pong，不应再命名为 session 语义的 `peerSyncs`。
+- ProjectState schema 必须与 design §3.2 保持一致；若 schema 因真实问题修正，需要同步更新 design 文档。
 
 新增测试：
 
@@ -269,10 +414,16 @@ test-core-project-state.cjs
 - `linkedCode` cap。
 - active change-dir TTL。
 - archive 后 project drift 清零。
+- 旧 `peerSyncs` project 文件读取后保存为 `docSyncs`。
 
 验收：
 
 ```powershell
+npm run build
+npm test
+```
+
+```bash
 npm run build
 npm test
 ```
@@ -283,6 +434,7 @@ npm test
 
 ```text
 src/core/drift-engine.js
+src/core/attribution.js
 ```
 
 迁移内容：
@@ -292,14 +444,21 @@ src/core/drift-engine.js
 - `collectCodeGaps`
 - `collectCombinedPeerGaps`
 - `collectCombinedCodeGaps`
-- attribution review decision。
+- `src/attribution.js` 中已有的 attribution review decision。
 - no-edit confirmation 判定。
 - carry-over reminder 判定。
+
+说明：
+
+- `collectCombinedPeerGaps` / `collectCombinedCodeGaps` 不是全新概念，当前已在 adapter 中存在；本阶段目标是迁入 core 并稳定其输入输出契约。
+- `buildQuestionCheckpointEnforcement` 当前也已存在，但属于 prompt 层，迁移到 3G；3F 只产出它需要的 pending gap。
+- FR11 attribution 在本阶段只负责决策和状态，不直接生成模型提示词。
 
 新增测试：
 
 ```text
 test-core-drift-engine.cjs
+test-core-attribution.cjs
 ```
 
 重点覆盖：
@@ -312,10 +471,16 @@ test-core-drift-engine.cjs
 - 多 active change-dir。
 - 已归档 change-dir 跳过。
 - no-edit review 二次确认。
+- attribution `no-attribution` / `single` / `session-touched` / `active-ttl` / `needs-review`。
 
 验收：
 
 ```powershell
+npm run build
+npm test
+```
+
+```bash
 npm run build
 npm test
 ```
@@ -336,10 +501,18 @@ src/core/hydration.js
 - `buildCodeEnforcement`
 - `buildStopEnforcement`
 - `buildQuestionCheckpointEnforcement`
+- `buildSubagentCheckpointEnforcement`
+- attribution review prompt。
 - `buildPreCompactSummary`
 - `.sdd-drift-report.md` 生成和清理。
 - transcript hydration。
 - checkpoint output hydration。
+
+边界：
+
+- PreCompact handler 注册仍在 adapter/dispatcher 层；`buildPreCompactSummary` 迁入 core。
+- Prompt 模块只根据 drift-engine 输出的结构化 gap 生成文本，不直接扫描文件或修改状态。
+- OpenCode tool-result 提示、Claude Stop block、question checkpoint 使用同一组核心语义，但输出协议由 output/adapter 决定。
 
 新增测试：
 
@@ -358,9 +531,24 @@ test-core-hydration.cjs
 - failed tool result 不产生 false drift。
 - checkpoint output 只信任 changed files 摘要。
 
+prompt 测试锚点至少包含：
+
+```text
+Do not add new sections.
+Do not rewrite the document template.
+Find the existing section that should change and edit that section only.
+SDD review is a checkpoint inside the current task, not the final task.
+After the SDD review or synchronization is complete, return to the original user task.
+```
+
 验收：
 
 ```powershell
+npm run build
+npm test
+```
+
+```bash
 npm run build
 npm test
 ```
@@ -376,10 +564,23 @@ npm run e2e:real:native -- -Provider deepseek
 npm run e2e:real:native -- -Provider minimax
 ```
 
-如果需要验证 Claude Code，再运行：
+```bash
+cd test/opencode-sdd-drift-e2e
+npm test
+npm run e2e:real:native -- -Provider deepseek
+npm run e2e:real:native -- -Provider minimax
+```
+
+Claude Code 也必须验证：
 
 ```powershell
 cd test\claude-code-sdd-drift-e2e
+npm run e2e:real -- -Provider deepseek -Scenario multi-code-cascade
+npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
+```
+
+```bash
+cd test/claude-code-sdd-drift-e2e
 npm run e2e:real -- -Provider deepseek -Scenario multi-code-cascade
 npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
 ```
@@ -394,6 +595,9 @@ npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
 | prompt 规则丢失导致模型覆盖模板 | `test-core-prompts.cjs` 检查关键句 |
 | report timestamp 反复刷新 | report idempotent test |
 | Windows 路径大小写和斜杠问题 | `test-core-paths.cjs` 覆盖 |
+| core 模块互相引用形成环 | 依赖图按 L0-L7 单向检查 |
+| FR11 attribution 迁移后行为变弱 | 先补 attribution characterization，再迁移实现 |
+| OMO 旧桥接行为被误当目标用户面 | 文档明确 OMO 非目标用户面，验收只覆盖 Claude Code / OpenCode |
 
 ## 分阶段完成标准
 
@@ -404,7 +608,7 @@ npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
 - `npm test` 成功。
 - 发布件 `sdd-drift-check-hook.js` 和 `sdd-drift-check-opencode.js` 已同步。
 - 不改变用户安装路径。
-- 不重新引入 OMO 作为目标用户面。
+- 不重新引入 OMO 作为目标用户面。旧 OMO 桥接若仍输出 Claude-style hook input，可能 best-effort 可用，但不进入本方案验收矩阵；推荐用户面是 Claude Code command hook 或 OpenCode native plugin。
 
 ---
 
@@ -605,3 +809,22 @@ npm test
 2. **Issue 5–10 在每阶段动工前精细化**
 3. **Issue 11–15 在文档定稿时一并修**
 
+### 评审处理记录 v1.1
+
+| Issue | 处理结论 | 落点 |
+| --- | --- | --- |
+| Issue 1 | 接收 | 新增“与 PRD / Design 的关系”和阶段对应表。 |
+| Issue 2 | 接收并修正口径 | 明确 FR11 已有 `src/attribution.js` 决策雏形，后续迁入 `src/core/attribution.js` 并补测试。 |
+| Issue 3 | 接收 | 将 3A 拆成 3A-1 core 行为安全网和 3A-2 adapter 行为安全网。 |
+| Issue 4 | 接收 | 新增 L0-L7 核心模块依赖图和单向依赖约束。 |
+| Issue 5 | 接收 | 3B 明确 `paths` / `file-classifier` / `sdd-rules` 分工。 |
+| Issue 6 | 接收 | 3D / 3E 明确 session peer sync 与 project carry-over drift 是两层状态。 |
+| Issue 7 | 接收并修正口径 | 说明 `collectCombined*` / `buildQuestionCheckpointEnforcement` 当前已存在，本轮是迁移到 core。 |
+| Issue 8 | 接收 | 3D / 3G 明确 PreCompact 状态和 handler 注册边界。 |
+| Issue 9 | 部分接收 | 增加每阶段 commit 和失败处理约定，但不默认推荐 destructive reset；已推送提交优先 revert 或新分支重做。 |
+| Issue 10 | 反驳迁移路径要求，接收边界说明 | OMO 不再作为目标用户面；旧桥接只视为 best-effort，不进入验收矩阵。 |
+| Issue 11 | 接收 | 最终验收和阶段验收补 bash 命令。 |
+| Issue 12 | 接收 | 执行原则说明 `src/index.js` 是导出聚合入口。 |
+| Issue 13 | 接收 | 3G 增加 prompt 原文测试锚点。 |
+| Issue 14 | 部分接收 | 短期保留现有测试目录，但要求 core tests 保持 runtime-agnostic；后续测试增长后再迁 `test/core/`。 |
+| Issue 15 | 接收 | 3E 明确 ProjectState schema 需与 design §3.2 同步，特别是 `docSyncs` 迁移。 |

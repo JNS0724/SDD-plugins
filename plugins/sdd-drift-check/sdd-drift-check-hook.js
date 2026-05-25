@@ -57,68 +57,6 @@ var require_actions = __commonJS({
   }
 });
 
-// src/attribution.js
-var require_attribution = __commonJS({
-  "src/attribution.js"(exports2, module2) {
-    var toPosix2 = (fp) => String(fp || "").replace(/\\/g, "/");
-    var splitPath = (fp) => toPosix2(fp).split("/").filter(Boolean);
-    var sharedPrefixDepth = (left, right) => {
-      const leftParts = splitPath(left);
-      const rightParts = splitPath(right);
-      let depth = 0;
-      while (depth < leftParts.length && depth < rightParts.length && leftParts[depth] === rightParts[depth]) {
-        depth += 1;
-      }
-      return depth;
-    };
-    var relFromCwd = (cwd, fp) => {
-      const normalizedCwd = toPosix2(cwd).replace(/\/+$/, "");
-      const normalizedFile = toPosix2(fp);
-      return normalizedFile.startsWith(`${normalizedCwd}/`) ? normalizedFile.slice(normalizedCwd.length + 1) : normalizedFile;
-    };
-    var pathInChangeDir = (cwd, fp, relDir) => {
-      const relFile = relFromCwd(cwd, fp);
-      const normalizedDir = toPosix2(relDir).replace(/\/+$/, "");
-      return relFile === normalizedDir || relFile.startsWith(`${normalizedDir}/`);
-    };
-    var pathSimilar = (cwd, codeFile, linkedCode = []) => {
-      const relCodeFile = relFromCwd(cwd, codeFile);
-      return linkedCode.some((item) => {
-        const linkedPath = toPosix2(item?.path || "");
-        if (!linkedPath) return false;
-        return linkedPath === relCodeFile || sharedPrefixDepth(relCodeFile, linkedPath) >= 2;
-      });
-    };
-    var decide = ({ cwd, session, project, codeFile, now = Date.now() }) => {
-      const candidates = Object.values(project?.changeDirs || {}).filter((dir) => !dir.archived);
-      if (candidates.length === 0) return { kind: "no-attribution" };
-      if (candidates.length === 1) return { kind: "single", target: candidates[0] };
-      const sessionTouched = candidates.filter(
-        (dir) => (session?.edited || []).some((file) => pathInChangeDir(cwd, file, dir.relDir))
-      );
-      if (sessionTouched.length === 1) return { kind: "session-touched", target: sessionTouched[0] };
-      if (project?.activeChangeDir && now < Number(project.activeUntilMs || 0)) {
-        const active = candidates.find((dir) => dir.relDir === project.activeChangeDir);
-        if (active && pathSimilar(cwd, codeFile, active.linkedCode)) {
-          return { kind: "active-ttl", target: active };
-        }
-      }
-      return { kind: "needs-review", candidates };
-    };
-    var targetsForDecision = (decision) => {
-      if (decision?.target) return [decision.target];
-      return decision?.candidates || [];
-    };
-    var Attribution2 = {
-      decide,
-      pathSimilar,
-      sharedPrefixDepth,
-      targetsForDecision
-    };
-    module2.exports = { Attribution: Attribution2 };
-  }
-});
-
 // src/handlers/pre-compact.js
 var require_pre_compact = __commonJS({
   "src/handlers/pre-compact.js"(exports2, module2) {
@@ -644,13 +582,2657 @@ var require_stdin = __commonJS({
   }
 });
 
-// src/index.js
+// src/core/tool-events.js
+var require_tool_events = __commonJS({
+  "src/core/tool-events.js"(exports2, module2) {
+    var FILE_TOOL_NAMES = /* @__PURE__ */ new Set(["read", "edit", "write", "multiedit"]);
+    var SUBAGENT_CHECKPOINT_TOOL_NAMES = /* @__PURE__ */ new Set([
+      "background_output",
+      "delegate_task",
+      "task"
+    ]);
+    var QUESTION_CHECKPOINT_TOOL_NAMES = /* @__PURE__ */ new Set([
+      "ask_user",
+      "ask_user_question",
+      "askuser",
+      "askuserquestion",
+      "confirm",
+      "confirmation",
+      "question"
+    ]);
+    var getToolFilePath2 = (args) => args?.file_path || args?.filePath || args?.path || args?.file;
+    var normalizeToolName = (tool) => {
+      const name = String(tool || "").trim().toLowerCase().replace(/[-\s.]+/g, "_");
+      if (name === "multi_edit" || name === "multi-edit") return "multiedit";
+      return name;
+    };
+    var isSubagentCheckpointTool2 = (tool) => {
+      const normalized = normalizeToolName(tool);
+      if (normalized === "background_task") return false;
+      return SUBAGENT_CHECKPOINT_TOOL_NAMES.has(normalized);
+    };
+    var isQuestionCheckpointTool2 = (tool) => QUESTION_CHECKPOINT_TOOL_NAMES.has(normalizeToolName(tool));
+    var isSupportedOpenCodeToolEvent = (tool, args) => {
+      const normalized = normalizeToolName(tool);
+      if (FILE_TOOL_NAMES.has(normalized) && getToolFilePath2(args || {})) return true;
+      if (normalized === "background_task") return false;
+      if (isQuestionCheckpointTool2(normalized)) return true;
+      return isSubagentCheckpointTool2(normalized);
+    };
+    var normalizeToolArgs = (args) => {
+      const copy = { ...args || {} };
+      const fp = getToolFilePath2(copy);
+      if (fp && !copy.file_path) copy.file_path = fp;
+      return copy;
+    };
+    module2.exports = {
+      FILE_TOOL_NAMES,
+      SUBAGENT_CHECKPOINT_TOOL_NAMES,
+      QUESTION_CHECKPOINT_TOOL_NAMES,
+      getToolFilePath: getToolFilePath2,
+      isQuestionCheckpointTool: isQuestionCheckpointTool2,
+      isSubagentCheckpointTool: isSubagentCheckpointTool2,
+      isSupportedOpenCodeToolEvent,
+      normalizeToolArgs,
+      normalizeToolName
+    };
+  }
+});
+
+// src/core/paths.js
+var require_paths = __commonJS({
+  "src/core/paths.js"(exports2, module2) {
+    var path2 = require("path");
+    var toPosix2 = (fp) => String(fp || "").replace(/\\/g, "/");
+    var isCaseInsensitiveFs = () => process.platform === "win32" || process.platform === "darwin";
+    var normalizeKey2 = (fp) => {
+      const normalized = toPosix2(path2.resolve(fp));
+      return isCaseInsensitiveFs() ? normalized.toLowerCase() : normalized;
+    };
+    var samePath2 = (left, right) => normalizeKey2(left) === normalizeKey2(right);
+    var rel2 = (cwd, fp) => toPosix2(path2.relative(cwd, fp));
+    var resolveFile2 = (cwd, fp) => path2.isAbsolute(fp) ? path2.normalize(fp) : path2.resolve(cwd, fp);
+    module2.exports = {
+      isCaseInsensitiveFs,
+      normalizeKey: normalizeKey2,
+      rel: rel2,
+      resolveFile: resolveFile2,
+      samePath: samePath2,
+      toPosix: toPosix2
+    };
+  }
+});
+
+// src/core/file-classifier.js
+var require_file_classifier = __commonJS({
+  "src/core/file-classifier.js"(exports2, module2) {
+    var path2 = require("path");
+    var { toPosix: toPosix2 } = require_paths();
+    var CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i;
+    var isSddPath2 = (fp) => {
+      const normalized = toPosix2(path2.resolve(fp));
+      return normalized.includes("/sdd/") || normalized.includes("/.sdd/");
+    };
+    var isSddChangePath = (fp) => {
+      const normalized = toPosix2(path2.resolve(fp));
+      return normalized.includes("/sdd/changes/") || normalized.includes("/.sdd/changes/");
+    };
+    var isCodePath2 = (fp) => CODE_EXT.test(fp) && !isSddPath2(fp);
+    module2.exports = {
+      CODE_EXT,
+      isCodePath: isCodePath2,
+      isSddChangePath,
+      isSddPath: isSddPath2
+    };
+  }
+});
+
+// src/core/runtime-config.js
+var require_runtime_config = __commonJS({
+  "src/core/runtime-config.js"(exports2, module2) {
+    var outputMode = String(process.env.SDD_DRIFT_OUTPUT || "").toLowerCase();
+    var openCodeStopMode = String(process.env.SDD_DRIFT_OPENCODE_STOP_MODE || "").toLowerCase();
+    var config = {
+      SHOW_WARNINGS: process.env.SDD_DRIFT_SHOW_WARNINGS === "1",
+      STRICT_BLOCK: process.env.SDD_DRIFT_STRICT === "1",
+      DEBUG: process.env.SDD_DRIFT_DEBUG === "1",
+      OUTPUT_MODE: outputMode,
+      OPENCODE_STOP_MODE: openCodeStopMode,
+      OPENCODE_STOP_REPORT_ONLY: openCodeStopMode === "report-only" || openCodeStopMode === "off" || process.env.SDD_DRIFT_OPENCODE_STOP_INJECT === "0",
+      STOP_MAX_BLOCKS: Number.parseInt(process.env.SDD_DRIFT_STOP_MAX_BLOCKS || "2", 10),
+      CODE_REVIEW_STOP_MAX_BLOCKS: Number.parseInt(
+        process.env.SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS || "1",
+        10
+      ),
+      CODE_REVIEW_TOOL_MAX_REMINDERS: Number.parseInt(
+        process.env.SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS || "1",
+        10
+      ),
+      CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS: Number.parseInt(
+        process.env.SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS || "1",
+        10
+      ),
+      DIAGNOSTIC_LOG: process.env.SDD_DRIFT_LOG !== "0",
+      DIAGNOSTIC_LOG_MAX_BYTES: Number.parseInt(
+        process.env.SDD_DRIFT_LOG_MAX_BYTES || String(2 * 1024 * 1024),
+        10
+      ),
+      DIAGNOSTIC_LOG_RETENTION_DAYS: Number.parseFloat(
+        process.env.SDD_DRIFT_LOG_RETENTION_DAYS || "3"
+      ),
+      DIAGNOSTIC_SUMMARY_WINDOW_MS: Number.parseInt(
+        process.env.SDD_DRIFT_LOG_SUMMARY_WINDOW_MS || String(60 * 1e3),
+        10
+      ),
+      DTS_CONTEXT_SKIP: process.env.SDD_DRIFT_DTS_SKIP !== "0",
+      DTS_CONTEXT_OVERRIDE: String(process.env.SDD_DRIFT_DTS_CONTEXT || "").toLowerCase(),
+      TOOL_EVENT_CAP: 200,
+      TRANSCRIPT_EVENT_CAP: Number.parseInt(
+        process.env.SDD_DRIFT_TRANSCRIPT_EVENT_CAP || "2000",
+        10
+      ),
+      CODE_REVIEW_CONFIRMATION_CAP: 50,
+      DTS_CONTEXT_TEXT_MAX_BYTES: 512 * 1024,
+      CHECKPOINT_OUTPUT_TEXT_MAX_BYTES: 64 * 1024,
+      CHECKPOINT_MTIME_SCAN: process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN !== "0",
+      CHECKPOINT_MTIME_WINDOW_MS: Number.parseInt(
+        process.env.SDD_DRIFT_CHECKPOINT_MTIME_WINDOW_MS || String(10 * 60 * 1e3),
+        10
+      ),
+      CHECKPOINT_MTIME_SCAN_MAX_FILES: Number.parseInt(
+        process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN_MAX_FILES || "50",
+        10
+      ),
+      CHECKPOINT_MTIME_SCAN_MAX_VISITS: Number.parseInt(
+        process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN_MAX_VISITS || "2000",
+        10
+      ),
+      DEFAULT_LOCK_STALE_MS: 5 * 60 * 1e3,
+      STATE_LOCK_STALE_MS: 30 * 1e3,
+      STATE_LOCK_WAIT_MS: 5 * 1e3,
+      STATE_LOCK_RETRY_MS: 20,
+      STATE_RETENTION_MS: 7 * 24 * 60 * 60 * 1e3,
+      SESSION_FILES_MAX: Number.parseInt(process.env.SDD_DRIFT_SESSION_FILES_MAX || "1000", 10),
+      STDIN_TIMEOUT_MS: Number.parseInt(process.env.SDD_DRIFT_STDIN_TIMEOUT_MS || "5000", 10),
+      PROJECT_LOCK_WAIT_MS: 2 * 1e3,
+      PROJECT_LINKED_CODE_CAP: Number.parseInt(
+        process.env.SDD_DRIFT_PROJECT_LINKED_CODE_CAP || "200",
+        10
+      ),
+      CIRCUIT_MAX_FAILURES: Number.parseInt(
+        process.env.SDD_DRIFT_CIRCUIT_MAX_FAILURES || "5",
+        10
+      ),
+      CIRCUIT_COOLDOWN_MS: Number.parseInt(
+        process.env.SDD_DRIFT_CIRCUIT_COOLDOWN_MS || String(60 * 1e3),
+        10
+      ),
+      ACTIVE_CHANGE_DIR_TTL_MS: Number.parseInt(
+        process.env.SDD_DRIFT_ACTIVE_TTL_MS || String(7 * 24 * 60 * 60 * 1e3),
+        10
+      )
+    };
+    module2.exports = config;
+  }
+});
+
+// src/core/sdd-rules.js
+var require_sdd_rules = __commonJS({
+  "src/core/sdd-rules.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { toPosix: toPosix2 } = require_paths();
+    var STATE_DIR = ".sdd-drift-hook-state";
+    var PEER_FILES = ["design.md", "tasks.md"];
+    var PROPOSAL_FILE2 = "proposal.md";
+    var DESIGN_FILE2 = "design.md";
+    var TASKS_FILE2 = "tasks.md";
+    var REVIEW_FILES = [DESIGN_FILE2, TASKS_FILE2];
+    var ARCHIVED_CHANGE_DIR_NAMES = /* @__PURE__ */ new Set(["archive", "archives", "archived", ".archive", ".archived", "\u5DF2\u5F52\u6863"]);
+    var ARCHIVE_MARKER_FILES = [".archived", ".archive", "ARCHIVED", "archived.md", "archive.md", "\u5DF2\u5F52\u6863.md"];
+    var ARCHIVE_STATUS_FILES = ["status.md", "state.md", "metadata.md", ".status"];
+    var CHANGE_DOC_REQUIREMENTS = {
+      [PROPOSAL_FILE2]: [DESIGN_FILE2],
+      [DESIGN_FILE2]: [TASKS_FILE2],
+      [TASKS_FILE2]: [DESIGN_FILE2]
+    };
+    var DOCUMENT_SYNC_RULES = [
+      "Before editing any SDD document, read the current file and preserve its existing Markdown template.",
+      "Keep every existing heading line exactly as-is, including the top-level title such as # Design or # Tasks, and keep the original heading order.",
+      "Do not replace the whole document with a summary, marker, or single-line result.",
+      "Do not add new sections.",
+      "Do not rewrite the document template.",
+      "Find the existing section that should change and edit that section only.",
+      "Do not add a new section or rewrite the template just to satisfy this enforcement.",
+      "Do not remove unrelated existing paragraphs, checklist items, examples, requirements, or notes while synchronizing drift.",
+      "For existing SDD documents, prefer Edit or MultiEdit. If Write is necessary, copy the original file content first and write the full document including all existing headings, template text, paragraphs, and checklist items.",
+      "Do not edit design.md and tasks.md in the same parallel tool batch; update one SDD document, wait for its tool result and hook feedback, then update the required peer.",
+      "Find the most appropriate existing heading, paragraph, list item, or task item, and make the smallest needed update there.",
+      "For tasks.md, preserve the task-list format and update the relevant existing checklist item when possible."
+    ];
+    var ACTIVE_SDD_ALIGNMENT_RULES = [
+      "Active SDD documents are live planning records until their change directory is archived; before the final answer, keep active design.md and tasks.md aligned with the implemented code.",
+      "Do not treat an optimization or refactor as documentation-free if it changes behavior, API or contracts, algorithms, state or data flow, data structures, performance strategy, error handling, security boundaries, user-visible results, or implementation constraints; update design.md when any of those code facts changed.",
+      "Do not satisfy SDD alignment by only adding a marker, completion note, or generic summary; replace the specific stale sentence, paragraph, or checklist item so the document states the actual implemented behavior, API, error handling, performance strategy, or task status.",
+      "When a changed code file adds or changes exported names, public function signatures, literal return values, config defaults, user-visible strings, or acceptance-relevant constants, carry those concrete facts into the appropriate existing design.md/tasks.md wording instead of summarizing them vaguely.",
+      "After editing design.md, re-read the changed sentence mentally and ensure no old wording still contradicts the code you just wrote.",
+      "Update tasks.md when the code completes, changes, cancels, splits, or invalidates an implementation task, checklist item, planned step, or acceptance condition.",
+      "The no-document-change path is only valid for purely mechanical edits with no design or task impact, such as formatting-only changes, comment-only edits, test-only scaffolding, or dependency/config churn that does not change the active SDD plan.",
+      "If you choose no SDD edit, explicitly state which active design.md/tasks.md files you reviewed and why the code change has no design or task impact.",
+      "Modify only content relevant to the current code batch; do not invent future requirements or broaden the scope."
+    ];
+    var ATTRIBUTION_REVIEW_RULES2 = [
+      "Purely mechanical changes (formatting, comment-only edits, test-scaffolding, dependency bumps, lint fixes) do not require any SDD document update. State this conclusion explicitly in your response and continue.",
+      "If the code change implements behavior already described in a candidate change-dir's design.md, and that change-dir's tasks.md already reflects the implementation, no SDD action is needed.",
+      "If the code change adds, changes, or removes behavior not described in any candidate change-dir's design.md, update the most relevant change-dir's design.md to state the actual implemented behavior. Update tasks.md if a tracked task item is now complete or invalidated.",
+      "If the code change is genuinely unrelated to any active change-dir, acknowledge it as out-of-SDD scope in your response, or create a new sdd/changes/<id>/ directory when the work is feature-sized and warrants tracking.",
+      "If multiple candidate change-dirs could apply, choose the most specific match based on design.md content and briefly document the reasoning in your response. Do not edit unrelated change-dirs."
+    ];
+    var SUBAGENT_REVIEW_RULE = "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits.";
+    var RESUME_ORIGINAL_TASK_RULES = [
+      "SDD review is a checkpoint inside the current task, not the final task.",
+      "Treat SDD review/synchronization as a checkpoint inside the current user task, not as the whole task.",
+      "After the SDD review or synchronization is complete, return to the original user task.",
+      "After the required SDD work is complete, resume the original user task/request from where you paused if any implementation, verification, cleanup, or response work remains.",
+      "Only give the final answer when both the original user task and the required SDD review/synchronization are complete."
+    ];
+    var formatAttributionReviewRules = () => [
+      "When deciding whether SDD documents need edits, apply these attribution review rules in order:",
+      ...ATTRIBUTION_REVIEW_RULES2.map((rule, index) => `${index + 1}. ${rule}`)
+    ];
+    var findSdd2 = (fp) => {
+      const parts = toPosix2(path2.resolve(fp)).split("/");
+      for (let index = parts.length - 1; index >= 0; index -= 1) {
+        const part = parts[index];
+        if (part !== "sdd" && part !== ".sdd") continue;
+        const rel2 = parts.slice(index + 1).join("/");
+        if (rel2 === "" || rel2.startsWith("changes/") || rel2.startsWith("specs/")) {
+          return path2.normalize(parts.slice(0, index + 1).join("/"));
+        }
+      }
+      return null;
+    };
+    var getChangeDoc2 = (fp) => {
+      const root = findSdd2(fp);
+      const rawRel = root ? path2.relative(root, fp) : "";
+      if (!root || rawRel.startsWith("..")) return null;
+      const rel2 = toPosix2(rawRel);
+      const match = rel2.match(/^changes\/([^/]+)\/([^/]+\.md)$/);
+      if (!match) return { root, rel: rel2 };
+      const [, id, file] = match;
+      return {
+        root,
+        rel: rel2,
+        id,
+        file,
+        dir: path2.join(root, "changes", id)
+      };
+    };
+    var isArchivedChangeDirName = (dir) => {
+      const name = path2.basename(path2.normalize(dir)).toLowerCase();
+      return ARCHIVED_CHANGE_DIR_NAMES.has(name) || /(^|[-_.])(archived|已归档)($|[-_.])/.test(name);
+    };
+    var isArchiveStatusText = (text) => /^\s*(status|state)\s*[:：]\s*(archived|archive|closed)\s*$/im.test(text || "") || /^\s*(状态|阶段)\s*[:：]\s*(已归档|归档)\s*$/im.test(text || "");
+    var readSmallText = (fp) => {
+      try {
+        return fs2.readFileSync(fp, "utf8").slice(0, 4096);
+      } catch {
+        return "";
+      }
+    };
+    var isArchivedChangeDir2 = (dir) => {
+      if (!dir || isArchivedChangeDirName(dir)) return true;
+      for (const marker of ARCHIVE_MARKER_FILES) {
+        if (fs2.existsSync(path2.join(dir, marker))) return true;
+      }
+      for (const statusFile of ARCHIVE_STATUS_FILES) {
+        const text = readSmallText(path2.join(dir, statusFile));
+        if (text && isArchiveStatusText(text)) return true;
+      }
+      return false;
+    };
+    var hasSddWorkspace2 = (cwd) => {
+      for (const name of ["sdd", ".sdd"]) {
+        try {
+          if (fs2.statSync(path2.join(cwd, name)).isDirectory()) return true;
+        } catch {
+        }
+      }
+      return false;
+    };
+    module2.exports = {
+      ACTIVE_SDD_ALIGNMENT_RULES,
+      ARCHIVED_CHANGE_DIR_NAMES,
+      ARCHIVE_MARKER_FILES,
+      ARCHIVE_STATUS_FILES,
+      ATTRIBUTION_REVIEW_RULES: ATTRIBUTION_REVIEW_RULES2,
+      CHANGE_DOC_REQUIREMENTS,
+      DESIGN_FILE: DESIGN_FILE2,
+      DOCUMENT_SYNC_RULES,
+      PEER_FILES,
+      PROPOSAL_FILE: PROPOSAL_FILE2,
+      RESUME_ORIGINAL_TASK_RULES,
+      REVIEW_FILES,
+      STATE_DIR,
+      SUBAGENT_REVIEW_RULE,
+      TASKS_FILE: TASKS_FILE2,
+      formatAttributionReviewRules,
+      findSdd: findSdd2,
+      getChangeDoc: getChangeDoc2,
+      hasSddWorkspace: hasSddWorkspace2,
+      isArchiveStatusText,
+      isArchivedChangeDir: isArchivedChangeDir2,
+      isArchivedChangeDirName
+    };
+  }
+});
+
+// src/core/state-storage.js
+var require_state_storage = __commonJS({
+  "src/core/state-storage.js"(exports2, module2) {
+    var crypto2 = require("crypto");
+    var fs2 = require("fs");
+    var os = require("os");
+    var path2 = require("path");
+    var { normalizeKey: normalizeKey2 } = require_paths();
+    var { STATE_RETENTION_MS } = require_runtime_config();
+    var { STATE_DIR } = require_sdd_rules();
+    var sanitize = (value) => String(value || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
+    var hash2 = (value) => crypto2.createHash("sha1").update(String(value)).digest("hex").slice(0, 12);
+    var stateDirCache = /* @__PURE__ */ new Map();
+    var findNearestGitDir = (cwd) => {
+      let dir = path2.resolve(cwd);
+      while (dir !== path2.dirname(dir)) {
+        const gitPath = path2.join(dir, ".git");
+        try {
+          const stat = fs2.statSync(gitPath);
+          if (stat.isDirectory()) return gitPath;
+          if (stat.isFile()) {
+            const content = fs2.readFileSync(gitPath, "utf8").trim();
+            const match = content.match(/^gitdir:\s*(.+)$/i);
+            if (match) return path2.resolve(dir, match[1].trim());
+          }
+        } catch {
+        }
+        dir = path2.dirname(dir);
+      }
+      return null;
+    };
+    var canUseStateDir = (dir) => {
+      const probeBase = `.probe.${process.pid}.${Date.now()}`;
+      const tmp = path2.join(dir, `${probeBase}.tmp`);
+      const target = path2.join(dir, probeBase);
+      try {
+        fs2.mkdirSync(dir, { recursive: true });
+        fs2.writeFileSync(tmp, "");
+        fs2.renameSync(tmp, target);
+        fs2.unlinkSync(target);
+        return true;
+      } catch {
+        try {
+          fs2.unlinkSync(tmp);
+        } catch {
+        }
+        try {
+          fs2.unlinkSync(target);
+        } catch {
+        }
+        return false;
+      }
+    };
+    var stateDir = (cwd) => {
+      const cacheKey = normalizeKey2(cwd);
+      const cached = stateDirCache.get(cacheKey);
+      if (cached) return cached;
+      const gitDir = findNearestGitDir(cwd);
+      if (gitDir) {
+        const gitStateDir = path2.join(gitDir, "sdd-drift-hook-state");
+        if (canUseStateDir(gitStateDir)) {
+          stateDirCache.set(cacheKey, gitStateDir);
+          return gitStateDir;
+        }
+      }
+      const localStateDir = path2.join(cwd, STATE_DIR);
+      if (canUseStateDir(localStateDir)) {
+        stateDirCache.set(cacheKey, localStateDir);
+        return localStateDir;
+      }
+      const tempStateDir = path2.join(os.tmpdir(), "sdd-drift-check", hash2(path2.resolve(cwd)));
+      stateDirCache.set(cacheKey, tempStateDir);
+      return tempStateDir;
+    };
+    var statePath2 = (cwd, sessionID) => path2.join(stateDir(cwd), `${hash2(path2.resolve(cwd))}-${sanitize(sessionID)}.json`);
+    var projectStatePath2 = (cwd) => path2.join(stateDir(cwd), "project.json");
+    var diagnosticLogPath2 = (cwd) => process.env.SDD_DRIFT_LOG_PATH || path2.join(stateDir(cwd), "sdd-drift-check.log.jsonl");
+    var writeTextAtomic = (target, text) => {
+      fs2.mkdirSync(path2.dirname(target), { recursive: true });
+      const tmp = path2.join(path2.dirname(target), `.${path2.basename(target)}.${process.pid}.${Date.now()}.tmp`);
+      fs2.writeFileSync(tmp, text);
+      try {
+        fs2.renameSync(tmp, target);
+      } catch (err) {
+        try {
+          fs2.writeFileSync(target, text);
+        } catch {
+          try {
+            fs2.unlinkSync(tmp);
+          } catch {
+          }
+          throw err;
+        }
+        try {
+          fs2.unlinkSync(tmp);
+        } catch {
+        }
+      }
+    };
+    var cleanupOldState = (cwd) => {
+      const dir = stateDir(cwd);
+      try {
+        const now = Date.now();
+        for (const entry of fs2.readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+          const fp = path2.join(dir, entry.name);
+          const stat = fs2.statSync(fp);
+          if (now - stat.mtimeMs > STATE_RETENTION_MS) fs2.unlinkSync(fp);
+        }
+      } catch {
+      }
+    };
+    module2.exports = {
+      canUseStateDir,
+      cleanupOldState,
+      diagnosticLogPath: diagnosticLogPath2,
+      findNearestGitDir,
+      hash: hash2,
+      projectStatePath: projectStatePath2,
+      sanitize,
+      stateDir,
+      statePath: statePath2,
+      writeTextAtomic
+    };
+  }
+});
+
+// src/core/session-state.js
+var require_session_state = __commonJS({
+  "src/core/session-state.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { getToolFilePath: getToolFilePath2 } = require_tool_events();
+    var { isCodePath: isCodePath2, isSddChangePath } = require_file_classifier();
+    var { normalizeKey: normalizeKey2, resolveFile: resolveFile2, samePath: samePath2 } = require_paths();
+    var {
+      CHANGE_DOC_REQUIREMENTS,
+      DESIGN_FILE: DESIGN_FILE2,
+      PEER_FILES,
+      PROPOSAL_FILE: PROPOSAL_FILE2,
+      TASKS_FILE: TASKS_FILE2,
+      getChangeDoc: getChangeDoc2
+    } = require_sdd_rules();
+    var { SESSION_FILES_MAX, TOOL_EVENT_CAP, TRANSCRIPT_EVENT_CAP } = require_runtime_config();
+    var { cleanupOldState, statePath: statePath2, writeTextAtomic } = require_state_storage();
+    var emptyState2 = () => ({
+      version: 3,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      clock: 0,
+      touched: [],
+      edited: [],
+      changeDirs: [],
+      files: {},
+      requirements: {},
+      stopBlocks: {},
+      toolEvents: {},
+      peerSyncs: {},
+      codeDriftNotice: null,
+      codeDriftToolNotice: null,
+      peerDriftNotice: null,
+      subagentCheckpointNotice: null,
+      codeReviewConfirmations: {},
+      transcriptEvents: {},
+      transcriptCursor: null,
+      dtsContext: null,
+      firstEventAt: null,
+      projectStateSeenAt: null,
+      carryOverNotice: null,
+      attributionReviews: {},
+      noEditSession: true,
+      circuitBreaker: {}
+    });
+    var addPath = (items, item) => {
+      if (!items.some((existing) => samePath2(existing, item))) items.push(path2.normalize(item));
+    };
+    var sessionFilesMax = () => Number.isFinite(SESSION_FILES_MAX) ? Math.max(100, SESSION_FILES_MAX) : 1e3;
+    var fileRecordOrder = (record) => Math.max(
+      Number(record?.editedSeq || 0),
+      Number(record?.touchedSeq || 0),
+      Number(record?.firstEditedSeq || 0)
+    );
+    var pruneStateFiles2 = (state) => {
+      const maxFiles = sessionFilesMax();
+      const entries = Object.entries(state.files || {});
+      if (entries.length <= maxFiles) return false;
+      const keep = new Set(
+        entries.sort((left, right) => fileRecordOrder(right[1]) - fileRecordOrder(left[1])).slice(0, maxFiles).map(([key]) => key)
+      );
+      state.files = Object.fromEntries(entries.filter(([key]) => keep.has(key)));
+      state.touched = (state.touched || []).filter((file) => keep.has(normalizeKey2(file)));
+      state.edited = (state.edited || []).filter((file) => keep.has(normalizeKey2(file)));
+      return true;
+    };
+    var normalizeState = (parsed) => {
+      const state = emptyState2();
+      if (!parsed || typeof parsed !== "object") return state;
+      state.version = 3;
+      state.createdAt = typeof parsed.createdAt === "string" && parsed.createdAt ? parsed.createdAt : (/* @__PURE__ */ new Date()).toISOString();
+      state.clock = Number.isFinite(parsed.clock) ? parsed.clock : 0;
+      state.touched = Array.isArray(parsed.touched) ? parsed.touched.map((fp) => path2.normalize(fp)) : [];
+      state.edited = Array.isArray(parsed.edited) ? parsed.edited.map((fp) => path2.normalize(fp)) : [];
+      state.changeDirs = Array.isArray(parsed.changeDirs) ? parsed.changeDirs.map((fp) => path2.normalize(fp)) : [];
+      state.files = parsed.files && typeof parsed.files === "object" ? parsed.files : {};
+      state.requirements = parsed.requirements && typeof parsed.requirements === "object" ? parsed.requirements : {};
+      state.stopBlocks = parsed.stopBlocks && typeof parsed.stopBlocks === "object" ? parsed.stopBlocks : {};
+      state.toolEvents = parsed.toolEvents && typeof parsed.toolEvents === "object" ? parsed.toolEvents : {};
+      state.peerSyncs = parsed.peerSyncs && typeof parsed.peerSyncs === "object" ? parsed.peerSyncs : {};
+      state.codeDriftNotice = parsed.codeDriftNotice && typeof parsed.codeDriftNotice === "object" ? parsed.codeDriftNotice : null;
+      state.codeDriftToolNotice = parsed.codeDriftToolNotice && typeof parsed.codeDriftToolNotice === "object" ? parsed.codeDriftToolNotice : null;
+      state.peerDriftNotice = parsed.peerDriftNotice && typeof parsed.peerDriftNotice === "object" ? parsed.peerDriftNotice : null;
+      state.subagentCheckpointNotice = parsed.subagentCheckpointNotice && typeof parsed.subagentCheckpointNotice === "object" ? parsed.subagentCheckpointNotice : null;
+      state.codeReviewConfirmations = parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object" ? parsed.codeReviewConfirmations : {};
+      state.transcriptEvents = parsed.transcriptEvents && typeof parsed.transcriptEvents === "object" ? parsed.transcriptEvents : {};
+      state.transcriptCursor = parsed.transcriptCursor && typeof parsed.transcriptCursor === "object" ? {
+        path: typeof parsed.transcriptCursor.path === "string" ? path2.resolve(parsed.transcriptCursor.path) : null,
+        offset: Number.isFinite(parsed.transcriptCursor.offset) ? Math.max(0, Number(parsed.transcriptCursor.offset)) : 0,
+        lineIndex: Number.isFinite(parsed.transcriptCursor.lineIndex) ? Math.max(0, Number(parsed.transcriptCursor.lineIndex)) : 0
+      } : null;
+      state.dtsContext = parsed.dtsContext && typeof parsed.dtsContext === "object" ? parsed.dtsContext : null;
+      state.firstEventAt = typeof parsed.firstEventAt === "string" && parsed.firstEventAt ? parsed.firstEventAt : null;
+      state.projectStateSeenAt = typeof parsed.projectStateSeenAt === "string" && parsed.projectStateSeenAt ? parsed.projectStateSeenAt : null;
+      state.carryOverNotice = parsed.carryOverNotice && typeof parsed.carryOverNotice === "object" ? parsed.carryOverNotice : null;
+      state.attributionReviews = parsed.attributionReviews && typeof parsed.attributionReviews === "object" ? parsed.attributionReviews : {};
+      state.noEditSession = typeof parsed.noEditSession === "boolean" ? parsed.noEditSession : state.edited.length === 0;
+      state.circuitBreaker = parsed.circuitBreaker && typeof parsed.circuitBreaker === "object" ? parsed.circuitBreaker : {};
+      for (const fp of state.touched) {
+        const key = normalizeKey2(fp);
+        state.files[key] = {
+          ...state.files[key] || {},
+          path: path2.normalize(fp),
+          touchedSeq: state.files[key]?.touchedSeq || 1
+        };
+      }
+      for (const fp of state.edited) {
+        const key = normalizeKey2(fp);
+        state.files[key] = {
+          ...state.files[key] || {},
+          path: path2.normalize(fp),
+          touchedSeq: state.files[key]?.touchedSeq || 1,
+          editedSeq: state.files[key]?.editedSeq || 1,
+          firstEditedSeq: state.files[key]?.firstEditedSeq || state.files[key]?.editedSeq || 1
+        };
+      }
+      pruneStateFiles2(state);
+      return state;
+    };
+    var loadState2 = (cwd, sessionID) => {
+      try {
+        return normalizeState(JSON.parse(fs2.readFileSync(statePath2(cwd, sessionID), "utf8")));
+      } catch {
+        return emptyState2();
+      }
+    };
+    var saveState2 = (cwd, sessionID, state) => {
+      cleanupOldState(cwd);
+      writeTextAtomic(statePath2(cwd, sessionID), JSON.stringify(state, null, 2));
+    };
+    var touchedSeq2 = (state, fp) => state.files[normalizeKey2(fp)]?.touchedSeq || 0;
+    var editedSeq2 = (state, fp) => state.files[normalizeKey2(fp)]?.editedSeq || 0;
+    var firstEditedSeq = (state, fp) => state.files[normalizeKey2(fp)]?.firstEditedSeq || 0;
+    var latestEditedCodeSeq = (state) => Object.values(state.files || {}).reduce((latest, file) => {
+      if (!file.editedSeq || !isCodePath2(file.path || "")) return latest;
+      return Math.max(latest, file.editedSeq || 0);
+    }, 0);
+    var editedSddSeqAfter = (state, files, seq) => files.some((file) => editedSeq2(state, file) > seq);
+    var markToolEvent2 = (state, eventKey) => {
+      if (!eventKey) return true;
+      if (state.toolEvents[eventKey]) return false;
+      state.toolEvents[eventKey] = Date.now();
+      const entries = Object.entries(state.toolEvents);
+      if (entries.length > TOOL_EVENT_CAP) {
+        entries.sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0)).slice(0, entries.length - TOOL_EVENT_CAP).forEach(([key]) => {
+          delete state.toolEvents[key];
+        });
+      }
+      return true;
+    };
+    var markTranscriptEvent = (state, eventKey) => {
+      if (!eventKey) return true;
+      if (state.transcriptEvents[eventKey]) return false;
+      state.transcriptEvents[eventKey] = Date.now();
+      const entries = Object.entries(state.transcriptEvents);
+      if (entries.length > TRANSCRIPT_EVENT_CAP) {
+        entries.sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0)).slice(0, entries.length - TRANSCRIPT_EVENT_CAP).forEach(([key]) => {
+          delete state.transcriptEvents[key];
+        });
+      }
+      return true;
+    };
+    var fileMtimeMs = (fp) => {
+      try {
+        return fs2.statSync(fp).mtimeMs;
+      } catch {
+        return 0;
+      }
+    };
+    var latestStateEventMs = (state) => Object.values(state.files || {}).reduce(
+      (latest, file) => Math.max(latest, Number(file?.touchedAtMs || 0), Number(file?.editedAtMs || 0)),
+      0
+    );
+    var recordFile2 = (state, fp, edited) => {
+      const abs = path2.normalize(path2.resolve(fp));
+      const key = normalizeKey2(abs);
+      const existing = state.files[key] || {};
+      const mtimeMs = fileMtimeMs(abs);
+      state.clock += 1;
+      const eventMs = Math.max(Date.now() * 1e3, latestStateEventMs(state), Math.round(mtimeMs * 1e3)) + 1;
+      state.files[key] = {
+        ...existing,
+        path: abs,
+        ...mtimeMs ? { mtimeMs } : {},
+        touchedAtMs: eventMs,
+        touchedSeq: state.clock,
+        ...edited ? { editedSeq: state.clock, editedAtMs: eventMs } : {},
+        ...edited ? { firstEditedSeq: existing.firstEditedSeq || existing.editedSeq || state.clock } : {}
+      };
+      addPath(state.touched, abs);
+      if (edited) {
+        addPath(state.edited, abs);
+        state.noEditSession = false;
+      }
+      pruneStateFiles2(state);
+      return state.clock;
+    };
+    var addChangeDir = (state, dir) => addPath(state.changeDirs, dir);
+    var getRequirementBucket = (state, dir, create) => {
+      const key = normalizeKey2(dir);
+      if (!state.requirements[key] && create) {
+        state.requirements[key] = { dir: path2.normalize(dir), files: {} };
+      }
+      return state.requirements[key];
+    };
+    var cleanupRequirementBucket = (state, dir) => {
+      const key = normalizeKey2(dir);
+      const bucket = state.requirements[key];
+      if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.requirements[key];
+    };
+    var getPeerSyncBucket2 = (state, dir, create) => {
+      const key = normalizeKey2(dir);
+      if (!state.peerSyncs[key] && create) {
+        state.peerSyncs[key] = { dir: path2.normalize(dir), files: {} };
+      }
+      return state.peerSyncs[key];
+    };
+    var cleanupPeerSyncBucket = (state, dir) => {
+      const key = normalizeKey2(dir);
+      const bucket = state.peerSyncs[key];
+      if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.peerSyncs[key];
+    };
+    var markPeerSyncResponse = (state, dir, file, sourceFile, sourceSeq, targetSeq) => {
+      if (!sourceFile) return;
+      const bucket = getPeerSyncBucket2(state, dir, true);
+      bucket.files[file] = { sourceFile, sourceSeq, targetSeq };
+    };
+    var isPeerSyncContinuation = (state, dir, file, seq) => {
+      const bucket = getPeerSyncBucket2(state, dir, false);
+      const sync = bucket?.files?.[file];
+      if (!sync?.sourceFile) return false;
+      const sourceSeq = editedSeq2(state, path2.join(dir, sync.sourceFile));
+      if (sourceSeq > sync.sourceSeq) {
+        delete bucket.files[file];
+        cleanupPeerSyncBucket(state, dir);
+        return false;
+      }
+      if (seq > sync.targetSeq) sync.targetSeq = seq;
+      return true;
+    };
+    var clearPeerSyncsForSourceEdit = (state, dir, sourceFile, seq) => {
+      const bucket = getPeerSyncBucket2(state, dir, false);
+      if (!bucket) return;
+      for (const [file, sync] of Object.entries(bucket.files || {})) {
+        if (sync?.sourceFile === sourceFile && seq > sync.sourceSeq) delete bucket.files[file];
+      }
+      cleanupPeerSyncBucket(state, dir);
+    };
+    var clearPeerSyncs2 = (state) => {
+      state.peerSyncs = {};
+    };
+    var clearStageOnlyRequirements2 = (state) => {
+      for (const [key, bucket] of Object.entries(state.requirements || {})) {
+        for (const [file, requirement] of Object.entries(bucket.files || {})) {
+          if (requirement?.stageOnly || requirement?.sourceFile === PROPOSAL_FILE2) delete bucket.files[file];
+        }
+        if (Object.keys(bucket.files || {}).length === 0) delete state.requirements[key];
+      }
+    };
+    var isInitialTasksPlanEdit = (state, dir, seq) => {
+      const tasksPath = path2.join(dir, TASKS_FILE2);
+      const designPath = path2.join(dir, DESIGN_FILE2);
+      const designSourceSeq = Math.max(touchedSeq2(state, designPath), editedSeq2(state, designPath));
+      return firstEditedSeq(state, tasksPath) === seq && designSourceSeq > 0 && fs2.existsSync(designPath);
+    };
+    var updateRequirementsForEdit2 = (state, dir, file, seq) => {
+      const bucket = getRequirementBucket(state, dir, false);
+      const pending = bucket?.files?.[file];
+      let satisfiedStageOnly = false;
+      if (pending && seq > pending.afterSeq) {
+        satisfiedStageOnly = Boolean(pending.stageOnly || pending.sourceFile === PROPOSAL_FILE2);
+        if (!satisfiedStageOnly) {
+          markPeerSyncResponse(state, dir, file, pending.sourceFile, pending.afterSeq, seq);
+        }
+        delete bucket.files[file];
+        cleanupRequirementBucket(state, dir);
+        if (!satisfiedStageOnly) return;
+      }
+      if (!satisfiedStageOnly && isPeerSyncContinuation(state, dir, file, seq)) return;
+      if (file === TASKS_FILE2 && isInitialTasksPlanEdit(state, dir, seq)) {
+        const designPath = path2.join(dir, DESIGN_FILE2);
+        markPeerSyncResponse(
+          state,
+          dir,
+          TASKS_FILE2,
+          DESIGN_FILE2,
+          Math.max(touchedSeq2(state, designPath), editedSeq2(state, designPath)),
+          seq
+        );
+        return;
+      }
+      clearPeerSyncsForSourceEdit(state, dir, file, seq);
+      const stageOnly = file === PROPOSAL_FILE2;
+      let requiredPeers = CHANGE_DOC_REQUIREMENTS[file] || [];
+      if (file === TASKS_FILE2) {
+        const latestCodeSeq = latestEditedCodeSeq(state);
+        const designReviewedAfterCode = touchedSeq2(state, path2.join(dir, DESIGN_FILE2)) > latestCodeSeq;
+        const tasksEditedAfterCode = seq > latestCodeSeq;
+        if (latestCodeSeq > 0 && designReviewedAfterCode && tasksEditedAfterCode) {
+          requiredPeers = [];
+        }
+      }
+      if (requiredPeers.length === 0) return;
+      const target = getRequirementBucket(state, dir, true);
+      for (const peer of requiredPeers) {
+        const peerPath = path2.join(dir, peer);
+        if (!fs2.existsSync(peerPath)) continue;
+        if (editedSeq2(state, peerPath) > seq) continue;
+        const existing = target.files[peer];
+        if (existing && !existing.stageOnly && stageOnly) continue;
+        target.files[peer] = {
+          sourceFile: file,
+          afterSeq: seq,
+          stageOnly
+        };
+      }
+      cleanupRequirementBucket(state, dir);
+    };
+    var applyToolRecord2 = (cwd, state, toolName, toolInput) => {
+      const fp = getToolFilePath2(toolInput || {});
+      if (!fp || typeof fp !== "string") return false;
+      const tool = String(toolName || "").toLowerCase();
+      const isEdit = tool === "edit" || tool === "write" || tool === "multiedit";
+      if (!isEdit && tool !== "read") return false;
+      const abs = resolveFile2(cwd, fp);
+      const seq = recordFile2(state, abs, isEdit);
+      if (isEdit) {
+        const doc = getChangeDoc2(abs);
+        if (doc?.dir && doc.file) {
+          addChangeDir(state, doc.dir);
+          updateRequirementsForEdit2(state, doc.dir, doc.file, seq);
+        }
+      }
+      return true;
+    };
+    var hasEditedSddChange2 = (state) => Object.values(state.files).some((file) => file.editedSeq && isSddChangePath(file.path || ""));
+    module2.exports = {
+      addChangeDir,
+      addPath,
+      applyToolRecord: applyToolRecord2,
+      clearPeerSyncs: clearPeerSyncs2,
+      clearStageOnlyRequirements: clearStageOnlyRequirements2,
+      cleanupPeerSyncBucket,
+      cleanupRequirementBucket,
+      editedSddSeqAfter,
+      editedSeq: editedSeq2,
+      emptyState: emptyState2,
+      fileMtimeMs,
+      fileRecordOrder,
+      firstEditedSeq,
+      getPeerSyncBucket: getPeerSyncBucket2,
+      getRequirementBucket,
+      hasEditedSddChange: hasEditedSddChange2,
+      isInitialTasksPlanEdit,
+      isPeerSyncContinuation,
+      latestEditedCodeSeq,
+      latestStateEventMs,
+      loadState: loadState2,
+      markPeerSyncResponse,
+      markToolEvent: markToolEvent2,
+      markTranscriptEvent,
+      normalizeState,
+      pruneStateFiles: pruneStateFiles2,
+      recordFile: recordFile2,
+      saveState: saveState2,
+      sessionFilesMax,
+      touchedSeq: touchedSeq2,
+      updateRequirementsForEdit: updateRequirementsForEdit2
+    };
+  }
+});
+
+// src/core/hydration.js
+var require_hydration = __commonJS({
+  "src/core/hydration.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var os = require("os");
+    var path2 = require("path");
+    var { isCodePath: isCodePath2 } = require_file_classifier();
+    var { normalizeKey: normalizeKey2, rel: rel2, resolveFile: resolveFile2, samePath: samePath2 } = require_paths();
+    var {
+      CHECKPOINT_MTIME_SCAN,
+      CHECKPOINT_MTIME_SCAN_MAX_FILES,
+      CHECKPOINT_MTIME_SCAN_MAX_VISITS,
+      CHECKPOINT_MTIME_WINDOW_MS,
+      CHECKPOINT_OUTPUT_TEXT_MAX_BYTES,
+      DTS_CONTEXT_SKIP: DTS_CONTEXT_SKIP2
+    } = require_runtime_config();
+    var { hasSddWorkspace: hasSddWorkspace2 } = require_sdd_rules();
+    var { applyToolRecord: applyToolRecord2, fileMtimeMs, markTranscriptEvent, recordFile: recordFile2 } = require_session_state();
+    var { hash: hash2 } = require_state_storage();
+    var { isSubagentCheckpointTool: isSubagentCheckpointTool2 } = require_tool_events();
+    var CHECKPOINT_OUTPUT_KEYS = [
+      "tool_output",
+      "tool_result",
+      "tool_response",
+      "result",
+      "output",
+      "response"
+    ];
+    var CHECKPOINT_EDIT_LINE_RE = /\b(changed|modified|edited|updated|created|wrote|written|implemented|generated|patched|touched|saved|added|deleted|removed|renamed|refactored)\b|已修改|已更新|已创建|已写入|已实现|已生成|写入|修改|更新|创建|实现|变更/i;
+    var CHECKPOINT_EDIT_HEADER_RE = /\b(files?\s+(changed|modified|edited|updated|created|written)|changed\s+files?|modified\s+files?|updated\s+files?|created\s+files?|implementation\s+changes?)\b|变更文件|修改文件|更新文件|创建文件|已修改文件|已更新文件/i;
+    var CHECKPOINT_COMPLETION_RE = /\b(implemented|fixed|updated|created|modified|changed|wrote|patched|refactored|built|generated|saved|completed implementation|implementation complete|feature complete)\b|已完成|完成实现|实现完成|已实现|已修复|已更新|已修改|已创建|已写入|完成修改|修复完成|更新完成|修改完成/i;
+    var CHECKPOINT_PATH_RE = /(?:[A-Za-z]:)?(?:[A-Za-z0-9_. -]+[\\/])*(?:[A-Za-z0-9_. -]+\.(?:ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)|(?:proposal|design|tasks)\.md)/gi;
+    var CHECKPOINT_PATH_IGNORE_RE = /^(?:node_modules|\.git|\.opencode|\.claude|\.sdd-drift-hook-state|\.real-workspaces)(?:\/|$)/;
+    var limitString2 = (value, max = 500) => {
+      const text = String(value || "");
+      return text.length > max ? `${text.slice(0, max)}...` : text;
+    };
+    var isDtsContextActive2 = (state) => DTS_CONTEXT_SKIP2 && Boolean(state.dtsContext?.active);
+    var resolveTranscriptPath2 = (input) => {
+      const explicit = input?.transcript_path;
+      if (explicit && typeof explicit === "string" && fs2.existsSync(explicit)) {
+        return explicit;
+      }
+      const sessionID = input?.session_id;
+      if (!sessionID || typeof sessionID !== "string") return explicit;
+      const candidates = [];
+      const todoPath = input?.todo_path;
+      if (todoPath && typeof todoPath === "string") {
+        const claudeDir = path2.dirname(path2.dirname(todoPath));
+        candidates.push(path2.join(claudeDir, "transcripts", `${sessionID}.jsonl`));
+      }
+      const homes = [process.env.HOME, process.env.USERPROFILE, os.homedir()].filter(Boolean);
+      for (const home of homes) {
+        candidates.push(path2.join(home, ".claude", "transcripts", `${sessionID}.jsonl`));
+      }
+      return candidates.find((candidate) => fs2.existsSync(candidate)) || explicit;
+    };
+    var transcriptContentBlocks = (entry) => {
+      const content = entry?.message?.content;
+      if (Array.isArray(content)) return content;
+      return [];
+    };
+    var transcriptToolUseRecord = (block) => {
+      const name = block?.name || block?.tool || block?.tool_name;
+      const input = block?.input || block?.tool_input || block?.state?.input;
+      if (!name || !input || typeof input !== "object") return null;
+      return {
+        id: block.id || block.tool_use_id || block.callID || block.call_id || null,
+        name,
+        input,
+        source: "tool_use",
+        completed: block?.state?.status === "completed"
+      };
+    };
+    var transcriptToolResultRecord = (entry, block) => {
+      const result = entry?.tool_use_result || block?.tool_use_result;
+      const id = block?.tool_use_id || entry?.parent_tool_use_id || entry?.tool_use_id || null;
+      const failed = Boolean(entry?.is_error || block?.is_error || result?.is_error || result?.error);
+      const fp = result?.filePath || result?.file_path;
+      if (!fp || typeof fp !== "string") {
+        return id ? { id, source: "tool_result", failed } : null;
+      }
+      const type = String(result?.type || "").toLowerCase();
+      const name = type === "text" && !result?.oldString && !result?.newString && !result?.structuredPatch ? "Read" : "Edit";
+      return {
+        id,
+        name,
+        input: { file_path: fp },
+        source: "tool_result",
+        failed
+      };
+    };
+    var transcriptLegacyToolResultRecord = (entry) => {
+      const name = entry?.tool_name;
+      const input = entry?.tool_input;
+      if (!name || !input || typeof input !== "object") return null;
+      return {
+        id: entry.tool_use_id || null,
+        name,
+        input,
+        source: "tool_result",
+        failed: Boolean(entry?.is_error || entry?.error)
+      };
+    };
+    var transcriptToolRecords = (entry) => {
+      const records = [];
+      const blocks = transcriptContentBlocks(entry);
+      const add = (record) => {
+        if (record) records.push(record);
+      };
+      add(transcriptToolUseRecord(entry));
+      if (entry?.part?.type === "tool") add(transcriptToolUseRecord(entry.part));
+      if (entry?.type === "tool_result") {
+        add(transcriptLegacyToolResultRecord(entry));
+      }
+      for (const block of blocks) {
+        if (block?.type === "tool_use") add(transcriptToolUseRecord(block));
+        if (block?.type === "tool_result") add(transcriptToolResultRecord(entry, block));
+      }
+      if (entry?.type === "user" && !blocks.some((block) => block?.type === "tool_result")) {
+        add(transcriptToolResultRecord(entry, null));
+      }
+      return records;
+    };
+    var transcriptToolEventKey = (record, lineIndex, recordIndex) => {
+      if (record?.id) return `id:${record.id}`;
+      return `pos:${lineIndex}:${recordIndex}:${hash2(
+        JSON.stringify({
+          name: String(record?.name || "").toLowerCase(),
+          input: record?.input || {}
+        })
+      )}`;
+    };
+    var countTranscriptLines = (text) => {
+      if (!text) return 0;
+      const newlines = (text.match(/\n/g) || []).length;
+      return text.endsWith("\n") ? newlines : newlines + 1;
+    };
+    var readTranscriptChunk = (state, transcriptPath) => {
+      const abs = path2.resolve(transcriptPath);
+      const stat = fs2.statSync(abs);
+      const sameCursor = state.transcriptCursor?.path === abs;
+      let offset = sameCursor ? Number(state.transcriptCursor?.offset || 0) : 0;
+      let lineIndex = sameCursor ? Number(state.transcriptCursor?.lineIndex || 0) : 0;
+      if (!Number.isFinite(offset) || offset < 0 || offset > stat.size) {
+        offset = 0;
+        lineIndex = 0;
+      }
+      const buffer = fs2.readFileSync(abs).subarray(offset);
+      if (!buffer.length) {
+        state.transcriptCursor = { path: abs, offset, lineIndex };
+        return { content: "", lineIndexBase: lineIndex };
+      }
+      let processLength = buffer.length;
+      const lastNewline = buffer.lastIndexOf(10);
+      if (lastNewline >= 0) {
+        const tail = buffer.subarray(lastNewline + 1).toString("utf8").trim();
+        processLength = tail && !(tail.startsWith("{") && tail.endsWith("}")) ? lastNewline + 1 : buffer.length;
+      } else if (offset > 0) {
+        const tail = buffer.toString("utf8").trim();
+        processLength = tail.startsWith("{") && tail.endsWith("}") ? buffer.length : 0;
+      }
+      const processBuffer = buffer.subarray(0, processLength);
+      const content = processBuffer.toString("utf8");
+      const nextOffset = offset + processLength;
+      const nextLineIndex = lineIndex + countTranscriptLines(content);
+      state.transcriptCursor = { path: abs, offset: nextOffset, lineIndex: nextLineIndex };
+      return { content, lineIndexBase: lineIndex };
+    };
+    var hydrateStateFromTranscript2 = (cwd, state, transcriptPath) => {
+      if (!transcriptPath || typeof transcriptPath !== "string") return false;
+      let changed = false;
+      let content = "";
+      let lineIndexBase = 0;
+      const seen = /* @__PURE__ */ new Set();
+      const pendingToolUses = /* @__PURE__ */ new Map();
+      try {
+        const chunk = readTranscriptChunk(state, transcriptPath);
+        content = chunk.content;
+        lineIndexBase = chunk.lineIndexBase;
+      } catch {
+        return false;
+      }
+      if (!content) return false;
+      const lines = content.split(/\r?\n/);
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        const line = lines[lineIndex];
+        if (!line.trim()) continue;
+        let entry;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const records = transcriptToolRecords(entry);
+        for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
+          const record = records[recordIndex];
+          if (record.source === "tool_use" && record.id && !record.completed) {
+            pendingToolUses.set(record.id, record);
+            continue;
+          }
+          let finalRecord = record;
+          if (record.source === "tool_result" && record.id && pendingToolUses.has(record.id)) {
+            finalRecord = {
+              ...pendingToolUses.get(record.id),
+              source: "tool_result",
+              failed: record.failed
+            };
+          }
+          if (finalRecord.failed) continue;
+          if (finalRecord.source === "tool_use" && !finalRecord.completed) continue;
+          const key = transcriptToolEventKey(finalRecord, lineIndexBase + lineIndex, recordIndex);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (!markTranscriptEvent(state, key)) continue;
+          if (recordToolFromHydration(cwd, state, finalRecord.name, finalRecord.input)) changed = true;
+        }
+      }
+      return changed;
+    };
+    var recordToolFromHydration = (cwd, state, toolName, toolInput) => {
+      return applyToolRecord2(cwd, state, toolName, toolInput);
+    };
+    var collectCheckpointStrings = (value, depth = 0, seen = /* @__PURE__ */ new Set()) => {
+      if (value == null || depth > 4) return [];
+      if (typeof value === "string") return [limitString2(value, CHECKPOINT_OUTPUT_TEXT_MAX_BYTES)];
+      if (typeof value !== "object") return [];
+      if (seen.has(value)) return [];
+      seen.add(value);
+      if (Array.isArray(value)) {
+        return value.flatMap((item) => collectCheckpointStrings(item, depth + 1, seen));
+      }
+      const texts = [];
+      for (const key of [
+        "output",
+        "content",
+        "text",
+        "message",
+        "summary",
+        "result",
+        "stdout",
+        "value"
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+          texts.push(...collectCheckpointStrings(value[key], depth + 1, seen));
+        }
+      }
+      return texts;
+    };
+    var collectCheckpointOutputText2 = (input) => {
+      const texts = [];
+      for (const key of CHECKPOINT_OUTPUT_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(input || {}, key)) {
+          texts.push(...collectCheckpointStrings(input[key]));
+        }
+      }
+      return limitString2(texts.filter(Boolean).join("\n"), CHECKPOINT_OUTPUT_TEXT_MAX_BYTES);
+    };
+    var stripCheckpointPathToken = (token) => String(token || "").replace(/^[\s"'`(<\[\-*]+/, "").replace(/^\d+[.)]\s*/, "").replace(/[\s"'`)>.,;:\]]+$/, "");
+    var isInsideWorkspace = (cwd, fp) => {
+      const relative = path2.relative(path2.resolve(cwd), path2.resolve(fp));
+      return Boolean(relative) && !relative.startsWith("..") && !path2.isAbsolute(relative);
+    };
+    var isIgnoredCheckpointPath = (cwd, fp) => {
+      const relative = rel2(cwd, fp);
+      return CHECKPOINT_PATH_IGNORE_RE.test(relative);
+    };
+    var checkpointLineMayDescribeEdit = (line, priorHeaderLines) => CHECKPOINT_EDIT_LINE_RE.test(line) || priorHeaderLines > 0;
+    var extractCheckpointEditedPaths2 = (cwd, text) => {
+      const paths = [];
+      let headerCarry = 0;
+      for (const rawLine of String(text || "").split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) {
+          headerCarry = 0;
+          continue;
+        }
+        if (CHECKPOINT_EDIT_HEADER_RE.test(line)) {
+          headerCarry = 4;
+        }
+        const mayDescribeEdit = checkpointLineMayDescribeEdit(line, headerCarry);
+        if (headerCarry > 0) headerCarry -= 1;
+        if (!mayDescribeEdit) continue;
+        for (const match of line.matchAll(CHECKPOINT_PATH_RE)) {
+          const token = stripCheckpointPathToken(match[0]);
+          if (!token) continue;
+          const abs = path2.isAbsolute(token) ? path2.resolve(token) : resolveFile2(cwd, token);
+          if (!isInsideWorkspace(cwd, abs)) continue;
+          if (isIgnoredCheckpointPath(cwd, abs)) continue;
+          if (!fs2.existsSync(abs)) continue;
+          if (!isCodePath2(abs)) continue;
+          if (!paths.some((existing) => samePath2(existing, abs))) paths.push(path2.normalize(abs));
+        }
+      }
+      return paths;
+    };
+    var checkpointOutputSuggestsCodeEdit = (text) => CHECKPOINT_EDIT_LINE_RE.test(text || "") || CHECKPOINT_COMPLETION_RE.test(text || "");
+    var checkpointMtimeWindowMs = () => {
+      if (!Number.isFinite(CHECKPOINT_MTIME_WINDOW_MS)) return 10 * 60 * 1e3;
+      return Math.max(0, CHECKPOINT_MTIME_WINDOW_MS);
+    };
+    var checkpointMtimeScanMaxFiles = () => {
+      if (!Number.isFinite(CHECKPOINT_MTIME_SCAN_MAX_FILES)) return 50;
+      return Math.max(1, CHECKPOINT_MTIME_SCAN_MAX_FILES);
+    };
+    var checkpointMtimeScanMaxVisits = () => {
+      if (!Number.isFinite(CHECKPOINT_MTIME_SCAN_MAX_VISITS)) return 2e3;
+      return Math.max(100, CHECKPOINT_MTIME_SCAN_MAX_VISITS);
+    };
+    var shouldRecordCheckpointMtimePath = (state, fp, cutoffMs) => {
+      const mtimeMs = fileMtimeMs(fp);
+      if (!mtimeMs || mtimeMs < cutoffMs) return false;
+      const existing = state.files[normalizeKey2(fp)];
+      if (existing?.editedSeq && existing?.mtimeMs && mtimeMs <= Number(existing.mtimeMs) + 1) {
+        return false;
+      }
+      return true;
+    };
+    var scanRecentCheckpointCodePaths = (cwd, state, cutoffMs) => {
+      const found = [];
+      const stack = [path2.resolve(cwd)];
+      let visited = 0;
+      const maxFiles = checkpointMtimeScanMaxFiles();
+      const maxVisits = checkpointMtimeScanMaxVisits();
+      while (stack.length && visited < maxVisits && found.length < maxFiles) {
+        const dir = stack.pop();
+        let entries = [];
+        try {
+          entries = fs2.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (visited >= maxVisits || found.length >= maxFiles) break;
+          const fp = path2.join(dir, entry.name);
+          if (!isInsideWorkspace(cwd, fp) && !samePath2(cwd, fp)) continue;
+          if (isIgnoredCheckpointPath(cwd, fp)) continue;
+          visited += 1;
+          if (entry.isDirectory()) {
+            stack.push(fp);
+            continue;
+          }
+          if (!entry.isFile()) continue;
+          if (!isCodePath2(fp)) continue;
+          if (!shouldRecordCheckpointMtimePath(state, fp, cutoffMs)) continue;
+          found.push(path2.normalize(fp));
+        }
+      }
+      return found;
+    };
+    var hydrateStateFromCheckpointMtime2 = (cwd, state, input, text = collectCheckpointOutputText2(input)) => {
+      const tool = String(input?.tool_name || "").toLowerCase();
+      if (!CHECKPOINT_MTIME_SCAN) return false;
+      if (!hasSddWorkspace2(cwd) || isDtsContextActive2(state)) return false;
+      if (!isSubagentCheckpointTool2(tool, input?.tool_input || {})) return false;
+      const hasText = Boolean(String(text || "").trim());
+      if (hasText && !checkpointOutputSuggestsCodeEdit(text)) return false;
+      const now = Date.now();
+      const createdAt = Date.parse(state.createdAt || "") || now;
+      const cutoffMs = Math.max(createdAt, now - checkpointMtimeWindowMs());
+      let changed = false;
+      for (const fp of scanRecentCheckpointCodePaths(cwd, state, cutoffMs)) {
+        recordFile2(state, fp, true);
+        changed = true;
+      }
+      return changed;
+    };
+    var hydrateStateFromCheckpointOutput2 = (cwd, state, input) => {
+      const tool = String(input?.tool_name || "").toLowerCase();
+      if (!isSubagentCheckpointTool2(tool, input?.tool_input || {})) return false;
+      const text = collectCheckpointOutputText2(input);
+      if (!text) return hydrateStateFromCheckpointMtime2(cwd, state, input, "");
+      let changed = false;
+      for (const fp of extractCheckpointEditedPaths2(cwd, text)) {
+        recordFile2(state, fp, true);
+        changed = true;
+      }
+      return changed || hydrateStateFromCheckpointMtime2(cwd, state, input, text);
+    };
+    module2.exports = {
+      CHECKPOINT_COMPLETION_RE,
+      CHECKPOINT_EDIT_HEADER_RE,
+      CHECKPOINT_EDIT_LINE_RE,
+      CHECKPOINT_OUTPUT_KEYS,
+      CHECKPOINT_PATH_IGNORE_RE,
+      CHECKPOINT_PATH_RE,
+      checkpointLineMayDescribeEdit,
+      checkpointMtimeScanMaxFiles,
+      checkpointMtimeScanMaxVisits,
+      checkpointMtimeWindowMs,
+      checkpointOutputSuggestsCodeEdit,
+      collectCheckpointOutputText: collectCheckpointOutputText2,
+      collectCheckpointStrings,
+      countTranscriptLines,
+      extractCheckpointEditedPaths: extractCheckpointEditedPaths2,
+      hydrateStateFromCheckpointMtime: hydrateStateFromCheckpointMtime2,
+      hydrateStateFromCheckpointOutput: hydrateStateFromCheckpointOutput2,
+      hydrateStateFromTranscript: hydrateStateFromTranscript2,
+      isIgnoredCheckpointPath,
+      isInsideWorkspace,
+      readTranscriptChunk,
+      recordToolFromHydration,
+      resolveTranscriptPath: resolveTranscriptPath2,
+      scanRecentCheckpointCodePaths,
+      shouldRecordCheckpointMtimePath,
+      stripCheckpointPathToken,
+      transcriptToolEventKey,
+      transcriptToolRecords
+    };
+  }
+});
+
+// src/core/attribution.js
+var require_attribution = __commonJS({
+  "src/core/attribution.js"(exports2, module2) {
+    var { toPosix: toPosix2 } = require_paths();
+    var splitPath = (fp) => toPosix2(fp).split("/").filter(Boolean);
+    var sharedPrefixDepth = (left, right) => {
+      const leftParts = splitPath(left);
+      const rightParts = splitPath(right);
+      let depth = 0;
+      while (depth < leftParts.length && depth < rightParts.length && leftParts[depth] === rightParts[depth]) {
+        depth += 1;
+      }
+      return depth;
+    };
+    var relFromCwd = (cwd, fp) => {
+      const normalizedCwd = toPosix2(cwd).replace(/\/+$/, "");
+      const normalizedFile = toPosix2(fp);
+      return normalizedFile.startsWith(`${normalizedCwd}/`) ? normalizedFile.slice(normalizedCwd.length + 1) : normalizedFile;
+    };
+    var pathInChangeDir = (cwd, fp, relDir) => {
+      const relFile = relFromCwd(cwd, fp);
+      const normalizedDir = toPosix2(relDir).replace(/\/+$/, "");
+      return relFile === normalizedDir || relFile.startsWith(`${normalizedDir}/`);
+    };
+    var pathSimilar = (cwd, codeFile, linkedCode = []) => {
+      const relCodeFile = relFromCwd(cwd, codeFile);
+      return linkedCode.some((item) => {
+        const linkedPath = toPosix2(item?.path || "");
+        if (!linkedPath) return false;
+        return linkedPath === relCodeFile || sharedPrefixDepth(relCodeFile, linkedPath) >= 2;
+      });
+    };
+    var decide = ({ cwd, session, project, codeFile, now = Date.now() }) => {
+      const candidates = Object.values(project?.changeDirs || {}).filter((dir) => !dir.archived);
+      if (candidates.length === 0) return { kind: "no-attribution" };
+      if (candidates.length === 1) return { kind: "single", target: candidates[0] };
+      const sessionTouched = candidates.filter(
+        (dir) => (session?.edited || []).some((file) => pathInChangeDir(cwd, file, dir.relDir))
+      );
+      if (sessionTouched.length === 1) return { kind: "session-touched", target: sessionTouched[0] };
+      if (project?.activeChangeDir && now < Number(project.activeUntilMs || 0)) {
+        const active = candidates.find((dir) => dir.relDir === project.activeChangeDir);
+        if (active && pathSimilar(cwd, codeFile, active.linkedCode)) {
+          return { kind: "active-ttl", target: active };
+        }
+      }
+      return { kind: "needs-review", candidates };
+    };
+    var targetsForDecision = (decision) => {
+      if (decision?.target) return [decision.target];
+      return decision?.candidates || [];
+    };
+    var Attribution2 = {
+      decide,
+      pathInChangeDir,
+      pathSimilar,
+      relFromCwd,
+      sharedPrefixDepth,
+      targetsForDecision
+    };
+    module2.exports = { Attribution: Attribution2 };
+  }
+});
+
+// src/core/locks.js
+var require_locks = __commonJS({
+  "src/core/locks.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { DEFAULT_LOCK_STALE_MS } = require_runtime_config();
+    var sleepSync = (ms) => {
+      if (ms <= 0) return;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    };
+    var acquireFileLock2 = (target, options = {}) => {
+      const staleMs = options.staleMs || DEFAULT_LOCK_STALE_MS;
+      const waitMs = options.waitMs || 0;
+      const retryMs = options.retryMs || 25;
+      const lockPath = `${target}.lock`;
+      const openLock = () => {
+        fs2.mkdirSync(path2.dirname(lockPath), { recursive: true });
+        const fd = fs2.openSync(lockPath, "wx");
+        fs2.writeFileSync(fd, `${process.pid}
+${(/* @__PURE__ */ new Date()).toISOString()}
+`);
+        return { fd, lockPath };
+      };
+      const deadline = Date.now() + waitMs;
+      while (true) {
+        try {
+          return openLock();
+        } catch (err) {
+          if (err?.code !== "EEXIST") return null;
+        }
+        try {
+          if (Date.now() - fs2.statSync(lockPath).mtimeMs > staleMs) fs2.unlinkSync(lockPath);
+        } catch {
+        }
+        if (Date.now() >= deadline) return null;
+        sleepSync(retryMs);
+      }
+    };
+    var releaseFileLock2 = (lock) => {
+      if (!lock) return;
+      try {
+        fs2.closeSync(lock.fd);
+      } catch {
+      }
+      try {
+        fs2.unlinkSync(lock.lockPath);
+      } catch {
+      }
+    };
+    module2.exports = {
+      acquireFileLock: acquireFileLock2,
+      releaseFileLock: releaseFileLock2,
+      sleepSync
+    };
+  }
+});
+
+// src/core/diagnostics.js
+var require_diagnostics = __commonJS({
+  "src/core/diagnostics.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { acquireFileLock: acquireFileLock2, releaseFileLock: releaseFileLock2 } = require_locks();
+    var {
+      DIAGNOSTIC_LOG,
+      DIAGNOSTIC_LOG_MAX_BYTES,
+      DIAGNOSTIC_LOG_RETENTION_DAYS,
+      DIAGNOSTIC_SUMMARY_WINDOW_MS
+    } = require_runtime_config();
+    var { diagnosticLogPath: diagnosticLogPath2, writeTextAtomic } = require_state_storage();
+    var DIAGNOSTIC_SUMMARY_EVENTS = /* @__PURE__ */ new Set([
+      "handler_exception",
+      "hook_exception",
+      "circuit_open",
+      "circuit_open_skip"
+    ]);
+    var diagnosticSummaryState = {
+      windowStartMs: 0,
+      counts: {}
+    };
+    var escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    var diagnosticSummaryWindowMs = (value = DIAGNOSTIC_SUMMARY_WINDOW_MS) => Number.isFinite(value) && value > 0 ? value : 60 * 1e3;
+    var diagnosticSummaryLine = (state, windowMs) => ({
+      event: "diagnostic_summary",
+      windowStart: new Date(state.windowStartMs).toISOString(),
+      windowEnd: new Date(state.windowStartMs + windowMs).toISOString(),
+      counts: { ...state.counts || {} }
+    });
+    var recordDiagnosticSummaryEvent2 = (state, eventName, nowMs = Date.now(), windowMsValue = DIAGNOSTIC_SUMMARY_WINDOW_MS, trackedEvents = DIAGNOSTIC_SUMMARY_EVENTS) => {
+      if (!trackedEvents.has(eventName)) return [];
+      const windowMs = diagnosticSummaryWindowMs(windowMsValue);
+      const summaries = [];
+      if (!state.windowStartMs) {
+        state.windowStartMs = nowMs;
+        state.counts = {};
+      } else if (nowMs >= state.windowStartMs + windowMs) {
+        if (Object.keys(state.counts || {}).length > 0) {
+          summaries.push(diagnosticSummaryLine(state, windowMs));
+        }
+        state.windowStartMs = nowMs;
+        state.counts = {};
+      }
+      state.counts[eventName] = Number(state.counts[eventName] || 0) + 1;
+      return summaries;
+    };
+    var rotateDiagnosticLog = (target) => {
+      const maxBytes = Number.isFinite(DIAGNOSTIC_LOG_MAX_BYTES) ? Math.max(64 * 1024, DIAGNOSTIC_LOG_MAX_BYTES) : 2 * 1024 * 1024;
+      try {
+        if (!fs2.existsSync(target)) return;
+        if (fs2.statSync(target).size < maxBytes) return;
+        const rotated = `${target}.1`;
+        try {
+          fs2.unlinkSync(rotated);
+        } catch {
+        }
+        fs2.renameSync(target, rotated);
+      } catch {
+      }
+    };
+    var diagnosticLogRetentionMs = () => {
+      if (!Number.isFinite(DIAGNOSTIC_LOG_RETENTION_DAYS)) return 3 * 24 * 60 * 60 * 1e3;
+      if (DIAGNOSTIC_LOG_RETENTION_DAYS <= 0) return null;
+      return DIAGNOSTIC_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1e3;
+    };
+    var parseDiagnosticLogTs = (line) => {
+      try {
+        const ts = Date.parse(JSON.parse(line)?.ts);
+        return Number.isFinite(ts) ? ts : null;
+      } catch {
+        return null;
+      }
+    };
+    var pruneDiagnosticLogFile = (target, cutoffMs) => {
+      let text = "";
+      try {
+        text = fs2.readFileSync(target, "utf8");
+      } catch {
+        return;
+      }
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      const kept = lines.filter((line) => {
+        const ts = parseDiagnosticLogTs(line);
+        return ts === null || ts >= cutoffMs;
+      });
+      if (kept.length === lines.length) return;
+      if (!kept.length) {
+        try {
+          fs2.unlinkSync(target);
+        } catch {
+        }
+        return;
+      }
+      writeTextAtomic(target, `${kept.join("\n")}
+`);
+    };
+    var cleanupDiagnosticLogs2 = (target, now = Date.now()) => {
+      const retentionMs = diagnosticLogRetentionMs();
+      if (retentionMs === null) return;
+      const cutoffMs = now - retentionMs;
+      const dir = path2.dirname(target);
+      const base = path2.basename(target);
+      const rotatedPattern = new RegExp(`^${escapeRegExp(base)}\\.\\d+$`);
+      try {
+        for (const entry of fs2.readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isFile()) continue;
+          if (entry.name !== base && !rotatedPattern.test(entry.name)) continue;
+          const fp = path2.join(dir, entry.name);
+          const stat = fs2.statSync(fp);
+          if (stat.mtimeMs < cutoffMs) {
+            try {
+              fs2.unlinkSync(fp);
+            } catch {
+            }
+            continue;
+          }
+          pruneDiagnosticLogFile(fp, cutoffMs);
+        }
+      } catch {
+      }
+    };
+    var writeDiagnosticLog2 = (cwd, event) => {
+      if (!DIAGNOSTIC_LOG) return;
+      let lock = null;
+      try {
+        const target = diagnosticLogPath2(cwd || process.cwd());
+        fs2.mkdirSync(path2.dirname(target), { recursive: true });
+        lock = acquireFileLock2(target);
+        if (!lock) return;
+        cleanupDiagnosticLogs2(target);
+        rotateDiagnosticLog(target);
+        const nowMs = Date.now();
+        const lines = [
+          ...recordDiagnosticSummaryEvent2(diagnosticSummaryState, event?.event, nowMs),
+          event
+        ].map(
+          (entry) => JSON.stringify({
+            ts: new Date(nowMs).toISOString(),
+            pid: process.pid,
+            ...entry
+          })
+        );
+        fs2.appendFileSync(target, `${lines.join("\n")}
+`);
+      } catch {
+      } finally {
+        releaseFileLock2(lock);
+      }
+    };
+    module2.exports = {
+      DIAGNOSTIC_SUMMARY_EVENTS,
+      cleanupDiagnosticLogs: cleanupDiagnosticLogs2,
+      diagnosticLogRetentionMs,
+      diagnosticSummaryLine,
+      diagnosticSummaryState,
+      diagnosticSummaryWindowMs,
+      parseDiagnosticLogTs,
+      pruneDiagnosticLogFile,
+      recordDiagnosticSummaryEvent: recordDiagnosticSummaryEvent2,
+      rotateDiagnosticLog,
+      writeDiagnosticLog: writeDiagnosticLog2
+    };
+  }
+});
+
+// src/core/project-state.js
+var require_project_state = __commonJS({
+  "src/core/project-state.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { isCodePath: isCodePath2 } = require_file_classifier();
+    var { normalizeKey: normalizeKey2, samePath: samePath2, toPosix: toPosix2 } = require_paths();
+    var { editedSeq: editedSeq2 } = require_session_state();
+    var {
+      DESIGN_FILE: DESIGN_FILE2,
+      PROPOSAL_FILE: PROPOSAL_FILE2,
+      TASKS_FILE: TASKS_FILE2,
+      isArchivedChangeDir: isArchivedChangeDir2
+    } = require_sdd_rules();
+    var { projectStatePath: projectStatePath2, writeTextAtomic } = require_state_storage();
+    var discoverChangeDirs2 = (cwd) => {
+      const roots = ["sdd", ".sdd"].map((dir) => path2.join(cwd, dir));
+      const dirs = [];
+      for (const root of roots) {
+        const changesRoot = path2.join(root, "changes");
+        try {
+          for (const entry of fs2.readdirSync(changesRoot, { withFileTypes: true })) {
+            if (entry.isDirectory()) dirs.push(path2.join(changesRoot, entry.name));
+          }
+        } catch {
+        }
+      }
+      return dirs;
+    };
+    var collectActiveChangeDirs2 = (cwd, state) => {
+      const dirs = [...state.changeDirs || [], ...discoverChangeDirs2(cwd)];
+      const active = [];
+      for (const dir of dirs) {
+        const normalized = path2.normalize(dir);
+        if (isArchivedChangeDir2(normalized)) continue;
+        if (!active.some((existing) => samePath2(existing, normalized))) active.push(normalized);
+      }
+      return active;
+    };
+    var emptyProjectState2 = () => ({
+      version: 1,
+      lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      changeDirs: {},
+      activeChangeDir: null,
+      activeUntilMs: 0,
+      activeLastEditedSession: null
+    });
+    var relDirForProject2 = (cwd, dir) => toPosix2(path2.relative(cwd, dir));
+    var docKeyForFile2 = (file) => {
+      if (file === PROPOSAL_FILE2) return "proposal";
+      if (file === DESIGN_FILE2) return "design";
+      if (file === TASKS_FILE2) return "tasks";
+      return null;
+    };
+    var docFileForKey = (key) => {
+      if (key === "proposal") return PROPOSAL_FILE2;
+      if (key === "design") return DESIGN_FILE2;
+      if (key === "tasks") return TASKS_FILE2;
+      return null;
+    };
+    var eventMsForFileRecord2 = (record, edited) => {
+      const value = edited ? record?.editedAtMs : record?.touchedAtMs;
+      if (Number.isFinite(value)) return value;
+      if (Number.isFinite(record?.mtimeMs)) return Math.round(record.mtimeMs * 1e3);
+      return Date.now() * 1e3;
+    };
+    var docRecordFromFs = (fp) => {
+      try {
+        const stat = fs2.statSync(fp);
+        if (!stat.isFile()) return { exists: false };
+        const ms = Math.round(stat.mtimeMs * 1e3);
+        return {
+          exists: true,
+          lastEditedMs: ms,
+          lastReviewedMs: ms
+        };
+      } catch {
+        return { exists: false };
+      }
+    };
+    var createChangeDirFromFs2 = (cwd, dir) => {
+      const normalized = path2.normalize(dir);
+      const changeDir = {
+        relDir: relDirForProject2(cwd, normalized),
+        archived: isArchivedChangeDir2(normalized),
+        docs: {
+          proposal: docRecordFromFs(path2.join(normalized, PROPOSAL_FILE2)),
+          design: docRecordFromFs(path2.join(normalized, DESIGN_FILE2)),
+          tasks: docRecordFromFs(path2.join(normalized, TASKS_FILE2))
+        },
+        linkedCode: [],
+        alignedAt: null,
+        alignedAtMs: 0,
+        state: "ALIGNED",
+        conditions: {
+          proposalOnly: false,
+          designAheadOfTasks: false,
+          tasksAheadOfDesign: false,
+          codeAheadOfDocs: false,
+          codePendingDocs: []
+        },
+        docSyncs: {}
+      };
+      changeDir.conditions = computeProjectConditions2(changeDir);
+      changeDir.state = computeProjectState2(changeDir.conditions, changeDir.archived);
+      return changeDir;
+    };
+    var normalizeProjectDoc = (doc) => ({
+      exists: Boolean(doc?.exists),
+      ...Number.isFinite(doc?.lastEditedMs) ? { lastEditedMs: Number(doc.lastEditedMs) } : {},
+      ...Number.isFinite(doc?.lastReviewedMs) ? { lastReviewedMs: Number(doc.lastReviewedMs) } : {},
+      ...typeof doc?.lastEditedSession === "string" ? { lastEditedSession: doc.lastEditedSession } : {},
+      ...typeof doc?.lastReviewedSession === "string" ? { lastReviewedSession: doc.lastReviewedSession } : {}
+    });
+    var normalizeProjectChangeDir = (cwd, relDirValue, value) => {
+      const relDir = toPosix2(value?.relDir || relDirValue || "");
+      const absDir = path2.join(cwd, relDir);
+      const fromFs = createChangeDirFromFs2(cwd, absDir);
+      const changeDir = {
+        ...fromFs,
+        ...value,
+        relDir,
+        archived: Boolean(value?.archived) || isArchivedChangeDir2(absDir),
+        docs: {
+          proposal: normalizeProjectDoc(value?.docs?.proposal || fromFs.docs.proposal),
+          design: normalizeProjectDoc(value?.docs?.design || fromFs.docs.design),
+          tasks: normalizeProjectDoc(value?.docs?.tasks || fromFs.docs.tasks)
+        },
+        linkedCode: Array.isArray(value?.linkedCode) ? value.linkedCode.filter((item) => item?.path && Number.isFinite(item?.lastEditedMs)).map((item) => ({
+          path: toPosix2(item.path),
+          lastEditedMs: Number(item.lastEditedMs),
+          ...typeof item.lastEditedSession === "string" ? { lastEditedSession: item.lastEditedSession } : {},
+          linkedAt: Number.isFinite(item.linkedAt) ? Number(item.linkedAt) : Number(item.lastEditedMs)
+        })) : [],
+        alignedAt: typeof value?.alignedAt === "string" ? value.alignedAt : null,
+        alignedAtMs: Number.isFinite(value?.alignedAtMs) ? Number(value.alignedAtMs) : 0,
+        docSyncs: value?.docSyncs && typeof value.docSyncs === "object" ? value.docSyncs : value?.peerSyncs && typeof value.peerSyncs === "object" ? value.peerSyncs : {}
+      };
+      delete changeDir.peerSyncs;
+      changeDir.conditions = computeProjectConditions2(changeDir);
+      changeDir.state = computeProjectState2(changeDir.conditions, changeDir.archived);
+      return changeDir;
+    };
+    var computeProjectConditions2 = (dir) => {
+      const design = dir.docs?.design || {};
+      const tasks = dir.docs?.tasks || {};
+      const proposal = dir.docs?.proposal || {};
+      const designExists = design.exists === true;
+      const tasksExists = tasks.exists === true;
+      const designEditedKnown = typeof design.lastEditedSession === "string";
+      const tasksEditedKnown = typeof tasks.lastEditedSession === "string";
+      const designEdited = Number(design.lastEditedMs || 0);
+      const tasksEdited = Number(tasks.lastEditedMs || 0);
+      const designReviewed = Math.max(designEdited, Number(design.lastReviewedMs || 0));
+      const tasksReviewed = Math.max(tasksEdited, Number(tasks.lastReviewedMs || 0));
+      const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)));
+      const docSyncs = dir.docSyncs || {};
+      const tasksSyncedFromDesign = docSyncs.tasks?.sourceFile === DESIGN_FILE2 && Number(docSyncs.tasks.sourceEditedMs || 0) >= designEdited && Number(docSyncs.tasks.targetEditedMs || 0) >= Number(docSyncs.tasks.sourceEditedMs || 0);
+      const designSyncedFromTasks = docSyncs.design?.sourceFile === TASKS_FILE2 && Number(docSyncs.design.sourceEditedMs || 0) >= tasksEdited && Number(docSyncs.design.targetEditedMs || 0) >= Number(docSyncs.design.sourceEditedMs || 0);
+      const reviewTargets = [
+        designExists ? [DESIGN_FILE2, designReviewed] : null,
+        tasksExists ? [TASKS_FILE2, tasksReviewed] : null
+      ].filter(Boolean);
+      const codePendingDocs = reviewTargets.filter(([, reviewedAt]) => latestCodeMs > reviewedAt).map(([file]) => file);
+      return {
+        proposalOnly: proposal.exists === true && !designExists && !tasksExists,
+        designAheadOfTasks: designExists && tasksExists && designEditedKnown && designEdited > tasksEdited && designEdited > 0 && !designSyncedFromTasks,
+        tasksAheadOfDesign: designExists && tasksExists && tasksEditedKnown && tasksEdited > designEdited && tasksEdited > 0 && !tasksSyncedFromDesign,
+        codeAheadOfDocs: latestCodeMs > Number(dir.alignedAtMs || 0) && codePendingDocs.length > 0,
+        codePendingDocs
+      };
+    };
+    var computeProjectState2 = (conditions, archived) => {
+      if (archived) return "ARCHIVED";
+      if (conditions.proposalOnly) return "PROPOSAL_STAGE";
+      const flags = [
+        conditions.designAheadOfTasks,
+        conditions.tasksAheadOfDesign,
+        conditions.codeAheadOfDocs
+      ].filter(Boolean);
+      if (flags.length === 0) return "ALIGNED";
+      if (flags.length > 1) return "MULTI_DRIFT";
+      if (conditions.designAheadOfTasks) return "DESIGN_PENDING_TASKS";
+      if (conditions.tasksAheadOfDesign) return "TASKS_PENDING_DESIGN";
+      return "CODE_PENDING_REVIEW";
+    };
+    var recomputeProjectState2 = (project, cwd) => {
+      for (const [relDirValue, dir] of Object.entries(project.changeDirs || {})) {
+        const absDir = path2.join(cwd, dir.relDir || relDirValue);
+        dir.archived = Boolean(dir.archived) || isArchivedChangeDir2(absDir);
+        for (const key of ["proposal", "design", "tasks"]) {
+          const file = docFileForKey(key);
+          const fp = path2.join(absDir, file);
+          const fsDoc = docRecordFromFs(fp);
+          dir.docs[key] = {
+            ...dir.docs?.[key] || {},
+            exists: fsDoc.exists,
+            ...fsDoc.exists && !Number.isFinite(dir.docs?.[key]?.lastEditedMs) ? { lastEditedMs: fsDoc.lastEditedMs } : {},
+            ...fsDoc.exists && !Number.isFinite(dir.docs?.[key]?.lastReviewedMs) ? { lastReviewedMs: fsDoc.lastReviewedMs } : {}
+          };
+        }
+        dir.conditions = computeProjectConditions2(dir);
+        dir.state = computeProjectState2(dir.conditions, dir.archived);
+      }
+      project.lastUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      return project;
+    };
+    var ensureProjectChangeDirs2 = (cwd, project) => {
+      for (const dir of discoverChangeDirs2(cwd)) {
+        const relDirValue = relDirForProject2(cwd, dir);
+        if (!project.changeDirs[relDirValue]) {
+          project.changeDirs[relDirValue] = createChangeDirFromFs2(cwd, dir);
+        }
+      }
+      return recomputeProjectState2(project, cwd);
+    };
+    var normalizeProjectState2 = (cwd, parsed) => {
+      const project = emptyProjectState2();
+      if (parsed && typeof parsed === "object") {
+        project.version = 1;
+        project.lastUpdatedAt = typeof parsed.lastUpdatedAt === "string" && parsed.lastUpdatedAt ? parsed.lastUpdatedAt : project.lastUpdatedAt;
+        project.activeChangeDir = typeof parsed.activeChangeDir === "string" ? toPosix2(parsed.activeChangeDir) : null;
+        project.activeUntilMs = Number.isFinite(parsed.activeUntilMs) ? Number(parsed.activeUntilMs) : 0;
+        project.activeLastEditedSession = typeof parsed.activeLastEditedSession === "string" ? parsed.activeLastEditedSession : null;
+        project.changeDirs = {};
+        for (const [relDirValue, value] of Object.entries(parsed.changeDirs || {})) {
+          project.changeDirs[toPosix2(relDirValue)] = normalizeProjectChangeDir(cwd, relDirValue, value);
+        }
+      }
+      return ensureProjectChangeDirs2(cwd, project);
+    };
+    var quarantineCorruptStateFile = (fp) => {
+      try {
+        if (!fs2.existsSync(fp)) return;
+        fs2.renameSync(fp, `${fp}.corrupt-${Date.now()}`);
+      } catch {
+      }
+    };
+    var loadProjectState2 = (cwd) => {
+      const fp = projectStatePath2(cwd);
+      try {
+        return normalizeProjectState2(cwd, JSON.parse(fs2.readFileSync(fp, "utf8")));
+      } catch (err) {
+        if (err?.code !== "ENOENT") quarantineCorruptStateFile(fp);
+        return normalizeProjectState2(cwd, emptyProjectState2());
+      }
+    };
+    var saveProjectState2 = (cwd, project) => {
+      recomputeProjectState2(project, cwd);
+      writeTextAtomic(projectStatePath2(cwd), JSON.stringify(project, null, 2));
+    };
+    var collectCarryOverDrift2 = (project) => Object.values(project?.changeDirs || {}).filter((dir) => !dir.archived).filter((dir) => dir.state !== "ALIGNED" && dir.state !== "PROPOSAL_STAGE");
+    var refreshAlignedBaseline2 = (cwd, project, state) => {
+      if (!project) return false;
+      const nowMs = Date.now() * 1e3;
+      let changed = false;
+      for (const dir of Object.values(project.changeDirs || {})) {
+        if (dir.archived) continue;
+        const linkedCodeRecords = (dir.linkedCode || []).map((item) => state.files?.[normalizeKey2(path2.join(cwd, item.path))]).filter((record) => record?.editedSeq && isCodePath2(record.path || ""));
+        if (!linkedCodeRecords.length) continue;
+        const latestCodeSeq = Math.max(0, ...linkedCodeRecords.map((record) => Number(record.editedSeq || 0)));
+        if (!latestCodeSeq) continue;
+        const docPaths = [DESIGN_FILE2, TASKS_FILE2].filter((file) => dir.docs?.[docKeyForFile2(file)]?.exists).map((file) => path2.join(cwd, dir.relDir, file));
+        if (!docPaths.length) continue;
+        const docSeqs = docPaths.map((file) => editedSeq2(state, file));
+        const allDocsEditedBeforeCode = docSeqs.every((seq) => seq > 0 && seq < latestCodeSeq);
+        if (!allDocsEditedBeforeCode) continue;
+        const latestCodeMs = Math.max(0, ...linkedCodeRecords.map((record) => eventMsForFileRecord2(record, true)));
+        if (Number(dir.alignedAtMs || 0) >= latestCodeMs) continue;
+        dir.alignedAtMs = Math.max(nowMs, latestCodeMs);
+        dir.alignedAt = (/* @__PURE__ */ new Date()).toISOString();
+        changed = true;
+      }
+      if (changed) recomputeProjectState2(project, cwd);
+      return changed;
+    };
+    module2.exports = {
+      collectActiveChangeDirs: collectActiveChangeDirs2,
+      collectCarryOverDrift: collectCarryOverDrift2,
+      computeProjectConditions: computeProjectConditions2,
+      computeProjectState: computeProjectState2,
+      createChangeDirFromFs: createChangeDirFromFs2,
+      discoverChangeDirs: discoverChangeDirs2,
+      docFileForKey,
+      docKeyForFile: docKeyForFile2,
+      docRecordFromFs,
+      emptyProjectState: emptyProjectState2,
+      ensureProjectChangeDirs: ensureProjectChangeDirs2,
+      eventMsForFileRecord: eventMsForFileRecord2,
+      loadProjectState: loadProjectState2,
+      normalizeProjectChangeDir,
+      normalizeProjectDoc,
+      normalizeProjectState: normalizeProjectState2,
+      quarantineCorruptStateFile,
+      recomputeProjectState: recomputeProjectState2,
+      refreshAlignedBaseline: refreshAlignedBaseline2,
+      relDirForProject: relDirForProject2,
+      saveProjectState: saveProjectState2
+    };
+  }
+});
+
+// src/core/drift-engine.js
+var require_drift_engine = __commonJS({
+  "src/core/drift-engine.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { isCodePath: isCodePath2 } = require_file_classifier();
+    var { rel: rel2, samePath: samePath2, toPosix: toPosix2 } = require_paths();
+    var {
+      collectActiveChangeDirs: collectActiveChangeDirs2,
+      computeProjectConditions: computeProjectConditions2,
+      discoverChangeDirs: discoverChangeDirs2,
+      docKeyForFile: docKeyForFile2
+    } = require_project_state();
+    var {
+      editedSeq: editedSeq2,
+      editedSddSeqAfter,
+      hasEditedSddChange: hasEditedSddChange2,
+      touchedSeq: touchedSeq2
+    } = require_session_state();
+    var { CODE_REVIEW_CONFIRMATION_CAP, DTS_CONTEXT_SKIP: DTS_CONTEXT_SKIP2 } = require_runtime_config();
+    var {
+      DESIGN_FILE: DESIGN_FILE2,
+      PEER_FILES,
+      PROPOSAL_FILE: PROPOSAL_FILE2,
+      REVIEW_FILES,
+      TASKS_FILE: TASKS_FILE2,
+      getChangeDoc: getChangeDoc2,
+      hasSddWorkspace: hasSddWorkspace2,
+      isArchivedChangeDir: isArchivedChangeDir2
+    } = require_sdd_rules();
+    var { hash: hash2 } = require_state_storage();
+    var isDtsContextActive2 = (state) => DTS_CONTEXT_SKIP2 && Boolean(state.dtsContext?.active);
+    var drift2 = (cwd, fp, state) => {
+      const warn = [];
+      const doc = getChangeDoc2(fp);
+      if (!hasSddWorkspace2(cwd) || isDtsContextActive2(state)) return warn;
+      if (doc?.root) {
+        if (doc.rel.startsWith("specs/")) {
+          warn.push(
+            `SDD DRIFT: ${doc.rel} was changed directly. SDD changes should normally go through sdd/changes/<id>/. If this bypass is intentional, mention it explicitly.`
+          );
+        }
+        return warn;
+      }
+      if (isCodePath2(fp) && !hasEditedSddChange2(state)) {
+        warn.push(
+          `SDD DRIFT: code file ${path2.basename(fp)} was changed, but this session did not edit any sdd/changes/** file. SDD expects a change proposal first.`
+        );
+      }
+      return warn;
+    };
+    var collectPeerGaps2 = (cwd, state, options = {}) => {
+      const includeStageOnly = options.includeStageOnly !== false;
+      const includeHard = options.includeHard !== false;
+      const gaps = [];
+      for (const bucket of Object.values(state.requirements || {})) {
+        const dir = bucket.dir;
+        if (isArchivedChangeDir2(dir)) continue;
+        const absent = [];
+        const unsynced = [];
+        const stale = [];
+        const required = [];
+        const pendingRequirements = [];
+        for (const [file, requirement] of Object.entries(bucket.files || {})) {
+          const requirementStageOnly = Boolean(requirement?.stageOnly || requirement?.sourceFile === PROPOSAL_FILE2);
+          if (requirementStageOnly ? !includeStageOnly : !includeHard) continue;
+          const peerPath = path2.join(dir, file);
+          const seq = editedSeq2(state, peerPath);
+          if (seq > requirement.afterSeq) continue;
+          required.push(file);
+          pendingRequirements.push({ file, ...requirement, stageOnly: requirementStageOnly });
+          if (!fs2.existsSync(peerPath)) {
+            absent.push(file);
+          } else if (seq === 0) {
+            unsynced.push(file);
+          } else {
+            stale.push(file);
+          }
+        }
+        if (!required.length) continue;
+        const stageOnly = pendingRequirements.every((requirement) => requirement.stageOnly);
+        if (stageOnly && !includeStageOnly) continue;
+        const edited = [PROPOSAL_FILE2, ...PEER_FILES].filter((file) => editedSeq2(state, path2.join(dir, file)) > 0);
+        const relDir = toPosix2(path2.relative(cwd, dir));
+        gaps.push({
+          relDir,
+          edited,
+          sourceFiles: [...new Set(pendingRequirements.map((requirement) => requirement.sourceFile).filter(Boolean))],
+          stageOnly,
+          absent,
+          missing: absent,
+          unsynced,
+          stale,
+          required
+        });
+      }
+      return gaps;
+    };
+    var collectProjectPeerGaps2 = (cwd, project, options = {}) => {
+      const includeStageOnly = options.includeStageOnly !== false;
+      const includeHard = options.includeHard !== false;
+      const gaps = [];
+      for (const dir of Object.values(project?.changeDirs || {})) {
+        if (dir.archived) continue;
+        const absDir = path2.join(cwd, dir.relDir);
+        const conditions = computeProjectConditions2(dir);
+        const required = [];
+        const sourceFiles = [];
+        if (conditions.proposalOnly && includeStageOnly) continue;
+        if (conditions.designAheadOfTasks && includeHard) {
+          required.push(TASKS_FILE2);
+          sourceFiles.push(DESIGN_FILE2);
+        }
+        if (conditions.tasksAheadOfDesign && includeHard) {
+          required.push(DESIGN_FILE2);
+          sourceFiles.push(TASKS_FILE2);
+        }
+        if (!required.length) continue;
+        gaps.push({
+          relDir: dir.relDir,
+          edited: [PROPOSAL_FILE2, DESIGN_FILE2, TASKS_FILE2].filter((file) => {
+            const key = docKeyForFile2(file);
+            return Number(dir.docs?.[key]?.lastEditedMs || 0) > 0;
+          }),
+          sourceFiles,
+          stageOnly: false,
+          absent: required.filter((file) => !fs2.existsSync(path2.join(absDir, file))),
+          missing: required.filter((file) => !fs2.existsSync(path2.join(absDir, file))),
+          unsynced: required.filter((file) => fs2.existsSync(path2.join(absDir, file))),
+          stale: [],
+          required,
+          projectLevel: true
+        });
+      }
+      return gaps;
+    };
+    var collectProjectCodeGaps2 = (cwd, project) => {
+      if (!project || !hasSddWorkspace2(cwd)) return [];
+      const gaps = [];
+      for (const dir of Object.values(project.changeDirs || {})) {
+        if (dir.archived) continue;
+        const conditions = computeProjectConditions2(dir);
+        if (!conditions.codeAheadOfDocs) continue;
+        const codeFiles = (dir.linkedCode || []).map((item) => path2.join(cwd, item.path));
+        const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)));
+        const reviewTargets = conditions.codePendingDocs.map((file) => path2.join(cwd, dir.relDir, file));
+        if (!reviewTargets.length || !codeFiles.length) continue;
+        gaps.push({
+          codeFiles,
+          latestCodeSeq: latestCodeMs,
+          latestCodeMs,
+          reviewTargets,
+          pendingReviewTargets: reviewTargets,
+          reviewReady: false,
+          needsConfirmation: false,
+          projectLevel: true,
+          relDir: dir.relDir,
+          reviewSignature: hash2(
+            JSON.stringify({
+              type: "project-code",
+              relDir: dir.relDir,
+              latestCodeMs,
+              reviewTargets: reviewTargets.map((file) => rel2(cwd, file)).sort()
+            })
+          )
+        });
+      }
+      return gaps;
+    };
+    var codeReviewSignature2 = (cwd, gap) => hash2(
+      JSON.stringify({
+        codeFiles: (gap.codeFiles || []).map((file) => rel2(cwd, file)).sort(),
+        latestCodeSeq: gap.latestCodeSeq || 0,
+        reviewTargets: (gap.reviewTargets || []).map((file) => rel2(cwd, file)).sort()
+      })
+    );
+    var isCodeReviewConfirmed = (state, signature) => Boolean(signature && state.codeReviewConfirmations?.[signature]?.confirmed);
+    var collectReviewTargets2 = (cwd, state) => {
+      if (!hasSddWorkspace2(cwd)) return [];
+      const discoveredDirs = [...state.changeDirs || [], ...discoverChangeDirs2(cwd)];
+      const dirs = collectActiveChangeDirs2(cwd, state);
+      const targets = [];
+      for (const dir of dirs) {
+        for (const file of REVIEW_FILES) {
+          const target = path2.join(dir, file);
+          if (!fs2.existsSync(target)) continue;
+          if (!targets.some((existing) => samePath2(existing, target))) {
+            targets.push(path2.normalize(target));
+          }
+        }
+      }
+      if (targets.length || dirs.length || discoveredDirs.length) return targets;
+      const fallbackRoot = fs2.existsSync(path2.join(cwd, ".sdd")) ? ".sdd" : "sdd";
+      return REVIEW_FILES.map((file) => path2.join(cwd, fallbackRoot, "changes", "<change-id>", file));
+    };
+    var collectCodeGaps2 = (cwd, state) => {
+      if (!hasSddWorkspace2(cwd) || isDtsContextActive2(state)) return [];
+      const codeFiles = Object.values(state.files || {}).filter((file) => file.editedSeq && isCodePath2(file.path || "")).sort((left, right) => (right.editedSeq || 0) - (left.editedSeq || 0));
+      if (!codeFiles.length) return [];
+      const latestCodeSeq = codeFiles[0].editedSeq || 0;
+      const reviewTargets = collectReviewTargets2(cwd, state);
+      const pendingReviewTargets = reviewTargets.filter((file) => touchedSeq2(state, file) <= latestCodeSeq);
+      const baseGap = {
+        codeFiles: codeFiles.map((file) => file.path),
+        latestCodeSeq,
+        reviewTargets,
+        pendingReviewTargets
+      };
+      const reviewSignature = codeReviewSignature2(cwd, baseGap);
+      if (state.codeReviewConfirmations?.[reviewSignature]?.implementationFlow) return [];
+      const hasReviewEdit = editedSddSeqAfter(state, reviewTargets, latestCodeSeq);
+      const reviewReady = pendingReviewTargets.length === 0;
+      if (reviewReady && (hasReviewEdit || isCodeReviewConfirmed(state, reviewSignature))) return [];
+      return [
+        {
+          ...baseGap,
+          reviewSignature,
+          reviewReady,
+          needsConfirmation: reviewReady && !hasReviewEdit
+        }
+      ];
+    };
+    var collectCombinedPeerGaps2 = (cwd, state, project, options = {}) => {
+      const combined = [
+        ...collectPeerGaps2(cwd, state, options),
+        ...collectProjectPeerGaps2(cwd, project, options)
+      ];
+      const seen = /* @__PURE__ */ new Set();
+      return combined.filter((gap) => {
+        const key = `${gap.relDir}:${gap.required.sort().join(",")}:${gap.sourceFiles.sort().join(",")}:${gap.stageOnly}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+    var collectCombinedCodeGaps2 = (cwd, state, project) => {
+      const sessionGaps = collectCodeGaps2(cwd, state);
+      const rawProjectGaps = collectProjectCodeGaps2(cwd, project);
+      const projectGaps = rawProjectGaps.filter(
+        (gap) => !state.codeReviewConfirmations?.[gap.reviewSignature]?.implementationFlow && !isCodeReviewConfirmed(state, gap.reviewSignature)
+      );
+      const codeFilesKey = (gap) => (gap.codeFiles || []).map((file) => rel2(cwd, file)).sort().join("\0");
+      const projectCodeKeys = new Set(rawProjectGaps.map(codeFilesKey));
+      const projectLinkedCode = new Set(
+        Object.values(project?.changeDirs || {}).flatMap(
+          (dir) => (dir.linkedCode || []).map((item) => toPosix2(item.path))
+        )
+      );
+      const allCodeFilesTrackedByProject = (gap) => (gap.codeFiles || []).every((file) => projectLinkedCode.has(rel2(cwd, file)));
+      const combined = [
+        ...sessionGaps.filter(
+          (gap) => !projectCodeKeys.has(codeFilesKey(gap)) && !allCodeFilesTrackedByProject(gap)
+        ),
+        ...projectGaps
+      ];
+      const seen = /* @__PURE__ */ new Set();
+      return combined.filter((gap) => {
+        const key = JSON.stringify({
+          codeFiles: (gap.codeFiles || []).map((file) => rel2(cwd, file)).sort(),
+          reviewTargets: (gap.reviewTargets || []).map((file) => rel2(cwd, file)).sort()
+        });
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+    var pruneCodeReviewConfirmations = (state) => {
+      const entries = Object.entries(state.codeReviewConfirmations || {});
+      if (entries.length <= CODE_REVIEW_CONFIRMATION_CAP) return;
+      entries.sort((left, right) => {
+        const leftAt = Date.parse(left[1]?.confirmedAt || left[1]?.requestedAt || 0) || 0;
+        const rightAt = Date.parse(right[1]?.confirmedAt || right[1]?.requestedAt || 0) || 0;
+        return leftAt - rightAt;
+      }).slice(0, entries.length - CODE_REVIEW_CONFIRMATION_CAP).forEach(([key]) => {
+        delete state.codeReviewConfirmations[key];
+      });
+    };
+    var markCodeReviewNoEditConfirmation2 = (state, gaps) => {
+      if (!gaps.length || !gaps.every((gap) => gap.needsConfirmation && gap.reviewReady)) return false;
+      let confirmed = true;
+      for (const gap of gaps) {
+        const signature = gap.reviewSignature;
+        if (!signature) {
+          confirmed = false;
+          continue;
+        }
+        const existing = state.codeReviewConfirmations[signature] || {};
+        state.codeReviewConfirmations[signature] = {
+          ...existing,
+          requested: true,
+          requestedAt: existing.requestedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          confirmed: true,
+          confirmedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          codeSeq: gap.latestCodeSeq || 0,
+          codeFiles: (gap.codeFiles || []).map((file) => file.path || file),
+          reviewTargets: gap.reviewTargets || [],
+          noSddEdit: true,
+          userConfirmationRecommended: true
+        };
+      }
+      pruneCodeReviewConfirmations(state);
+      return confirmed;
+    };
+    module2.exports = {
+      codeReviewSignature: codeReviewSignature2,
+      collectCodeGaps: collectCodeGaps2,
+      collectCombinedCodeGaps: collectCombinedCodeGaps2,
+      collectCombinedPeerGaps: collectCombinedPeerGaps2,
+      collectPeerGaps: collectPeerGaps2,
+      collectProjectCodeGaps: collectProjectCodeGaps2,
+      collectProjectPeerGaps: collectProjectPeerGaps2,
+      collectReviewTargets: collectReviewTargets2,
+      drift: drift2,
+      isCodeReviewConfirmed,
+      isDtsContextActive: isDtsContextActive2,
+      markCodeReviewNoEditConfirmation: markCodeReviewNoEditConfirmation2,
+      pruneCodeReviewConfirmations
+    };
+  }
+});
+
+// src/core/prompts.js
+var require_prompts = __commonJS({
+  "src/core/prompts.js"(exports2, module2) {
+    var { collectCombinedCodeGaps: collectCombinedCodeGaps2, collectCombinedPeerGaps: collectCombinedPeerGaps2 } = require_drift_engine();
+    var { rel: rel2 } = require_paths();
+    var { collectCarryOverDrift: collectCarryOverDrift2 } = require_project_state();
+    var {
+      ACTIVE_SDD_ALIGNMENT_RULES,
+      DOCUMENT_SYNC_RULES,
+      RESUME_ORIGINAL_TASK_RULES,
+      SUBAGENT_REVIEW_RULE,
+      formatAttributionReviewRules
+    } = require_sdd_rules();
+    var { hash: hash2 } = require_state_storage();
+    var buildAttributionReviewPrompt2 = (cwd, { codeFiles = [], candidates = [] } = {}) => {
+      const codeLines = codeFiles.length ? codeFiles.map((file) => `  - ${rel2(cwd, file)}`) : ["  - unknown code file"];
+      const candidateLines = candidates.length ? candidates.map((dir) => {
+        const docs = dir.docs || {};
+        const docState = [
+          docs.design?.exists ? "design.md" : null,
+          docs.tasks?.exists ? "tasks.md" : null
+        ].filter(Boolean).join(", ");
+        const suffix = docState ? `; docs: ${docState}` : "";
+        return `  - ${dir.relDir}${dir.state ? ` (${dir.state}${suffix})` : suffix}`;
+      }) : ["  - no active SDD change-dir candidates"];
+      return [
+        "SDD attribution review needed.",
+        "",
+        "Recent code changes:",
+        ...codeLines,
+        "",
+        "Candidate active SDD change directories:",
+        ...candidateLines,
+        "",
+        ...formatAttributionReviewRules(),
+        "",
+        "Read the relevant candidate design.md/tasks.md files, decide which change-dir owns the code change, then do exactly one of these:",
+        "- edit the matching SDD document(s) if they are stale;",
+        "- leave documents unchanged if the reviewed docs are already aligned;",
+        "- create a new sdd/changes/<id>/ directory only if this work is feature-sized and not covered by any candidate;",
+        "- state that the code change is unrelated to active SDD scope if none applies.",
+        "Preserve existing SDD templates and headings when editing."
+      ].join("\n");
+    };
+    var formatGap = (gap) => {
+      const parts = [`required [${gap.required.join(", ")}]`];
+      if (gap.stageOnly) parts.push("stage reminder");
+      if (gap.absent?.length) parts.push(`absent [${gap.absent.join(", ")}]`);
+      if (gap.unsynced?.length) parts.push(`unsynced in this session [${gap.unsynced.join(", ")}]`);
+      if (gap.stale?.length) parts.push(`stale [${gap.stale.join(", ")}]`);
+      return `${gap.relDir}: edited [${gap.edited.join(", ")}], ${parts.join(", ")}`;
+    };
+    var buildToolEnforcement2 = (gaps, options = {}) => {
+      const compact = Boolean(options.compact);
+      const stageOnly = gaps.length > 0 && gaps.every((gap) => gap.stageOnly);
+      const detail = gaps.map(
+        (gap) => `- ${formatGap(gap)}. Synchronize: ${gap.required.map((file) => `${gap.relDir}/${file}`).join(", ")}`
+      ).join("\n");
+      if (stageOnly) {
+        return [
+          "SDD proposal stage reminder.",
+          "The preceding tool changed proposal.md. A proposal-only turn is valid; if the current user request only asked for proposal drafting or refinement, you may finish normally.",
+          "If you continue this same request into design work, read the current design.md first and update the appropriate existing section without changing its template.",
+          "Do not create or edit tasks.md directly from proposal.md. Let tasks.md follow only after design.md has been reviewed or updated.",
+          detail
+        ].join("\n");
+      }
+      if (compact) {
+        return [
+          "SDD drift reminder.",
+          "Peer SDD document synchronization is still pending:",
+          detail,
+          "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
+          ...RESUME_ORIGINAL_TASK_RULES
+        ].join("\n");
+      }
+      return [
+        "SDD drift tool result enforcement.",
+        "The preceding tool changed SDD change document(s), but peer document(s) are still unsynchronized:",
+        detail,
+        "",
+        "This assistant turn is incomplete until the required peer document(s) are synchronized.",
+        "Before any final answer, read each listed required peer file, then use edit or write to synchronize it with the edited SDD change document(s). If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
+        ...DOCUMENT_SYNC_RULES,
+        ...RESUME_ORIGINAL_TASK_RULES,
+        "Do not stop or summarize completion until the required peer document(s) are updated."
+      ].join("\n");
+    };
+    var formatCodeReviewTargets = (cwd, files) => files.map((file) => rel2(cwd, file)).join(", ");
+    var buildCodeEnforcement2 = (cwd, gaps, options = {}) => {
+      const compact = Boolean(options.compact);
+      const detail = gaps.map((gap) => {
+        const codeList = gap.codeFiles.map((file) => rel2(cwd, file)).join(", ");
+        const reviewList = formatCodeReviewTargets(cwd, gap.reviewTargets || []);
+        const pendingTargets = gap.pendingReviewTargets || gap.reviewTargets || [];
+        const pendingList = pendingTargets.length ? formatCodeReviewTargets(cwd, pendingTargets) : "none; final review confirmation marker is pending";
+        return `- changed code file(s) [${codeList}]. Review SDD document(s): ${reviewList}. Still needs review: ${pendingList}`;
+      }).join("\n");
+      if (compact) {
+        return [
+          "SDD drift tool result enforcement.",
+          "SDD drift reminder: implementation code still has pending SDD review for this code-change batch:",
+          detail,
+          "",
+          "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
+          "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
+          ...ACTIVE_SDD_ALIGNMENT_RULES,
+          ...formatAttributionReviewRules(),
+          "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
+          "After both documents have been reviewed, resume the original user task if anything remains; finish only if the original task is already complete.",
+          ...RESUME_ORIGINAL_TASK_RULES,
+          SUBAGENT_REVIEW_RULE
+        ].join("\n");
+      }
+      return [
+        "SDD drift tool result enforcement.",
+        "The preceding tool changed implementation code. SDD reconciliation review is now pending for this code-change batch:",
+        detail,
+        "",
+        "This is a deferred review checkpoint, not an instruction to stop coding immediately.",
+        "Continue implementation work if more code changes are still required.",
+        "When the implementation for this task is complete, and before any final answer, use the read tool to review the relevant design.md and tasks.md files.",
+        "After review, update active SDD document(s) whenever they no longer match the implemented code. Optimization and refactor work can still require SDD updates.",
+        ...ACTIVE_SDD_ALIGNMENT_RULES,
+        ...formatAttributionReviewRules(),
+        "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
+        "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
+        ...DOCUMENT_SYNC_RULES,
+        "Do not create a no-op edit or add a new section just to satisfy this hook.",
+        SUBAGENT_REVIEW_RULE,
+        ...RESUME_ORIGINAL_TASK_RULES,
+        "Do not give the final answer while this code-change batch still has unreviewed SDD documents."
+      ].join("\n");
+    };
+    var buildCodeToolReminder2 = (cwd, gaps) => {
+      const detail = gaps.map((gap) => {
+        const codeList = gap.codeFiles.map((file) => rel2(cwd, file)).join(", ");
+        const reviewList = formatCodeReviewTargets(cwd, gap.reviewTargets || []);
+        return `- changed code file(s) [${codeList}]. Review before final answer: ${reviewList}`;
+      }).join("\n");
+      return [
+        "SDD drift code review noted.",
+        "Implementation code changed, so SDD review will be required before the final answer.",
+        detail,
+        "",
+        "Do not stop coding just because this reminder appeared. If more implementation, verification, cleanup, or requested edits remain, continue the original task now.",
+        "When the implementation batch is complete, and before final answer or before asking the user what to do next, read/review the listed active design.md and tasks.md files.",
+        "Update only the SDD documents that are stale; if no document needs changes, leave them unchanged and say which files you reviewed.",
+        SUBAGENT_REVIEW_RULE,
+        ...RESUME_ORIGINAL_TASK_RULES
+      ].join("\n");
+    };
+    var serializablePeerGap = (gap) => ({
+      relDir: gap.relDir,
+      edited: [...gap.edited || []].sort(),
+      sourceFiles: [...gap.sourceFiles || []].sort(),
+      stageOnly: Boolean(gap.stageOnly),
+      absent: [...gap.absent || []].sort(),
+      unsynced: [...gap.unsynced || []].sort(),
+      stale: [...gap.stale || []].sort(),
+      required: [...gap.required || []].sort()
+    });
+    var serializableCodeGap2 = (cwd, gap) => ({
+      codeFiles: (gap.codeFiles || []).map((file) => rel2(cwd, file)).sort(),
+      latestCodeSeq: gap.latestCodeSeq || 0,
+      reviewTargets: (gap.reviewTargets || []).map((file) => rel2(cwd, file)).sort(),
+      pendingReviewTargets: (gap.pendingReviewTargets || []).map((file) => rel2(cwd, file)).sort(),
+      reviewReady: Boolean(gap.reviewReady),
+      needsConfirmation: Boolean(gap.needsConfirmation)
+    });
+    var peerDriftSignature2 = (peerGaps) => hash2(JSON.stringify({ type: "peer", gaps: peerGaps.map(serializablePeerGap) }));
+    var buildSubagentCheckpointEnforcement2 = (cwd, state, project = null) => {
+      const hardPeerGaps = collectCombinedPeerGaps2(cwd, state, project, { includeStageOnly: false });
+      if (hardPeerGaps.length) {
+        return {
+          type: "peer",
+          signature: hash2(JSON.stringify({ type: "subagent-peer", gaps: hardPeerGaps.map(serializablePeerGap) })),
+          message: buildToolEnforcement2(hardPeerGaps, { compact: true })
+        };
+      }
+      const pendingCodeGaps = collectCombinedCodeGaps2(cwd, state, project).filter((gap) => !gap.reviewReady);
+      if (pendingCodeGaps.length) {
+        return {
+          type: "code",
+          signature: hash2(
+            JSON.stringify({
+              type: "subagent-code",
+              gaps: pendingCodeGaps.map((gap) => serializableCodeGap2(cwd, gap))
+            })
+          ),
+          message: buildCodeEnforcement2(cwd, pendingCodeGaps, { compact: true })
+        };
+      }
+      return null;
+    };
+    var buildQuestionCheckpointMessage = (message) => [
+      "SDD drift question checkpoint.",
+      "The assistant is about to ask the user a question or hand control back while SDD synchronization or review is still pending.",
+      "Do not ask about commit, next action, or whether to continue before resolving the SDD reminder below.",
+      "Continue the current turn now and handle the pending SDD work first.",
+      "After the pending SDD work is resolved, return to the original user task from where you paused; do not treat this checkpoint itself as task completion.",
+      ...RESUME_ORIGINAL_TASK_RULES,
+      "",
+      message
+    ].join("\n");
+    var buildQuestionCheckpointEnforcement2 = (cwd, state, project = null) => {
+      const hardPeerGaps = collectCombinedPeerGaps2(cwd, state, project, { includeStageOnly: false });
+      if (hardPeerGaps.length) {
+        return {
+          type: "peer",
+          signature: hash2(JSON.stringify({ type: "question-peer", gaps: hardPeerGaps.map(serializablePeerGap) })),
+          message: buildQuestionCheckpointMessage(buildToolEnforcement2(hardPeerGaps, { compact: true }))
+        };
+      }
+      const pendingCodeGaps = collectCombinedCodeGaps2(cwd, state, project).filter((gap) => !gap.reviewReady);
+      if (pendingCodeGaps.length) {
+        return {
+          type: "code",
+          signature: hash2(
+            JSON.stringify({
+              type: "question-code",
+              gaps: pendingCodeGaps.map((gap) => serializableCodeGap2(cwd, gap))
+            })
+          ),
+          message: buildQuestionCheckpointMessage(buildCodeEnforcement2(cwd, pendingCodeGaps, { compact: true }))
+        };
+      }
+      return null;
+    };
+    var buildPendingEnforcement2 = (cwd, state, options = {}) => {
+      const project = options.project || null;
+      const peerGaps = collectCombinedPeerGaps2(cwd, state, project, {
+        includeStageOnly: options.includeStageOnly !== false
+      });
+      if (peerGaps.length) {
+        return {
+          type: "peer",
+          message: buildToolEnforcement2(peerGaps),
+          signature: peerDriftSignature2(peerGaps)
+        };
+      }
+      const codeGaps = collectCombinedCodeGaps2(cwd, state, project);
+      if (codeGaps.length) {
+        return {
+          type: "code",
+          message: buildCodeEnforcement2(cwd, codeGaps),
+          signature: hash2(JSON.stringify({ type: "code", gaps: codeGaps.map((gap) => serializableCodeGap2(cwd, gap)) })),
+          gaps: codeGaps
+        };
+      }
+      return null;
+    };
+    var buildStopEnforcement2 = (pendingMessage) => [
+      "SDD drift stop enforcement.",
+      "The assistant attempted to stop while required SDD synchronization or review is still missing.",
+      "",
+      pendingMessage,
+      "",
+      "Continue the current task now. Do not ask the user for permission to continue.",
+      "After the required SDD work is resolved, resume the original user task if anything remains; do not stop only because the SDD checkpoint is resolved.",
+      "For code-review gaps, read/review the listed SDD document(s), then update only the files that actually need changes.",
+      "If those documents have already been reviewed and no edit is needed, stop again with a concise final answer; the hook will record the review confirmation marker.",
+      "For peer-sync gaps, use read, then edit or write, to synchronize the listed SDD document(s) before trying to stop again."
+    ].join("\n");
+    var formatCarryOverReminder2 = (project, options = {}) => {
+      const driftDirs = collectCarryOverDrift2(project);
+      if (!driftDirs.length) return "";
+      return [
+        `${options.prefix || ""}SDD carry-over drift from prior sessions:`,
+        ...driftDirs.map((dir) => `- ${dir.relDir}: ${dir.state}`),
+        "",
+        "Before final answer, review these active SDD change directories and synchronize design.md/tasks.md with the implementation if needed.",
+        SUBAGENT_REVIEW_RULE
+      ].join("\n");
+    };
+    var buildPreCompactSummary2 = (cwdOrProject, stateOrNull = null, projectOrNull = null) => {
+      const legacyCall = typeof cwdOrProject !== "string";
+      const cwd = legacyCall ? "" : cwdOrProject;
+      const state = legacyCall ? null : stateOrNull;
+      const project = legacyCall ? cwdOrProject : projectOrNull;
+      const driftDirs = collectCarryOverDrift2(project);
+      const pending = cwd && state ? buildQuestionCheckpointEnforcement2(cwd, state, project) : null;
+      const checkpointActive = Boolean(pending?.signature) && state?.subagentCheckpointNotice?.active && state.subagentCheckpointNotice.signature === pending.signature;
+      if (!driftDirs.length && !checkpointActive) return "";
+      if (checkpointActive) {
+        return [
+          "SDD drift checkpoint preserved across compaction:",
+          "Before compaction, the assistant was blocked from asking the user or handing control back because SDD synchronization/review was pending.",
+          "After compaction resumes, handle this SDD work first, then return to the original user task from where it was interrupted.",
+          ...RESUME_ORIGINAL_TASK_RULES,
+          "",
+          pending.message,
+          ...driftDirs.length ? [
+            "",
+            "Active SDD change-dir states:",
+            ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`)
+          ] : []
+        ].join("\n");
+      }
+      return [
+        "SDD drift summary preserved across compaction:",
+        ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`),
+        "",
+        "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed.",
+        ...RESUME_ORIGINAL_TASK_RULES
+      ].join("\n");
+    };
+    module2.exports = {
+      buildAttributionReviewPrompt: buildAttributionReviewPrompt2,
+      buildCodeEnforcement: buildCodeEnforcement2,
+      buildCodeToolReminder: buildCodeToolReminder2,
+      buildPendingEnforcement: buildPendingEnforcement2,
+      buildPreCompactSummary: buildPreCompactSummary2,
+      buildQuestionCheckpointEnforcement: buildQuestionCheckpointEnforcement2,
+      buildQuestionCheckpointMessage,
+      buildStopEnforcement: buildStopEnforcement2,
+      buildSubagentCheckpointEnforcement: buildSubagentCheckpointEnforcement2,
+      buildToolEnforcement: buildToolEnforcement2,
+      formatCarryOverReminder: formatCarryOverReminder2,
+      formatCodeReviewTargets,
+      formatGap,
+      peerDriftSignature: peerDriftSignature2,
+      serializableCodeGap: serializableCodeGap2,
+      serializablePeerGap
+    };
+  }
+});
+
+// src/core/report.js
+var require_report = __commonJS({
+  "src/core/report.js"(exports2, module2) {
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var { collectCombinedCodeGaps: collectCombinedCodeGaps2, collectCombinedPeerGaps: collectCombinedPeerGaps2 } = require_drift_engine();
+    var { rel: rel2 } = require_paths();
+    var { formatGap } = require_prompts();
+    var { editedSddSeqAfter } = require_session_state();
+    var { writeTextAtomic } = require_state_storage();
+    var confirmationStillNeedsHumanReview = (state, confirmation) => !editedSddSeqAfter(state, confirmation?.reviewTargets || [], Number(confirmation?.codeSeq || 0));
+    var collectCodeReviewAdvisoryLines = (cwd, state) => Object.values(state.codeReviewConfirmations || {}).filter((confirmation) => confirmation?.confirmed && confirmation?.userConfirmationRecommended).filter((confirmation) => confirmationStillNeedsHumanReview(state, confirmation)).sort((left, right) => {
+      const leftSeq = Number(left.codeSeq || 0);
+      const rightSeq = Number(right.codeSeq || 0);
+      return rightSeq - leftSeq;
+    }).map((confirmation) => {
+      const codeList = (confirmation.codeFiles || []).map((file) => rel2(cwd, file)).join(", ");
+      const reviewList = (confirmation.reviewTargets || []).map((file) => rel2(cwd, file)).join(", ");
+      return `  - reviewed SDD document(s) after code change(s) [${codeList || "unknown"}] and made no SDD edits. User confirmation recommended for: ${reviewList || "design.md, tasks.md"}`;
+    });
+    var collectReportLines2 = (cwd, state, project = null) => {
+      const lines = collectCombinedPeerGaps2(cwd, state, project, { includeStageOnly: false }).map(
+        (gap) => `  - ${formatGap(gap)}`
+      );
+      for (const gap of collectCombinedCodeGaps2(cwd, state, project)) {
+        const codeList = gap.codeFiles.map((file) => rel2(cwd, file)).join(", ");
+        const reviewList = (gap.pendingReviewTargets || gap.reviewTargets || []).map((file) => rel2(cwd, file)).join(", ");
+        lines.push(
+          `  - edited code file(s) [${codeList}], but did not review SDD document(s) after the code change: ${reviewList}`
+        );
+      }
+      lines.push(...collectCodeReviewAdvisoryLines(cwd, state));
+      return lines;
+    };
+    var refreshReport2 = (cwd, state, project = null) => {
+      const reportPath = path2.join(cwd, ".sdd-drift-report.md");
+      const lines = collectReportLines2(cwd, state, project);
+      if (lines.length) {
+        try {
+          const body = lines.join("\n") + "\n";
+          try {
+            const existing = fs2.readFileSync(reportPath, "utf8");
+            if (existing.replace(/^## .*\r?\n/, "") === body) return;
+          } catch {
+          }
+          writeTextAtomic(reportPath, "## " + (/* @__PURE__ */ new Date()).toISOString() + "\n" + body);
+        } catch {
+        }
+        return;
+      }
+      try {
+        fs2.unlinkSync(reportPath);
+      } catch {
+      }
+    };
+    module2.exports = {
+      collectCodeReviewAdvisoryLines,
+      collectReportLines: collectReportLines2,
+      confirmationStillNeedsHumanReview,
+      refreshReport: refreshReport2
+    };
+  }
+});
+
+// src/core/output.js
+var require_output = __commonJS({
+  "src/core/output.js"(exports2, module2) {
+    var createOutputHelpers2 = ({
+      isOpenCodeHookInput: isOpenCodeHookInput2,
+      opencodeStopReportOnly = false,
+      strictBlock = false,
+      stdout = process.stdout,
+      stderr = process.stderr,
+      exit = process.exit
+    } = {}) => {
+      if (typeof isOpenCodeHookInput2 !== "function") {
+        throw new TypeError("isOpenCodeHookInput is required");
+      }
+      const buildClaudeCodeOutput2 = (hookEventName, message) => JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: hookEventName || "PostToolUse",
+          additionalContext: message
+        }
+      });
+      const buildPreToolUseDenyOutput2 = (message) => JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: message,
+          additionalContext: message
+        }
+      });
+      const buildStopOutput2 = (input, message) => {
+        if (isOpenCodeHookInput2(input)) {
+          if (opencodeStopReportOnly) {
+            return JSON.stringify({
+              decision: "approve",
+              stop_hook_active: false,
+              sdd_drift_report_only: true
+            });
+          }
+          return JSON.stringify({
+            decision: "block",
+            reason: "SDD drift check found pending SDD synchronization or review. Attempting OpenCode Stop continuation; see .sdd-drift-report.md if the session does not continue.",
+            inject_prompt: message,
+            stop_hook_active: true
+          });
+        }
+        return JSON.stringify({
+          decision: "block",
+          reason: message
+        });
+      };
+      const emitEnforcement2 = (input, message) => {
+        if (strictBlock) {
+          stderr.write(message);
+          exit(2);
+          return;
+        }
+        if (input?.hook_event_name === "PreToolUse") {
+          stdout.write(buildPreToolUseDenyOutput2(message));
+          return;
+        }
+        if (isOpenCodeHookInput2(input)) {
+          stdout.write(message);
+          return;
+        }
+        stdout.write(buildClaudeCodeOutput2(input?.hook_event_name, message));
+      };
+      const emitStopEnforcement2 = (input, message) => {
+        if (strictBlock) {
+          stderr.write(message);
+          exit(2);
+          return;
+        }
+        stdout.write(buildStopOutput2(input, message));
+      };
+      return {
+        buildClaudeCodeOutput: buildClaudeCodeOutput2,
+        buildPreToolUseDenyOutput: buildPreToolUseDenyOutput2,
+        buildStopOutput: buildStopOutput2,
+        emitEnforcement: emitEnforcement2,
+        emitStopEnforcement: emitStopEnforcement2
+      };
+    };
+    module2.exports = {
+      createOutputHelpers: createOutputHelpers2
+    };
+  }
+});
+
+// src/adapters/claude-code/command-hook.js
 var crypto = require("crypto");
 var fs = require("fs");
-var os = require("os");
 var path = require("path");
 var { Actions, runActions } = require_actions();
-var { Attribution } = require_attribution();
 var { HookHandlers, createHookHandlers } = require_dispatcher();
 var { handlePreCompact } = require_pre_compact();
 var { handlePostToolUse } = require_post_tool_use();
@@ -658,172 +3240,133 @@ var { handlePreToolUse } = require_pre_tool_use();
 var { handleStop } = require_stop();
 var { handleUserPromptSubmit } = require_user_prompt_submit();
 var { readStdin } = require_stdin();
-var CODE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)$/i;
-var SHOW_WARNINGS = process.env.SDD_DRIFT_SHOW_WARNINGS === "1";
-var STRICT_BLOCK = process.env.SDD_DRIFT_STRICT === "1";
-var DEBUG = process.env.SDD_DRIFT_DEBUG === "1";
-var OUTPUT_MODE = String(process.env.SDD_DRIFT_OUTPUT || "").toLowerCase();
-var OPENCODE_STOP_MODE = String(process.env.SDD_DRIFT_OPENCODE_STOP_MODE || "").toLowerCase();
-var OPENCODE_STOP_REPORT_ONLY = OPENCODE_STOP_MODE === "report-only" || OPENCODE_STOP_MODE === "off" || process.env.SDD_DRIFT_OPENCODE_STOP_INJECT === "0";
-var STOP_MAX_BLOCKS = Number.parseInt(process.env.SDD_DRIFT_STOP_MAX_BLOCKS || "2", 10);
-var CODE_REVIEW_STOP_MAX_BLOCKS = Number.parseInt(
-  process.env.SDD_DRIFT_CODE_REVIEW_STOP_MAX_BLOCKS || "1",
-  10
-);
-var CODE_REVIEW_TOOL_MAX_REMINDERS = Number.parseInt(
-  process.env.SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS || "1",
-  10
-);
-var CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS = Number.parseInt(
-  process.env.SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS || "1",
-  10
-);
-var DIAGNOSTIC_LOG = process.env.SDD_DRIFT_LOG !== "0";
-var DIAGNOSTIC_LOG_MAX_BYTES = Number.parseInt(
-  process.env.SDD_DRIFT_LOG_MAX_BYTES || String(2 * 1024 * 1024),
-  10
-);
-var DIAGNOSTIC_LOG_RETENTION_DAYS = Number.parseFloat(
-  process.env.SDD_DRIFT_LOG_RETENTION_DAYS || "3"
-);
-var DIAGNOSTIC_SUMMARY_WINDOW_MS = Number.parseInt(
-  process.env.SDD_DRIFT_LOG_SUMMARY_WINDOW_MS || String(60 * 1e3),
-  10
-);
-var DTS_CONTEXT_SKIP = process.env.SDD_DRIFT_DTS_SKIP !== "0";
-var DTS_CONTEXT_OVERRIDE = String(process.env.SDD_DRIFT_DTS_CONTEXT || "").toLowerCase();
-var TOOL_EVENT_CAP = 200;
-var TRANSCRIPT_EVENT_CAP = Number.parseInt(
-  process.env.SDD_DRIFT_TRANSCRIPT_EVENT_CAP || "2000",
-  10
-);
-var CODE_REVIEW_CONFIRMATION_CAP = 50;
-var DTS_CONTEXT_TEXT_MAX_BYTES = 512 * 1024;
-var CHECKPOINT_OUTPUT_TEXT_MAX_BYTES = 64 * 1024;
-var CHECKPOINT_MTIME_SCAN = process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN !== "0";
-var CHECKPOINT_MTIME_WINDOW_MS = Number.parseInt(
-  process.env.SDD_DRIFT_CHECKPOINT_MTIME_WINDOW_MS || String(10 * 60 * 1e3),
-  10
-);
-var CHECKPOINT_MTIME_SCAN_MAX_FILES = Number.parseInt(
-  process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN_MAX_FILES || "50",
-  10
-);
-var CHECKPOINT_MTIME_SCAN_MAX_VISITS = Number.parseInt(
-  process.env.SDD_DRIFT_CHECKPOINT_MTIME_SCAN_MAX_VISITS || "2000",
-  10
-);
-var DEFAULT_LOCK_STALE_MS = 5 * 60 * 1e3;
-var STATE_LOCK_STALE_MS = 30 * 1e3;
-var STATE_LOCK_WAIT_MS = 5 * 1e3;
-var STATE_LOCK_RETRY_MS = 20;
-var STATE_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
-var SESSION_FILES_MAX = Number.parseInt(process.env.SDD_DRIFT_SESSION_FILES_MAX || "1000", 10);
-var STDIN_TIMEOUT_MS = Number.parseInt(process.env.SDD_DRIFT_STDIN_TIMEOUT_MS || "5000", 10);
-var PROJECT_LOCK_WAIT_MS = 2 * 1e3;
-var PROJECT_LINKED_CODE_CAP = Number.parseInt(
-  process.env.SDD_DRIFT_PROJECT_LINKED_CODE_CAP || "200",
-  10
-);
-var CIRCUIT_MAX_FAILURES = Number.parseInt(
-  process.env.SDD_DRIFT_CIRCUIT_MAX_FAILURES || "5",
-  10
-);
-var CIRCUIT_COOLDOWN_MS = Number.parseInt(
-  process.env.SDD_DRIFT_CIRCUIT_COOLDOWN_MS || String(60 * 1e3),
-  10
-);
-var ACTIVE_CHANGE_DIR_TTL_MS = Number.parseInt(
-  process.env.SDD_DRIFT_ACTIVE_TTL_MS || String(7 * 24 * 60 * 60 * 1e3),
-  10
-);
-var STATE_DIR = ".sdd-drift-hook-state";
-var PEER_FILES = ["design.md", "tasks.md"];
-var PROPOSAL_FILE = "proposal.md";
-var DESIGN_FILE = "design.md";
-var TASKS_FILE = "tasks.md";
-var REVIEW_FILES = [DESIGN_FILE, TASKS_FILE];
-var ARCHIVED_CHANGE_DIR_NAMES = /* @__PURE__ */ new Set(["archive", "archives", "archived", ".archive", ".archived", "\u5DF2\u5F52\u6863"]);
-var ARCHIVE_MARKER_FILES = [".archived", ".archive", "ARCHIVED", "archived.md", "archive.md", "\u5DF2\u5F52\u6863.md"];
-var ARCHIVE_STATUS_FILES = ["status.md", "state.md", "metadata.md", ".status"];
-var SUBAGENT_CHECKPOINT_TOOLS = /* @__PURE__ */ new Set([
-  "background_output",
-  "call_omo_agent",
-  "delegate_task",
-  "task"
-]);
-var QUESTION_CHECKPOINT_TOOLS = /* @__PURE__ */ new Set([
-  "ask_user",
-  "ask_user_question",
-  "askuser",
-  "askuserquestion",
-  "confirm",
-  "confirmation",
-  "question"
-]);
-var CHECKPOINT_OUTPUT_KEYS = [
-  "tool_output",
-  "tool_result",
-  "tool_response",
-  "result",
-  "output",
-  "response"
-];
-var CHECKPOINT_EDIT_LINE_RE = /\b(changed|modified|edited|updated|created|wrote|written|implemented|generated|patched|touched|saved|added|deleted|removed|renamed|refactored)\b|已修改|已更新|已创建|已写入|已实现|已生成|写入|修改|更新|创建|实现|变更/i;
-var CHECKPOINT_EDIT_HEADER_RE = /\b(files?\s+(changed|modified|edited|updated|created|written)|changed\s+files?|modified\s+files?|updated\s+files?|created\s+files?|implementation\s+changes?)\b|变更文件|修改文件|更新文件|创建文件|已修改文件|已更新文件/i;
-var CHECKPOINT_COMPLETION_RE = /\b(implemented|fixed|updated|created|modified|changed|wrote|patched|refactored|built|generated|saved|completed implementation|implementation complete|feature complete)\b|已完成|完成实现|实现完成|已实现|已修复|已更新|已修改|已创建|已写入|完成修改|修复完成|更新完成|修改完成/i;
-var CHECKPOINT_PATH_RE = /(?:[A-Za-z]:)?(?:[A-Za-z0-9_. -]+[\\/])*(?:[A-Za-z0-9_. -]+\.(?:ts|tsx|js|jsx|mjs|cjs|html|css|vue|svelte|py|go|rs|java|kt|swift|cc|cpp|c|h|hpp|rb|php|cs|scss|sql)|(?:proposal|design|tasks)\.md)/gi;
-var CHECKPOINT_PATH_IGNORE_RE = /^(?:node_modules|\.git|\.opencode|\.claude|\.sdd-drift-hook-state|\.real-workspaces)(?:\/|$)/;
-var CHANGE_DOC_REQUIREMENTS = {
-  [PROPOSAL_FILE]: [DESIGN_FILE],
-  [DESIGN_FILE]: [TASKS_FILE],
-  [TASKS_FILE]: [DESIGN_FILE]
-};
-var DOCUMENT_SYNC_RULES = [
-  "Before editing any SDD document, read the current file and preserve its existing Markdown template.",
-  "Keep every existing heading line exactly as-is, including the top-level title such as # Design or # Tasks, and keep the original heading order.",
-  "Do not replace the whole document with a summary, marker, or single-line result.",
-  "Do not add a new section or rewrite the template just to satisfy this enforcement.",
-  "Do not remove unrelated existing paragraphs, checklist items, examples, requirements, or notes while synchronizing drift.",
-  "For existing SDD documents, prefer Edit or MultiEdit. If Write is necessary, copy the original file content first and write the full document including all existing headings, template text, paragraphs, and checklist items.",
-  "Do not edit design.md and tasks.md in the same parallel tool batch; update one SDD document, wait for its tool result and hook feedback, then update the required peer.",
-  "Find the most appropriate existing heading, paragraph, list item, or task item, and make the smallest needed update there.",
-  "For tasks.md, preserve the task-list format and update the relevant existing checklist item when possible."
-];
-var ACTIVE_SDD_ALIGNMENT_RULES = [
-  "Active SDD documents are live planning records until their change directory is archived; before the final answer, keep active design.md and tasks.md aligned with the implemented code.",
-  "Do not treat an optimization or refactor as documentation-free if it changes behavior, API or contracts, algorithms, state or data flow, data structures, performance strategy, error handling, security boundaries, user-visible results, or implementation constraints; update design.md when any of those code facts changed.",
-  "Do not satisfy SDD alignment by only adding a marker, completion note, or generic summary; replace the specific stale sentence, paragraph, or checklist item so the document states the actual implemented behavior, API, error handling, performance strategy, or task status.",
-  "When a changed code file adds or changes exported names, public function signatures, literal return values, config defaults, user-visible strings, or acceptance-relevant constants, carry those concrete facts into the appropriate existing design.md/tasks.md wording instead of summarizing them vaguely.",
-  "After editing design.md, re-read the changed sentence mentally and ensure no old wording still contradicts the code you just wrote.",
-  "Update tasks.md when the code completes, changes, cancels, splits, or invalidates an implementation task, checklist item, planned step, or acceptance condition.",
-  "The no-document-change path is only valid for purely mechanical edits with no design or task impact, such as formatting-only changes, comment-only edits, test-only scaffolding, or dependency/config churn that does not change the active SDD plan.",
-  "If you choose no SDD edit, explicitly state which active design.md/tasks.md files you reviewed and why the code change has no design or task impact.",
-  "Modify only content relevant to the current code batch; do not invent future requirements or broaden the scope."
-];
-var DIAGNOSTIC_SUMMARY_EVENTS = /* @__PURE__ */ new Set([
-  "handler_exception",
-  "hook_exception",
-  "circuit_open",
-  "circuit_open_skip"
-]);
-var ATTRIBUTION_REVIEW_RULES = [
-  "Purely mechanical changes (formatting, comment-only edits, test-scaffolding, dependency bumps, lint fixes) do not require any SDD document update. State this conclusion explicitly in your response and continue.",
-  "If the code change implements behavior already described in a candidate change-dir's design.md, and that change-dir's tasks.md already reflects the implementation, no SDD action is needed.",
-  "If the code change adds, changes, or removes behavior not described in any candidate change-dir's design.md, update the most relevant change-dir's design.md to state the actual implemented behavior. Update tasks.md if a tracked task item is now complete or invalidated.",
-  "If the code change is genuinely unrelated to any active change-dir, acknowledge it as out-of-SDD scope in your response, or create a new sdd/changes/<id>/ directory when the work is feature-sized and warrants tracking.",
-  "If multiple candidate change-dirs could apply, choose the most specific match based on design.md content and briefly document the reasoning in your response. Do not edit unrelated change-dirs."
-];
-var SUBAGENT_REVIEW_RULE = "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits.";
-var RESUME_ORIGINAL_TASK_RULES = [
-  "Treat SDD review/synchronization as a checkpoint inside the current user task, not as the whole task.",
-  "After the required SDD work is complete, resume the original user task/request from where you paused if any implementation, verification, cleanup, or response work remains.",
-  "Only give the final answer when both the original user task and the required SDD review/synchronization are complete."
-];
-var formatAttributionReviewRules = () => [
-  "When deciding whether SDD documents need edits, apply these attribution review rules in order:",
-  ...ATTRIBUTION_REVIEW_RULES.map((rule, index) => `${index + 1}. ${rule}`)
-];
+var {
+  getToolFilePath,
+  isQuestionCheckpointTool,
+  isSubagentCheckpointTool,
+  normalizeToolName: normalizeCheckpointToolName
+} = require_tool_events();
+var {
+  collectCheckpointOutputText,
+  extractCheckpointEditedPaths,
+  hydrateStateFromCheckpointMtime,
+  hydrateStateFromCheckpointOutput,
+  hydrateStateFromTranscript,
+  resolveTranscriptPath
+} = require_hydration();
+var { normalizeKey, rel, resolveFile, samePath, toPosix } = require_paths();
+var { Attribution } = require_attribution();
+var { isCodePath, isSddPath } = require_file_classifier();
+var { acquireFileLock, releaseFileLock } = require_locks();
+var {
+  cleanupDiagnosticLogs,
+  recordDiagnosticSummaryEvent,
+  writeDiagnosticLog
+} = require_diagnostics();
+var {
+  diagnosticLogPath,
+  projectStatePath,
+  statePath
+} = require_state_storage();
+var {
+  applyToolRecord,
+  clearPeerSyncs,
+  clearStageOnlyRequirements,
+  editedSeq,
+  emptyState,
+  getPeerSyncBucket,
+  hasEditedSddChange,
+  loadState,
+  markToolEvent,
+  pruneStateFiles,
+  recordFile,
+  saveState,
+  touchedSeq,
+  updateRequirementsForEdit
+} = require_session_state();
+var {
+  collectActiveChangeDirs,
+  collectCarryOverDrift,
+  computeProjectConditions,
+  computeProjectState,
+  createChangeDirFromFs,
+  discoverChangeDirs,
+  docKeyForFile,
+  emptyProjectState,
+  ensureProjectChangeDirs,
+  eventMsForFileRecord,
+  loadProjectState,
+  normalizeProjectState,
+  recomputeProjectState,
+  refreshAlignedBaseline,
+  relDirForProject,
+  saveProjectState
+} = require_project_state();
+var {
+  codeReviewSignature,
+  collectCodeGaps,
+  collectCombinedCodeGaps,
+  collectCombinedPeerGaps,
+  collectPeerGaps,
+  collectProjectCodeGaps,
+  collectProjectPeerGaps,
+  collectReviewTargets,
+  drift,
+  isDtsContextActive,
+  markCodeReviewNoEditConfirmation
+} = require_drift_engine();
+var {
+  buildAttributionReviewPrompt,
+  buildCodeEnforcement,
+  buildCodeToolReminder,
+  buildPendingEnforcement,
+  buildPreCompactSummary,
+  buildQuestionCheckpointEnforcement,
+  buildStopEnforcement,
+  buildSubagentCheckpointEnforcement,
+  buildToolEnforcement,
+  formatCarryOverReminder,
+  peerDriftSignature,
+  serializableCodeGap
+} = require_prompts();
+var {
+  collectReportLines,
+  refreshReport
+} = require_report();
+var { createOutputHelpers } = require_output();
+var {
+  ATTRIBUTION_REVIEW_RULES,
+  DESIGN_FILE,
+  PROPOSAL_FILE,
+  TASKS_FILE,
+  findSdd,
+  getChangeDoc,
+  hasSddWorkspace,
+  isArchivedChangeDir
+} = require_sdd_rules();
+var {
+  ACTIVE_CHANGE_DIR_TTL_MS,
+  CIRCUIT_COOLDOWN_MS,
+  CIRCUIT_MAX_FAILURES,
+  CODE_REVIEW_STOP_MAX_BLOCKS,
+  CODE_REVIEW_TOOL_MAX_REMINDERS,
+  CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS,
+  DEBUG,
+  DTS_CONTEXT_OVERRIDE,
+  DTS_CONTEXT_SKIP,
+  DTS_CONTEXT_TEXT_MAX_BYTES,
+  OPENCODE_STOP_REPORT_ONLY,
+  OUTPUT_MODE,
+  PROJECT_LINKED_CODE_CAP,
+  PROJECT_LOCK_WAIT_MS,
+  SHOW_WARNINGS,
+  STATE_LOCK_RETRY_MS,
+  STATE_LOCK_STALE_MS,
+  STATE_LOCK_WAIT_MS,
+  STDIN_TIMEOUT_MS,
+  STOP_MAX_BLOCKS,
+  STRICT_BLOCK
+} = require_runtime_config();
 var DTS_CONTEXT_PATTERNS = [
   /\bDTS-\d+\b/,
   /\bDTS\b/,
@@ -842,110 +3385,11 @@ var DTS_CONTEXT_NEGATION_PATTERNS = [
   /DTS.{0,10}(不是|非|无需|不要|不属于)/i,
   /\bnot\s+(?:a\s+)?DTS\b/i
 ];
-var toPosix = (fp) => fp.replace(/\\/g, "/");
-var isCaseInsensitiveFs = () => process.platform === "win32" || process.platform === "darwin";
-var normalizeKey = (fp) => {
-  const normalized = toPosix(path.resolve(fp));
-  return isCaseInsensitiveFs() ? normalized.toLowerCase() : normalized;
-};
-var samePath = (left, right) => normalizeKey(left) === normalizeKey(right);
-var isSddPath = (fp) => {
-  const normalized = toPosix(path.resolve(fp));
-  return normalized.includes("/sdd/") || normalized.includes("/.sdd/");
-};
-var isSddChangePath = (fp) => {
-  const normalized = toPosix(path.resolve(fp));
-  return normalized.includes("/sdd/changes/") || normalized.includes("/.sdd/changes/");
-};
-var isCodePath = (fp) => CODE_EXT.test(fp) && !isSddPath(fp);
-var hasSddWorkspace = (cwd) => {
-  for (const name of ["sdd", ".sdd"]) {
-    try {
-      if (fs.statSync(path.join(cwd, name)).isDirectory()) return true;
-    } catch {
-    }
-  }
-  return false;
-};
 var parseHookInput = (raw) => JSON.parse(String(raw || "{}").replace(/^\uFEFF/, ""));
-var sanitize = (value) => String(value || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
 var hash = (value) => crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 12);
-var stateDirCache = /* @__PURE__ */ new Map();
-var findNearestGitDir = (cwd) => {
-  let dir = path.resolve(cwd);
-  while (dir !== path.dirname(dir)) {
-    const gitPath = path.join(dir, ".git");
-    try {
-      const stat = fs.statSync(gitPath);
-      if (stat.isDirectory()) return gitPath;
-      if (stat.isFile()) {
-        const content = fs.readFileSync(gitPath, "utf8").trim();
-        const match = content.match(/^gitdir:\s*(.+)$/i);
-        if (match) {
-          const gitDir = match[1].trim();
-          return path.resolve(dir, gitDir);
-        }
-      }
-    } catch {
-    }
-    dir = path.dirname(dir);
-  }
-  return null;
-};
-var canUseStateDir = (dir) => {
-  const probeBase = `.probe.${process.pid}.${Date.now()}`;
-  const tmp = path.join(dir, `${probeBase}.tmp`);
-  const target = path.join(dir, probeBase);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(tmp, "");
-    fs.renameSync(tmp, target);
-    fs.unlinkSync(target);
-    return true;
-  } catch {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-    }
-    try {
-      fs.unlinkSync(target);
-    } catch {
-    }
-    return false;
-  }
-};
-var stateDir = (cwd) => {
-  const cacheKey = normalizeKey(cwd);
-  const cached = stateDirCache.get(cacheKey);
-  if (cached) return cached;
-  const gitDir = findNearestGitDir(cwd);
-  if (gitDir) {
-    const gitStateDir = path.join(gitDir, "sdd-drift-hook-state");
-    if (canUseStateDir(gitStateDir)) {
-      stateDirCache.set(cacheKey, gitStateDir);
-      return gitStateDir;
-    }
-  }
-  const localStateDir = path.join(cwd, STATE_DIR);
-  if (canUseStateDir(localStateDir)) {
-    stateDirCache.set(cacheKey, localStateDir);
-    return localStateDir;
-  }
-  const tempStateDir = path.join(os.tmpdir(), "sdd-drift-check", hash(path.resolve(cwd)));
-  stateDirCache.set(cacheKey, tempStateDir);
-  return tempStateDir;
-};
-var statePath = (cwd, sessionID) => path.join(stateDir(cwd), `${hash(path.resolve(cwd))}-${sanitize(sessionID)}.json`);
-var projectStatePath = (cwd) => path.join(stateDir(cwd), "project.json");
-var diagnosticLogPath = (cwd) => process.env.SDD_DRIFT_LOG_PATH || path.join(stateDir(cwd), "sdd-drift-check.log.jsonl");
 var limitString = (value, max = 500) => {
   const text = String(value || "");
   return text.length > max ? `${text.slice(0, max)}...` : text;
-};
-var escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-var sleepSync = (ms) => {
-  if (ms <= 0) return;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 };
 var summarizeInput = (input) => ({
   hook_event_name: input?.hook_event_name || null,
@@ -974,277 +3418,6 @@ var summarizeGaps = (cwd, peerGaps, codeGaps) => ({
     needsConfirmation: Boolean(gap.needsConfirmation)
   }))
 });
-var diagnosticSummaryState = {
-  windowStartMs: 0,
-  counts: {}
-};
-var diagnosticSummaryWindowMs = (value = DIAGNOSTIC_SUMMARY_WINDOW_MS) => Number.isFinite(value) && value > 0 ? value : 60 * 1e3;
-var diagnosticSummaryLine = (state, windowMs) => ({
-  event: "diagnostic_summary",
-  windowStart: new Date(state.windowStartMs).toISOString(),
-  windowEnd: new Date(state.windowStartMs + windowMs).toISOString(),
-  counts: { ...state.counts || {} }
-});
-var recordDiagnosticSummaryEvent = (state, eventName, nowMs = Date.now(), windowMsValue = DIAGNOSTIC_SUMMARY_WINDOW_MS, trackedEvents = DIAGNOSTIC_SUMMARY_EVENTS) => {
-  if (!trackedEvents.has(eventName)) return [];
-  const windowMs = diagnosticSummaryWindowMs(windowMsValue);
-  const summaries = [];
-  if (!state.windowStartMs) {
-    state.windowStartMs = nowMs;
-    state.counts = {};
-  } else if (nowMs >= state.windowStartMs + windowMs) {
-    if (Object.keys(state.counts || {}).length > 0) {
-      summaries.push(diagnosticSummaryLine(state, windowMs));
-    }
-    state.windowStartMs = nowMs;
-    state.counts = {};
-  }
-  state.counts[eventName] = Number(state.counts[eventName] || 0) + 1;
-  return summaries;
-};
-var rotateDiagnosticLog = (target) => {
-  const maxBytes = Number.isFinite(DIAGNOSTIC_LOG_MAX_BYTES) ? Math.max(64 * 1024, DIAGNOSTIC_LOG_MAX_BYTES) : 2 * 1024 * 1024;
-  try {
-    if (!fs.existsSync(target)) return;
-    if (fs.statSync(target).size < maxBytes) return;
-    const rotated = `${target}.1`;
-    try {
-      fs.unlinkSync(rotated);
-    } catch {
-    }
-    fs.renameSync(target, rotated);
-  } catch {
-  }
-};
-var diagnosticLogRetentionMs = () => {
-  if (!Number.isFinite(DIAGNOSTIC_LOG_RETENTION_DAYS)) return 3 * 24 * 60 * 60 * 1e3;
-  if (DIAGNOSTIC_LOG_RETENTION_DAYS <= 0) return null;
-  return DIAGNOSTIC_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1e3;
-};
-var parseDiagnosticLogTs = (line) => {
-  try {
-    const ts = Date.parse(JSON.parse(line)?.ts);
-    return Number.isFinite(ts) ? ts : null;
-  } catch {
-    return null;
-  }
-};
-var pruneDiagnosticLogFile = (target, cutoffMs) => {
-  let text = "";
-  try {
-    text = fs.readFileSync(target, "utf8");
-  } catch {
-    return;
-  }
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  const kept = lines.filter((line) => {
-    const ts = parseDiagnosticLogTs(line);
-    return ts === null || ts >= cutoffMs;
-  });
-  if (kept.length === lines.length) return;
-  if (!kept.length) {
-    try {
-      fs.unlinkSync(target);
-    } catch {
-    }
-    return;
-  }
-  writeTextAtomic(target, `${kept.join("\n")}
-`);
-};
-var cleanupDiagnosticLogs = (target, now = Date.now()) => {
-  const retentionMs = diagnosticLogRetentionMs();
-  if (retentionMs === null) return;
-  const cutoffMs = now - retentionMs;
-  const dir = path.dirname(target);
-  const base = path.basename(target);
-  const rotatedPattern = new RegExp(`^${escapeRegExp(base)}\\.\\d+$`);
-  try {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      if (entry.name !== base && !rotatedPattern.test(entry.name)) continue;
-      const fp = path.join(dir, entry.name);
-      const stat = fs.statSync(fp);
-      if (stat.mtimeMs < cutoffMs) {
-        try {
-          fs.unlinkSync(fp);
-        } catch {
-        }
-        continue;
-      }
-      pruneDiagnosticLogFile(fp, cutoffMs);
-    }
-  } catch {
-  }
-};
-var acquireFileLock = (target, options = {}) => {
-  const staleMs = options.staleMs || DEFAULT_LOCK_STALE_MS;
-  const waitMs = options.waitMs || 0;
-  const retryMs = options.retryMs || 25;
-  const lockPath = `${target}.lock`;
-  const openLock = () => {
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    const fd = fs.openSync(lockPath, "wx");
-    fs.writeFileSync(fd, `${process.pid}
-${(/* @__PURE__ */ new Date()).toISOString()}
-`);
-    return { fd, lockPath };
-  };
-  const deadline = Date.now() + waitMs;
-  while (true) {
-    try {
-      return openLock();
-    } catch (err) {
-      if (err?.code !== "EEXIST") return null;
-    }
-    try {
-      if (Date.now() - fs.statSync(lockPath).mtimeMs > staleMs) fs.unlinkSync(lockPath);
-    } catch {
-    }
-    if (Date.now() >= deadline) return null;
-    sleepSync(retryMs);
-  }
-};
-var releaseFileLock = (lock) => {
-  if (!lock) return;
-  try {
-    fs.closeSync(lock.fd);
-  } catch {
-  }
-  try {
-    fs.unlinkSync(lock.lockPath);
-  } catch {
-  }
-};
-var writeDiagnosticLog = (cwd, event) => {
-  if (!DIAGNOSTIC_LOG) return;
-  let lock = null;
-  try {
-    const target = diagnosticLogPath(cwd || process.cwd());
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    lock = acquireFileLock(target);
-    if (!lock) return;
-    cleanupDiagnosticLogs(target);
-    rotateDiagnosticLog(target);
-    const nowMs = Date.now();
-    const lines = [
-      ...recordDiagnosticSummaryEvent(diagnosticSummaryState, event?.event, nowMs),
-      event
-    ].map(
-      (entry) => JSON.stringify({
-        ts: new Date(nowMs).toISOString(),
-        pid: process.pid,
-        ...entry
-      })
-    );
-    fs.appendFileSync(target, `${lines.join("\n")}
-`);
-  } catch {
-  } finally {
-    releaseFileLock(lock);
-  }
-};
-var emptyState = () => ({
-  version: 3,
-  createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-  clock: 0,
-  touched: [],
-  edited: [],
-  changeDirs: [],
-  files: {},
-  requirements: {},
-  stopBlocks: {},
-  toolEvents: {},
-  peerSyncs: {},
-  codeDriftNotice: null,
-  codeDriftToolNotice: null,
-  peerDriftNotice: null,
-  subagentCheckpointNotice: null,
-  codeReviewConfirmations: {},
-  transcriptEvents: {},
-  transcriptCursor: null,
-  dtsContext: null,
-  firstEventAt: null,
-  projectStateSeenAt: null,
-  carryOverNotice: null,
-  attributionReviews: {},
-  noEditSession: true,
-  circuitBreaker: {}
-});
-var addPath = (items, item) => {
-  if (!items.some((existing) => samePath(existing, item))) items.push(path.normalize(item));
-};
-var sessionFilesMax = () => Number.isFinite(SESSION_FILES_MAX) ? Math.max(100, SESSION_FILES_MAX) : 1e3;
-var fileRecordOrder = (record) => Math.max(
-  Number(record?.editedSeq || 0),
-  Number(record?.touchedSeq || 0),
-  Number(record?.firstEditedSeq || 0)
-);
-var pruneStateFiles = (state) => {
-  const maxFiles = sessionFilesMax();
-  const entries = Object.entries(state.files || {});
-  if (entries.length <= maxFiles) return false;
-  const keep = new Set(
-    entries.sort((left, right) => fileRecordOrder(right[1]) - fileRecordOrder(left[1])).slice(0, maxFiles).map(([key]) => key)
-  );
-  state.files = Object.fromEntries(entries.filter(([key]) => keep.has(key)));
-  state.touched = (state.touched || []).filter((file) => keep.has(normalizeKey(file)));
-  state.edited = (state.edited || []).filter((file) => keep.has(normalizeKey(file)));
-  return true;
-};
-var normalizeState = (parsed) => {
-  const state = emptyState();
-  if (!parsed || typeof parsed !== "object") return state;
-  state.version = 3;
-  state.createdAt = typeof parsed.createdAt === "string" && parsed.createdAt ? parsed.createdAt : (/* @__PURE__ */ new Date()).toISOString();
-  state.clock = Number.isFinite(parsed.clock) ? parsed.clock : 0;
-  state.touched = Array.isArray(parsed.touched) ? parsed.touched.map((fp) => path.normalize(fp)) : [];
-  state.edited = Array.isArray(parsed.edited) ? parsed.edited.map((fp) => path.normalize(fp)) : [];
-  state.changeDirs = Array.isArray(parsed.changeDirs) ? parsed.changeDirs.map((fp) => path.normalize(fp)) : [];
-  state.files = parsed.files && typeof parsed.files === "object" ? parsed.files : {};
-  state.requirements = parsed.requirements && typeof parsed.requirements === "object" ? parsed.requirements : {};
-  state.stopBlocks = parsed.stopBlocks && typeof parsed.stopBlocks === "object" ? parsed.stopBlocks : {};
-  state.toolEvents = parsed.toolEvents && typeof parsed.toolEvents === "object" ? parsed.toolEvents : {};
-  state.peerSyncs = parsed.peerSyncs && typeof parsed.peerSyncs === "object" ? parsed.peerSyncs : {};
-  state.codeDriftNotice = parsed.codeDriftNotice && typeof parsed.codeDriftNotice === "object" ? parsed.codeDriftNotice : null;
-  state.codeDriftToolNotice = parsed.codeDriftToolNotice && typeof parsed.codeDriftToolNotice === "object" ? parsed.codeDriftToolNotice : null;
-  state.peerDriftNotice = parsed.peerDriftNotice && typeof parsed.peerDriftNotice === "object" ? parsed.peerDriftNotice : null;
-  state.subagentCheckpointNotice = parsed.subagentCheckpointNotice && typeof parsed.subagentCheckpointNotice === "object" ? parsed.subagentCheckpointNotice : null;
-  state.codeReviewConfirmations = parsed.codeReviewConfirmations && typeof parsed.codeReviewConfirmations === "object" ? parsed.codeReviewConfirmations : {};
-  state.transcriptEvents = parsed.transcriptEvents && typeof parsed.transcriptEvents === "object" ? parsed.transcriptEvents : {};
-  state.transcriptCursor = parsed.transcriptCursor && typeof parsed.transcriptCursor === "object" ? {
-    path: typeof parsed.transcriptCursor.path === "string" ? path.resolve(parsed.transcriptCursor.path) : null,
-    offset: Number.isFinite(parsed.transcriptCursor.offset) ? Math.max(0, Number(parsed.transcriptCursor.offset)) : 0,
-    lineIndex: Number.isFinite(parsed.transcriptCursor.lineIndex) ? Math.max(0, Number(parsed.transcriptCursor.lineIndex)) : 0
-  } : null;
-  state.dtsContext = parsed.dtsContext && typeof parsed.dtsContext === "object" ? parsed.dtsContext : null;
-  state.firstEventAt = typeof parsed.firstEventAt === "string" && parsed.firstEventAt ? parsed.firstEventAt : null;
-  state.projectStateSeenAt = typeof parsed.projectStateSeenAt === "string" && parsed.projectStateSeenAt ? parsed.projectStateSeenAt : null;
-  state.carryOverNotice = parsed.carryOverNotice && typeof parsed.carryOverNotice === "object" ? parsed.carryOverNotice : null;
-  state.attributionReviews = parsed.attributionReviews && typeof parsed.attributionReviews === "object" ? parsed.attributionReviews : {};
-  state.noEditSession = typeof parsed.noEditSession === "boolean" ? parsed.noEditSession : state.edited.length === 0;
-  state.circuitBreaker = parsed.circuitBreaker && typeof parsed.circuitBreaker === "object" ? parsed.circuitBreaker : {};
-  for (const fp of state.touched) {
-    const key = normalizeKey(fp);
-    state.files[key] = {
-      ...state.files[key] || {},
-      path: path.normalize(fp),
-      touchedSeq: state.files[key]?.touchedSeq || 1
-    };
-  }
-  for (const fp of state.edited) {
-    const key = normalizeKey(fp);
-    state.files[key] = {
-      ...state.files[key] || {},
-      path: path.normalize(fp),
-      touchedSeq: state.files[key]?.touchedSeq || 1,
-      editedSeq: state.files[key]?.editedSeq || 1,
-      firstEditedSeq: state.files[key]?.firstEditedSeq || state.files[key]?.editedSeq || 1
-    };
-  }
-  pruneStateFiles(state);
-  return state;
-};
 var circuitMaxFailures = () => Number.isFinite(CIRCUIT_MAX_FAILURES) ? Math.max(1, CIRCUIT_MAX_FAILURES) : 5;
 var circuitCooldownMs = () => Number.isFinite(CIRCUIT_COOLDOWN_MS) ? Math.max(1, CIRCUIT_COOLDOWN_MS) : 60 * 1e3;
 var CircuitBreaker = {
@@ -1276,76 +3449,6 @@ var CircuitBreaker = {
     return changed;
   }
 };
-var loadState = (cwd, sessionID) => {
-  try {
-    return normalizeState(JSON.parse(fs.readFileSync(statePath(cwd, sessionID), "utf8")));
-  } catch {
-    return emptyState();
-  }
-};
-var writeTextAtomic = (target, text) => {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const tmp = path.join(
-    path.dirname(target),
-    `.${path.basename(target)}.${process.pid}.${Date.now()}.tmp`
-  );
-  fs.writeFileSync(tmp, text);
-  try {
-    fs.renameSync(tmp, target);
-  } catch (err) {
-    try {
-      fs.writeFileSync(target, text);
-    } catch {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-      }
-      throw err;
-    }
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-    }
-    return;
-  }
-};
-var cleanupOldState = (cwd) => {
-  const dir = stateDir(cwd);
-  try {
-    const now = Date.now();
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const fp = path.join(dir, entry.name);
-      const stat = fs.statSync(fp);
-      if (now - stat.mtimeMs > STATE_RETENTION_MS) fs.unlinkSync(fp);
-    }
-  } catch {
-  }
-};
-var saveState = (cwd, sessionID, state) => {
-  cleanupOldState(cwd);
-  writeTextAtomic(statePath(cwd, sessionID), JSON.stringify(state, null, 2));
-};
-var resolveTranscriptPath = (input) => {
-  const explicit = input?.transcript_path;
-  if (explicit && typeof explicit === "string" && fs.existsSync(explicit)) {
-    return explicit;
-  }
-  const sessionID = input?.session_id;
-  if (!sessionID || typeof sessionID !== "string") return explicit;
-  const candidates = [];
-  const todoPath = input?.todo_path;
-  if (todoPath && typeof todoPath === "string") {
-    const claudeDir = path.dirname(path.dirname(todoPath));
-    candidates.push(path.join(claudeDir, "transcripts", `${sessionID}.jsonl`));
-  }
-  const homes = [process.env.HOME, process.env.USERPROFILE, os.homedir()].filter(Boolean);
-  for (const home of homes) {
-    candidates.push(path.join(home, ".claude", "transcripts", `${sessionID}.jsonl`));
-  }
-  return candidates.find((candidate) => fs.existsSync(candidate)) || explicit;
-};
-var resolveFile = (cwd, fp) => path.isAbsolute(fp) ? path.normalize(fp) : path.resolve(cwd, fp);
 var isDtsContextText = (text) => {
   const value = String(text || "");
   if (!value.trim()) return false;
@@ -1452,737 +3555,12 @@ var updateDtsContextFromInput = (state, input, transcriptPath) => {
   if (isDtsContextText(transcriptText)) return setDtsContext(state, "transcript", transcriptText);
   return Boolean(state.dtsContext?.active);
 };
-var isDtsContextActive = (state) => DTS_CONTEXT_SKIP && Boolean(state.dtsContext?.active);
-var findSdd = (fp) => {
-  const parts = toPosix(path.resolve(fp)).split("/");
-  for (let index = parts.length - 1; index >= 0; index -= 1) {
-    const part = parts[index];
-    if (part !== "sdd" && part !== ".sdd") continue;
-    const rel2 = parts.slice(index + 1).join("/");
-    if (rel2 === "" || rel2.startsWith("changes/") || rel2.startsWith("specs/")) {
-      return path.normalize(parts.slice(0, index + 1).join("/"));
-    }
-  }
-  return null;
-};
-var getChangeDoc = (fp) => {
-  const root = findSdd(fp);
-  const rawRel = root ? path.relative(root, fp) : "";
-  if (!root || rawRel.startsWith("..")) return null;
-  const rel2 = toPosix(rawRel);
-  const match = rel2.match(/^changes\/([^/]+)\/([^/]+\.md)$/);
-  if (!match) return { root, rel: rel2 };
-  const [, id, file] = match;
-  return {
-    root,
-    rel: rel2,
-    id,
-    file,
-    dir: path.join(root, "changes", id)
-  };
-};
-var touchedSeq = (state, fp) => state.files[normalizeKey(fp)]?.touchedSeq || 0;
-var editedSeq = (state, fp) => state.files[normalizeKey(fp)]?.editedSeq || 0;
-var firstEditedSeq = (state, fp) => state.files[normalizeKey(fp)]?.firstEditedSeq || 0;
-var latestEditedCodeSeq = (state) => Object.values(state.files || {}).reduce((latest, file) => {
-  if (!file.editedSeq || !isCodePath(file.path || "")) return latest;
-  return Math.max(latest, file.editedSeq || 0);
-}, 0);
-var editedSddSeqAfter = (state, files, seq) => files.some((file) => editedSeq(state, file) > seq);
-var rel = (cwd, fp) => toPosix(path.relative(cwd, fp));
-var getToolFilePath = (toolInput) => toolInput?.file_path || toolInput?.filePath || toolInput?.path;
 var getToolEventKey = (input) => {
   const id = input?.tool_use_id || input?.toolUseId;
   if (typeof id === "string" && id.trim()) {
     return `${input.session_id || "default"}:${input.hook_event_name || ""}:${id.trim()}`;
   }
   return null;
-};
-var markToolEvent = (state, eventKey) => {
-  if (!eventKey) return true;
-  if (state.toolEvents[eventKey]) return false;
-  state.toolEvents[eventKey] = Date.now();
-  const entries = Object.entries(state.toolEvents);
-  if (entries.length > TOOL_EVENT_CAP) {
-    entries.sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0)).slice(0, entries.length - TOOL_EVENT_CAP).forEach(([key]) => {
-      delete state.toolEvents[key];
-    });
-  }
-  return true;
-};
-var markTranscriptEvent = (state, eventKey) => {
-  if (!eventKey) return true;
-  if (state.transcriptEvents[eventKey]) return false;
-  state.transcriptEvents[eventKey] = Date.now();
-  const entries = Object.entries(state.transcriptEvents);
-  if (entries.length > TRANSCRIPT_EVENT_CAP) {
-    entries.sort((left, right) => Number(left[1] || 0) - Number(right[1] || 0)).slice(0, entries.length - TRANSCRIPT_EVENT_CAP).forEach(([key]) => {
-      delete state.transcriptEvents[key];
-    });
-  }
-  return true;
-};
-var fileMtimeMs = (fp) => {
-  try {
-    return fs.statSync(fp).mtimeMs;
-  } catch {
-    return 0;
-  }
-};
-var latestStateEventMs = (state) => Object.values(state.files || {}).reduce(
-  (latest, file) => Math.max(latest, Number(file?.touchedAtMs || 0), Number(file?.editedAtMs || 0)),
-  0
-);
-var recordFile = (state, fp, edited) => {
-  const abs = path.normalize(path.resolve(fp));
-  const key = normalizeKey(abs);
-  const existing = state.files[key] || {};
-  const mtimeMs = fileMtimeMs(abs);
-  state.clock += 1;
-  const eventMs = Math.max(Date.now() * 1e3, latestStateEventMs(state), Math.round(mtimeMs * 1e3)) + 1;
-  state.files[key] = {
-    ...existing,
-    path: abs,
-    ...mtimeMs ? { mtimeMs } : {},
-    touchedAtMs: eventMs,
-    touchedSeq: state.clock,
-    ...edited ? { editedSeq: state.clock, editedAtMs: eventMs } : {},
-    ...edited ? { firstEditedSeq: existing.firstEditedSeq || existing.editedSeq || state.clock } : {}
-  };
-  addPath(state.touched, abs);
-  if (edited) {
-    addPath(state.edited, abs);
-    state.noEditSession = false;
-  }
-  pruneStateFiles(state);
-  return state.clock;
-};
-var addChangeDir = (state, dir) => addPath(state.changeDirs, dir);
-var applyToolRecord = (cwd, state, toolName, toolInput) => {
-  const fp = getToolFilePath(toolInput || {});
-  if (!fp || typeof fp !== "string") return false;
-  const tool = String(toolName || "").toLowerCase();
-  const isEdit = tool === "edit" || tool === "write" || tool === "multiedit";
-  if (!isEdit && tool !== "read") return false;
-  const abs = resolveFile(cwd, fp);
-  const seq = recordFile(state, abs, isEdit);
-  if (isEdit) {
-    const doc = getChangeDoc(abs);
-    if (doc?.dir && doc.file) {
-      addChangeDir(state, doc.dir);
-      updateRequirementsForEdit(state, doc.dir, doc.file, seq);
-    }
-  }
-  return true;
-};
-var transcriptContentBlocks = (entry) => {
-  const content = entry?.message?.content;
-  if (Array.isArray(content)) return content;
-  return [];
-};
-var transcriptToolUseRecord = (block) => {
-  const name = block?.name || block?.tool || block?.tool_name;
-  const input = block?.input || block?.tool_input || block?.state?.input;
-  if (!name || !input || typeof input !== "object") return null;
-  return {
-    id: block.id || block.tool_use_id || block.callID || block.call_id || null,
-    name,
-    input,
-    source: "tool_use",
-    completed: block?.state?.status === "completed"
-  };
-};
-var transcriptToolResultRecord = (entry, block) => {
-  const result = entry?.tool_use_result || block?.tool_use_result;
-  const id = block?.tool_use_id || entry?.parent_tool_use_id || entry?.tool_use_id || null;
-  const failed = Boolean(entry?.is_error || block?.is_error || result?.is_error || result?.error);
-  const fp = result?.filePath || result?.file_path;
-  if (!fp || typeof fp !== "string") {
-    return id ? { id, source: "tool_result", failed } : null;
-  }
-  const type = String(result?.type || "").toLowerCase();
-  const name = type === "text" && !result?.oldString && !result?.newString && !result?.structuredPatch ? "Read" : "Edit";
-  return {
-    id,
-    name,
-    input: { file_path: fp },
-    source: "tool_result",
-    failed
-  };
-};
-var transcriptLegacyToolResultRecord = (entry) => {
-  const name = entry?.tool_name;
-  const input = entry?.tool_input;
-  if (!name || !input || typeof input !== "object") return null;
-  return {
-    id: entry.tool_use_id || null,
-    name,
-    input,
-    source: "tool_result",
-    failed: Boolean(entry?.is_error || entry?.error)
-  };
-};
-var transcriptToolRecords = (entry) => {
-  const records = [];
-  const blocks = transcriptContentBlocks(entry);
-  const add = (record) => {
-    if (record) records.push(record);
-  };
-  add(transcriptToolUseRecord(entry));
-  if (entry?.part?.type === "tool") add(transcriptToolUseRecord(entry.part));
-  if (entry?.type === "tool_result") {
-    add(transcriptLegacyToolResultRecord(entry));
-  }
-  for (const block of blocks) {
-    if (block?.type === "tool_use") add(transcriptToolUseRecord(block));
-    if (block?.type === "tool_result") add(transcriptToolResultRecord(entry, block));
-  }
-  if (entry?.type === "user" && !blocks.some((block) => block?.type === "tool_result")) {
-    add(transcriptToolResultRecord(entry, null));
-  }
-  return records;
-};
-var transcriptToolEventKey = (record, lineIndex, recordIndex) => {
-  if (record?.id) return `id:${record.id}`;
-  return `pos:${lineIndex}:${recordIndex}:${hash(
-    JSON.stringify({
-      name: String(record?.name || "").toLowerCase(),
-      input: record?.input || {}
-    })
-  )}`;
-};
-var countTranscriptLines = (text) => {
-  if (!text) return 0;
-  const newlines = (text.match(/\n/g) || []).length;
-  return text.endsWith("\n") ? newlines : newlines + 1;
-};
-var readTranscriptChunk = (state, transcriptPath) => {
-  const abs = path.resolve(transcriptPath);
-  const stat = fs.statSync(abs);
-  const sameCursor = state.transcriptCursor?.path === abs;
-  let offset = sameCursor ? Number(state.transcriptCursor?.offset || 0) : 0;
-  let lineIndex = sameCursor ? Number(state.transcriptCursor?.lineIndex || 0) : 0;
-  if (!Number.isFinite(offset) || offset < 0 || offset > stat.size) {
-    offset = 0;
-    lineIndex = 0;
-  }
-  const buffer = fs.readFileSync(abs).subarray(offset);
-  if (!buffer.length) {
-    state.transcriptCursor = { path: abs, offset, lineIndex };
-    return { content: "", lineIndexBase: lineIndex };
-  }
-  let processLength = buffer.length;
-  const lastNewline = buffer.lastIndexOf(10);
-  if (lastNewline >= 0) {
-    const tail = buffer.subarray(lastNewline + 1).toString("utf8").trim();
-    processLength = tail && !(tail.startsWith("{") && tail.endsWith("}")) ? lastNewline + 1 : buffer.length;
-  } else if (offset > 0) {
-    const tail = buffer.toString("utf8").trim();
-    processLength = tail.startsWith("{") && tail.endsWith("}") ? buffer.length : 0;
-  }
-  const processBuffer = buffer.subarray(0, processLength);
-  const content = processBuffer.toString("utf8");
-  const nextOffset = offset + processLength;
-  const nextLineIndex = lineIndex + countTranscriptLines(content);
-  state.transcriptCursor = { path: abs, offset: nextOffset, lineIndex: nextLineIndex };
-  return { content, lineIndexBase: lineIndex };
-};
-var getRequirementBucket = (state, dir, create) => {
-  const key = normalizeKey(dir);
-  if (!state.requirements[key] && create) {
-    state.requirements[key] = { dir: path.normalize(dir), files: {} };
-  }
-  return state.requirements[key];
-};
-var cleanupRequirementBucket = (state, dir) => {
-  const key = normalizeKey(dir);
-  const bucket = state.requirements[key];
-  if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.requirements[key];
-};
-var getPeerSyncBucket = (state, dir, create) => {
-  const key = normalizeKey(dir);
-  if (!state.peerSyncs[key] && create) {
-    state.peerSyncs[key] = { dir: path.normalize(dir), files: {} };
-  }
-  return state.peerSyncs[key];
-};
-var cleanupPeerSyncBucket = (state, dir) => {
-  const key = normalizeKey(dir);
-  const bucket = state.peerSyncs[key];
-  if (bucket && Object.keys(bucket.files || {}).length === 0) delete state.peerSyncs[key];
-};
-var markPeerSyncResponse = (state, dir, file, sourceFile, sourceSeq, targetSeq) => {
-  if (!sourceFile) return;
-  const bucket = getPeerSyncBucket(state, dir, true);
-  bucket.files[file] = { sourceFile, sourceSeq, targetSeq };
-};
-var isPeerSyncContinuation = (state, dir, file, seq) => {
-  const bucket = getPeerSyncBucket(state, dir, false);
-  const sync = bucket?.files?.[file];
-  if (!sync?.sourceFile) return false;
-  const sourceSeq = editedSeq(state, path.join(dir, sync.sourceFile));
-  if (sourceSeq > sync.sourceSeq) {
-    delete bucket.files[file];
-    cleanupPeerSyncBucket(state, dir);
-    return false;
-  }
-  if (seq > sync.targetSeq) sync.targetSeq = seq;
-  return true;
-};
-var clearPeerSyncsForSourceEdit = (state, dir, sourceFile, seq) => {
-  const bucket = getPeerSyncBucket(state, dir, false);
-  if (!bucket) return;
-  for (const [file, sync] of Object.entries(bucket.files || {})) {
-    if (sync?.sourceFile === sourceFile && seq > sync.sourceSeq) delete bucket.files[file];
-  }
-  cleanupPeerSyncBucket(state, dir);
-};
-var clearPeerSyncs = (state) => {
-  state.peerSyncs = {};
-};
-var clearStageOnlyRequirements = (state) => {
-  for (const [key, bucket] of Object.entries(state.requirements || {})) {
-    for (const [file, requirement] of Object.entries(bucket.files || {})) {
-      if (requirement?.stageOnly || requirement?.sourceFile === PROPOSAL_FILE) delete bucket.files[file];
-    }
-    if (Object.keys(bucket.files || {}).length === 0) delete state.requirements[key];
-  }
-};
-var isInitialTasksPlanEdit = (state, dir, seq) => {
-  const tasksPath = path.join(dir, TASKS_FILE);
-  const designPath = path.join(dir, DESIGN_FILE);
-  const designSourceSeq = Math.max(touchedSeq(state, designPath), editedSeq(state, designPath));
-  return firstEditedSeq(state, tasksPath) === seq && designSourceSeq > 0 && fs.existsSync(designPath);
-};
-var updateRequirementsForEdit = (state, dir, file, seq) => {
-  const bucket = getRequirementBucket(state, dir, false);
-  const pending = bucket?.files?.[file];
-  let satisfiedStageOnly = false;
-  if (pending && seq > pending.afterSeq) {
-    satisfiedStageOnly = Boolean(pending.stageOnly || pending.sourceFile === PROPOSAL_FILE);
-    if (!satisfiedStageOnly) {
-      markPeerSyncResponse(state, dir, file, pending.sourceFile, pending.afterSeq, seq);
-    }
-    delete bucket.files[file];
-    cleanupRequirementBucket(state, dir);
-    if (!satisfiedStageOnly) return;
-  }
-  if (!satisfiedStageOnly && isPeerSyncContinuation(state, dir, file, seq)) return;
-  if (file === TASKS_FILE && isInitialTasksPlanEdit(state, dir, seq)) {
-    const designPath = path.join(dir, DESIGN_FILE);
-    markPeerSyncResponse(
-      state,
-      dir,
-      TASKS_FILE,
-      DESIGN_FILE,
-      Math.max(touchedSeq(state, designPath), editedSeq(state, designPath)),
-      seq
-    );
-    return;
-  }
-  clearPeerSyncsForSourceEdit(state, dir, file, seq);
-  const stageOnly = file === PROPOSAL_FILE;
-  let requiredPeers = CHANGE_DOC_REQUIREMENTS[file] || [];
-  if (file === TASKS_FILE) {
-    const latestCodeSeq = latestEditedCodeSeq(state);
-    const designReviewedAfterCode = touchedSeq(state, path.join(dir, DESIGN_FILE)) > latestCodeSeq;
-    const tasksEditedAfterCode = seq > latestCodeSeq;
-    if (latestCodeSeq > 0 && designReviewedAfterCode && tasksEditedAfterCode) {
-      requiredPeers = [];
-    }
-  }
-  if (requiredPeers.length === 0) return;
-  const target = getRequirementBucket(state, dir, true);
-  for (const peer of requiredPeers) {
-    const peerPath = path.join(dir, peer);
-    if (!fs.existsSync(peerPath)) continue;
-    if (editedSeq(state, peerPath) > seq) continue;
-    const existing = target.files[peer];
-    if (existing && !existing.stageOnly && stageOnly) continue;
-    target.files[peer] = {
-      sourceFile: file,
-      afterSeq: seq,
-      stageOnly
-    };
-  }
-  cleanupRequirementBucket(state, dir);
-};
-var hydrateStateFromTranscript = (cwd, state, transcriptPath) => {
-  if (!transcriptPath || typeof transcriptPath !== "string") return false;
-  let changed = false;
-  let content = "";
-  let lineIndexBase = 0;
-  const seen = /* @__PURE__ */ new Set();
-  const pendingToolUses = /* @__PURE__ */ new Map();
-  try {
-    const chunk = readTranscriptChunk(state, transcriptPath);
-    content = chunk.content;
-    lineIndexBase = chunk.lineIndexBase;
-  } catch {
-    return false;
-  }
-  if (!content) return false;
-  const lines = content.split(/\r?\n/);
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    if (!line.trim()) continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const records = transcriptToolRecords(entry);
-    for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
-      const record = records[recordIndex];
-      if (record.source === "tool_use" && record.id && !record.completed) {
-        pendingToolUses.set(record.id, record);
-        continue;
-      }
-      let finalRecord = record;
-      if (record.source === "tool_result" && record.id && pendingToolUses.has(record.id)) {
-        finalRecord = {
-          ...pendingToolUses.get(record.id),
-          source: "tool_result",
-          failed: record.failed
-        };
-      }
-      if (finalRecord.failed) continue;
-      if (finalRecord.source === "tool_use" && !finalRecord.completed) continue;
-      const key = transcriptToolEventKey(finalRecord, lineIndexBase + lineIndex, recordIndex);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (!markTranscriptEvent(state, key)) continue;
-      if (applyToolRecord(cwd, state, finalRecord.name, finalRecord.input)) changed = true;
-    }
-  }
-  return changed;
-};
-var hasEditedSddChange = (state) => Object.values(state.files).some((file) => file.editedSeq && isSddChangePath(file.path || ""));
-var drift = (cwd, fp, state) => {
-  const warn = [];
-  const doc = getChangeDoc(fp);
-  if (!hasSddWorkspace(cwd) || isDtsContextActive(state)) return warn;
-  if (doc?.root) {
-    if (doc.rel.startsWith("specs/")) {
-      warn.push(
-        `SDD DRIFT: ${doc.rel} was changed directly. SDD changes should normally go through sdd/changes/<id>/. If this bypass is intentional, mention it explicitly.`
-      );
-    }
-    return warn;
-  }
-  if (CODE_EXT.test(fp) && !hasEditedSddChange(state)) {
-    warn.push(
-      `SDD DRIFT: code file ${path.basename(fp)} was changed, but this session did not edit any sdd/changes/** file. SDD expects a change proposal first.`
-    );
-  }
-  return warn;
-};
-var isArchivedChangeDirName = (dir) => {
-  const name = path.basename(path.normalize(dir)).toLowerCase();
-  return ARCHIVED_CHANGE_DIR_NAMES.has(name) || /(^|[-_.])(archived|已归档)($|[-_.])/.test(name);
-};
-var isArchiveStatusText = (text) => /^\s*(status|state)\s*[:：]\s*(archived|archive|closed)\s*$/im.test(text || "") || /^\s*(状态|阶段)\s*[:：]\s*(已归档|归档)\s*$/im.test(text || "");
-var readSmallText = (fp) => {
-  try {
-    return fs.readFileSync(fp, "utf8").slice(0, 4096);
-  } catch {
-    return "";
-  }
-};
-var isArchivedChangeDir = (dir) => {
-  if (!dir || isArchivedChangeDirName(dir)) return true;
-  for (const marker of ARCHIVE_MARKER_FILES) {
-    if (fs.existsSync(path.join(dir, marker))) return true;
-  }
-  for (const statusFile of ARCHIVE_STATUS_FILES) {
-    const text = readSmallText(path.join(dir, statusFile));
-    if (text && isArchiveStatusText(text)) return true;
-  }
-  return false;
-};
-var collectPeerGaps = (cwd, state, options = {}) => {
-  const includeStageOnly = options.includeStageOnly !== false;
-  const includeHard = options.includeHard !== false;
-  const gaps = [];
-  for (const bucket of Object.values(state.requirements || {})) {
-    const dir = bucket.dir;
-    if (isArchivedChangeDir(dir)) continue;
-    const absent = [];
-    const unsynced = [];
-    const stale = [];
-    const required = [];
-    const pendingRequirements = [];
-    for (const [file, requirement] of Object.entries(bucket.files || {})) {
-      const requirementStageOnly = Boolean(requirement?.stageOnly || requirement?.sourceFile === PROPOSAL_FILE);
-      if (requirementStageOnly ? !includeStageOnly : !includeHard) continue;
-      const peerPath = path.join(dir, file);
-      const seq = editedSeq(state, peerPath);
-      if (seq > requirement.afterSeq) continue;
-      required.push(file);
-      pendingRequirements.push({ file, ...requirement, stageOnly: requirementStageOnly });
-      if (!fs.existsSync(peerPath)) {
-        absent.push(file);
-      } else if (seq === 0) {
-        unsynced.push(file);
-      } else {
-        stale.push(file);
-      }
-    }
-    if (!required.length) continue;
-    const stageOnly = pendingRequirements.every((requirement) => requirement.stageOnly);
-    if (stageOnly && !includeStageOnly) continue;
-    const edited = [PROPOSAL_FILE, ...PEER_FILES].filter((file) => editedSeq(state, path.join(dir, file)) > 0);
-    const relDir = toPosix(path.relative(cwd, dir));
-    gaps.push({
-      relDir,
-      edited,
-      sourceFiles: [...new Set(pendingRequirements.map((requirement) => requirement.sourceFile).filter(Boolean))],
-      stageOnly,
-      absent,
-      missing: absent,
-      unsynced,
-      stale,
-      required
-    });
-  }
-  return gaps;
-};
-var discoverChangeDirs = (cwd) => {
-  const roots = ["sdd", ".sdd"].map((dir) => path.join(cwd, dir));
-  const dirs = [];
-  for (const root of roots) {
-    const changesRoot = path.join(root, "changes");
-    try {
-      for (const entry of fs.readdirSync(changesRoot, { withFileTypes: true })) {
-        if (entry.isDirectory()) dirs.push(path.join(changesRoot, entry.name));
-      }
-    } catch {
-    }
-  }
-  return dirs;
-};
-var collectActiveChangeDirs = (cwd, state) => {
-  const dirs = [...state.changeDirs || [], ...discoverChangeDirs(cwd)];
-  const active = [];
-  for (const dir of dirs) {
-    const normalized = path.normalize(dir);
-    if (isArchivedChangeDir(normalized)) continue;
-    if (!active.some((existing) => samePath(existing, normalized))) active.push(normalized);
-  }
-  return active;
-};
-var emptyProjectState = () => ({
-  version: 1,
-  lastUpdatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-  changeDirs: {},
-  activeChangeDir: null,
-  activeUntilMs: 0,
-  activeLastEditedSession: null
-});
-var relDirForProject = (cwd, dir) => toPosix(path.relative(cwd, dir));
-var docKeyForFile = (file) => {
-  if (file === PROPOSAL_FILE) return "proposal";
-  if (file === DESIGN_FILE) return "design";
-  if (file === TASKS_FILE) return "tasks";
-  return null;
-};
-var docFileForKey = (key) => {
-  if (key === "proposal") return PROPOSAL_FILE;
-  if (key === "design") return DESIGN_FILE;
-  if (key === "tasks") return TASKS_FILE;
-  return null;
-};
-var eventMsForFileRecord = (record, edited) => {
-  const value = edited ? record?.editedAtMs : record?.touchedAtMs;
-  if (Number.isFinite(value)) return value;
-  if (Number.isFinite(record?.mtimeMs)) return Math.round(record.mtimeMs * 1e3);
-  return Date.now() * 1e3;
-};
-var docRecordFromFs = (fp) => {
-  try {
-    const stat = fs.statSync(fp);
-    if (!stat.isFile()) return { exists: false };
-    const ms = Math.round(stat.mtimeMs * 1e3);
-    return {
-      exists: true,
-      lastEditedMs: ms,
-      lastReviewedMs: ms
-    };
-  } catch {
-    return { exists: false };
-  }
-};
-var createChangeDirFromFs = (cwd, dir) => {
-  const normalized = path.normalize(dir);
-  const changeDir = {
-    relDir: relDirForProject(cwd, normalized),
-    archived: isArchivedChangeDir(normalized),
-    docs: {
-      proposal: docRecordFromFs(path.join(normalized, PROPOSAL_FILE)),
-      design: docRecordFromFs(path.join(normalized, DESIGN_FILE)),
-      tasks: docRecordFromFs(path.join(normalized, TASKS_FILE))
-    },
-    linkedCode: [],
-    alignedAt: null,
-    alignedAtMs: 0,
-    state: "ALIGNED",
-    conditions: {
-      proposalOnly: false,
-      designAheadOfTasks: false,
-      tasksAheadOfDesign: false,
-      codeAheadOfDocs: false,
-      codePendingDocs: []
-    },
-    docSyncs: {}
-  };
-  changeDir.conditions = computeProjectConditions(changeDir);
-  changeDir.state = computeProjectState(changeDir.conditions, changeDir.archived);
-  return changeDir;
-};
-var normalizeProjectDoc = (doc) => ({
-  exists: Boolean(doc?.exists),
-  ...Number.isFinite(doc?.lastEditedMs) ? { lastEditedMs: Number(doc.lastEditedMs) } : {},
-  ...Number.isFinite(doc?.lastReviewedMs) ? { lastReviewedMs: Number(doc.lastReviewedMs) } : {},
-  ...typeof doc?.lastEditedSession === "string" ? { lastEditedSession: doc.lastEditedSession } : {},
-  ...typeof doc?.lastReviewedSession === "string" ? { lastReviewedSession: doc.lastReviewedSession } : {}
-});
-var normalizeProjectChangeDir = (cwd, relDirValue, value) => {
-  const relDir = toPosix(value?.relDir || relDirValue || "");
-  const absDir = path.join(cwd, relDir);
-  const fromFs = createChangeDirFromFs(cwd, absDir);
-  const changeDir = {
-    ...fromFs,
-    ...value,
-    relDir,
-    archived: Boolean(value?.archived) || isArchivedChangeDir(absDir),
-    docs: {
-      proposal: normalizeProjectDoc(value?.docs?.proposal || fromFs.docs.proposal),
-      design: normalizeProjectDoc(value?.docs?.design || fromFs.docs.design),
-      tasks: normalizeProjectDoc(value?.docs?.tasks || fromFs.docs.tasks)
-    },
-    linkedCode: Array.isArray(value?.linkedCode) ? value.linkedCode.filter((item) => item?.path && Number.isFinite(item?.lastEditedMs)).map((item) => ({
-      path: toPosix(item.path),
-      lastEditedMs: Number(item.lastEditedMs),
-      ...typeof item.lastEditedSession === "string" ? { lastEditedSession: item.lastEditedSession } : {},
-      linkedAt: Number.isFinite(item.linkedAt) ? Number(item.linkedAt) : Number(item.lastEditedMs)
-    })) : [],
-    alignedAt: typeof value?.alignedAt === "string" ? value.alignedAt : null,
-    alignedAtMs: Number.isFinite(value?.alignedAtMs) ? Number(value.alignedAtMs) : 0,
-    docSyncs: value?.docSyncs && typeof value.docSyncs === "object" ? value.docSyncs : value?.peerSyncs && typeof value.peerSyncs === "object" ? value.peerSyncs : {}
-  };
-  delete changeDir.peerSyncs;
-  changeDir.conditions = computeProjectConditions(changeDir);
-  changeDir.state = computeProjectState(changeDir.conditions, changeDir.archived);
-  return changeDir;
-};
-var computeProjectConditions = (dir) => {
-  const design = dir.docs?.design || {};
-  const tasks = dir.docs?.tasks || {};
-  const proposal = dir.docs?.proposal || {};
-  const designExists = design.exists === true;
-  const tasksExists = tasks.exists === true;
-  const designEditedKnown = typeof design.lastEditedSession === "string";
-  const tasksEditedKnown = typeof tasks.lastEditedSession === "string";
-  const designEdited = Number(design.lastEditedMs || 0);
-  const tasksEdited = Number(tasks.lastEditedMs || 0);
-  const designReviewed = Math.max(designEdited, Number(design.lastReviewedMs || 0));
-  const tasksReviewed = Math.max(tasksEdited, Number(tasks.lastReviewedMs || 0));
-  const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)));
-  const docSyncs = dir.docSyncs || {};
-  const tasksSyncedFromDesign = docSyncs.tasks?.sourceFile === DESIGN_FILE && Number(docSyncs.tasks.sourceEditedMs || 0) >= designEdited && Number(docSyncs.tasks.targetEditedMs || 0) >= Number(docSyncs.tasks.sourceEditedMs || 0);
-  const designSyncedFromTasks = docSyncs.design?.sourceFile === TASKS_FILE && Number(docSyncs.design.sourceEditedMs || 0) >= tasksEdited && Number(docSyncs.design.targetEditedMs || 0) >= Number(docSyncs.design.sourceEditedMs || 0);
-  const reviewTargets = [
-    designExists ? [DESIGN_FILE, designReviewed] : null,
-    tasksExists ? [TASKS_FILE, tasksReviewed] : null
-  ].filter(Boolean);
-  const codePendingDocs = reviewTargets.filter(([, reviewedAt]) => latestCodeMs > reviewedAt).map(([file]) => file);
-  return {
-    proposalOnly: proposal.exists === true && !designExists && !tasksExists,
-    designAheadOfTasks: designExists && tasksExists && designEditedKnown && designEdited > tasksEdited && designEdited > 0 && !designSyncedFromTasks,
-    tasksAheadOfDesign: designExists && tasksExists && tasksEditedKnown && tasksEdited > designEdited && tasksEdited > 0 && !tasksSyncedFromDesign,
-    codeAheadOfDocs: latestCodeMs > Number(dir.alignedAtMs || 0) && codePendingDocs.length > 0,
-    codePendingDocs
-  };
-};
-var computeProjectState = (conditions, archived) => {
-  if (archived) return "ARCHIVED";
-  if (conditions.proposalOnly) return "PROPOSAL_STAGE";
-  const flags = [
-    conditions.designAheadOfTasks,
-    conditions.tasksAheadOfDesign,
-    conditions.codeAheadOfDocs
-  ].filter(Boolean);
-  if (flags.length === 0) return "ALIGNED";
-  if (flags.length > 1) return "MULTI_DRIFT";
-  if (conditions.designAheadOfTasks) return "DESIGN_PENDING_TASKS";
-  if (conditions.tasksAheadOfDesign) return "TASKS_PENDING_DESIGN";
-  return "CODE_PENDING_REVIEW";
-};
-var recomputeProjectState = (project, cwd) => {
-  for (const [relDirValue, dir] of Object.entries(project.changeDirs || {})) {
-    const absDir = path.join(cwd, dir.relDir || relDirValue);
-    dir.archived = Boolean(dir.archived) || isArchivedChangeDir(absDir);
-    for (const key of ["proposal", "design", "tasks"]) {
-      const file = docFileForKey(key);
-      const fp = path.join(absDir, file);
-      const fsDoc = docRecordFromFs(fp);
-      dir.docs[key] = {
-        ...dir.docs?.[key] || {},
-        exists: fsDoc.exists,
-        ...fsDoc.exists && !Number.isFinite(dir.docs?.[key]?.lastEditedMs) ? { lastEditedMs: fsDoc.lastEditedMs } : {},
-        ...fsDoc.exists && !Number.isFinite(dir.docs?.[key]?.lastReviewedMs) ? { lastReviewedMs: fsDoc.lastReviewedMs } : {}
-      };
-    }
-    dir.conditions = computeProjectConditions(dir);
-    dir.state = computeProjectState(dir.conditions, dir.archived);
-  }
-  project.lastUpdatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  return project;
-};
-var ensureProjectChangeDirs = (cwd, project) => {
-  for (const dir of discoverChangeDirs(cwd)) {
-    const relDirValue = relDirForProject(cwd, dir);
-    if (!project.changeDirs[relDirValue]) {
-      project.changeDirs[relDirValue] = createChangeDirFromFs(cwd, dir);
-    }
-  }
-  return recomputeProjectState(project, cwd);
-};
-var normalizeProjectState = (cwd, parsed) => {
-  const project = emptyProjectState();
-  if (parsed && typeof parsed === "object") {
-    project.version = 1;
-    project.lastUpdatedAt = typeof parsed.lastUpdatedAt === "string" && parsed.lastUpdatedAt ? parsed.lastUpdatedAt : project.lastUpdatedAt;
-    project.activeChangeDir = typeof parsed.activeChangeDir === "string" ? toPosix(parsed.activeChangeDir) : null;
-    project.activeUntilMs = Number.isFinite(parsed.activeUntilMs) ? Number(parsed.activeUntilMs) : 0;
-    project.activeLastEditedSession = typeof parsed.activeLastEditedSession === "string" ? parsed.activeLastEditedSession : null;
-    project.changeDirs = {};
-    for (const [relDirValue, value] of Object.entries(parsed.changeDirs || {})) {
-      project.changeDirs[toPosix(relDirValue)] = normalizeProjectChangeDir(cwd, relDirValue, value);
-    }
-  }
-  return ensureProjectChangeDirs(cwd, project);
-};
-var quarantineCorruptStateFile = (fp) => {
-  try {
-    if (!fs.existsSync(fp)) return;
-    fs.renameSync(fp, `${fp}.corrupt-${Date.now()}`);
-  } catch {
-  }
-};
-var loadProjectState = (cwd) => {
-  const fp = projectStatePath(cwd);
-  try {
-    return normalizeProjectState(cwd, JSON.parse(fs.readFileSync(fp, "utf8")));
-  } catch (err) {
-    if (err?.code !== "ENOENT") quarantineCorruptStateFile(fp);
-    return normalizeProjectState(cwd, emptyProjectState());
-  }
-};
-var saveProjectState = (cwd, project) => {
-  recomputeProjectState(project, cwd);
-  writeTextAtomic(projectStatePath(cwd), JSON.stringify(project, null, 2));
 };
 var attributionReviewSignature = (cwd, codeFiles, candidates) => hash(
   JSON.stringify({
@@ -2191,36 +3569,6 @@ var attributionReviewSignature = (cwd, codeFiles, candidates) => hash(
     candidates: (candidates || []).map((dir) => dir.relDir).sort()
   })
 );
-var buildAttributionReviewPrompt = (cwd, { codeFiles = [], candidates = [] } = {}) => {
-  const codeLines = codeFiles.length ? codeFiles.map((file) => `  - ${rel(cwd, file)}`) : ["  - unknown code file"];
-  const candidateLines = candidates.length ? candidates.map((dir) => {
-    const docs = dir.docs || {};
-    const docState = [
-      docs.design?.exists ? "design.md" : null,
-      docs.tasks?.exists ? "tasks.md" : null
-    ].filter(Boolean).join(", ");
-    const suffix = docState ? `; docs: ${docState}` : "";
-    return `  - ${dir.relDir}${dir.state ? ` (${dir.state}${suffix})` : suffix}`;
-  }) : ["  - no active SDD change-dir candidates"];
-  return [
-    "SDD attribution review needed.",
-    "",
-    "Recent code changes:",
-    ...codeLines,
-    "",
-    "Candidate active SDD change directories:",
-    ...candidateLines,
-    "",
-    ...formatAttributionReviewRules(),
-    "",
-    "Read the relevant candidate design.md/tasks.md files, decide which change-dir owns the code change, then do exactly one of these:",
-    "- edit the matching SDD document(s) if they are stale;",
-    "- leave documents unchanged if the reviewed docs are already aligned;",
-    "- create a new sdd/changes/<id>/ directory only if this work is feature-sized and not covered by any candidate;",
-    "- state that the code change is unrelated to active SDD scope if none applies.",
-    "Preserve existing SDD templates and headings when editing."
-  ].join("\n");
-};
 var markAttributionReviewEmitted = (cwd, state, codeFiles, candidates) => {
   if (!state || !Array.isArray(candidates) || candidates.length === 0) return null;
   state.attributionReviews = state.attributionReviews && typeof state.attributionReviews === "object" ? state.attributionReviews : {};
@@ -2444,124 +3792,6 @@ var applySessionToProject = (cwd, project, state, sessionID) => {
   for (const fp of state.edited || []) recordProjectArchiveAction(cwd, project, fp);
   return recomputeProjectState(project, cwd);
 };
-var collectProjectPeerGaps = (cwd, project, options = {}) => {
-  const includeStageOnly = options.includeStageOnly !== false;
-  const includeHard = options.includeHard !== false;
-  const gaps = [];
-  for (const dir of Object.values(project?.changeDirs || {})) {
-    if (dir.archived) continue;
-    const absDir = path.join(cwd, dir.relDir);
-    const conditions = computeProjectConditions(dir);
-    const required = [];
-    const sourceFiles = [];
-    if (conditions.proposalOnly && includeStageOnly) {
-      continue;
-    }
-    if (conditions.designAheadOfTasks && includeHard) {
-      required.push(TASKS_FILE);
-      sourceFiles.push(DESIGN_FILE);
-    }
-    if (conditions.tasksAheadOfDesign && includeHard) {
-      required.push(DESIGN_FILE);
-      sourceFiles.push(TASKS_FILE);
-    }
-    if (!required.length) continue;
-    gaps.push({
-      relDir: dir.relDir,
-      edited: [PROPOSAL_FILE, DESIGN_FILE, TASKS_FILE].filter((file) => {
-        const key = docKeyForFile(file);
-        return Number(dir.docs?.[key]?.lastEditedMs || 0) > 0;
-      }),
-      sourceFiles,
-      stageOnly: false,
-      absent: required.filter((file) => !fs.existsSync(path.join(absDir, file))),
-      missing: required.filter((file) => !fs.existsSync(path.join(absDir, file))),
-      unsynced: required.filter((file) => fs.existsSync(path.join(absDir, file))),
-      stale: [],
-      required,
-      projectLevel: true
-    });
-  }
-  return gaps;
-};
-var collectProjectCodeGaps = (cwd, project) => {
-  if (!project || !hasSddWorkspace(cwd)) return [];
-  const gaps = [];
-  for (const dir of Object.values(project.changeDirs || {})) {
-    if (dir.archived) continue;
-    const conditions = computeProjectConditions(dir);
-    if (!conditions.codeAheadOfDocs) continue;
-    const codeFiles = (dir.linkedCode || []).map((item) => path.join(cwd, item.path));
-    const latestCodeMs = Math.max(0, ...(dir.linkedCode || []).map((item) => Number(item.lastEditedMs || 0)));
-    const reviewTargets = conditions.codePendingDocs.map((file) => path.join(cwd, dir.relDir, file));
-    if (!reviewTargets.length || !codeFiles.length) continue;
-    gaps.push({
-      codeFiles,
-      latestCodeSeq: latestCodeMs,
-      latestCodeMs,
-      reviewTargets,
-      pendingReviewTargets: reviewTargets,
-      reviewReady: false,
-      needsConfirmation: false,
-      projectLevel: true,
-      relDir: dir.relDir,
-      reviewSignature: hash(
-        JSON.stringify({
-          type: "project-code",
-          relDir: dir.relDir,
-          latestCodeMs,
-          reviewTargets: reviewTargets.map((file) => rel(cwd, file)).sort()
-        })
-      )
-    });
-  }
-  return gaps;
-};
-var collectCombinedPeerGaps = (cwd, state, project, options = {}) => {
-  const combined = [
-    ...collectPeerGaps(cwd, state, options),
-    ...collectProjectPeerGaps(cwd, project, options)
-  ];
-  const seen = /* @__PURE__ */ new Set();
-  return combined.filter((gap) => {
-    const key = `${gap.relDir}:${gap.required.sort().join(",")}:${gap.sourceFiles.sort().join(",")}:${gap.stageOnly}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
-var collectCombinedCodeGaps = (cwd, state, project) => {
-  const sessionGaps = collectCodeGaps(cwd, state);
-  const rawProjectGaps = collectProjectCodeGaps(cwd, project);
-  const projectGaps = rawProjectGaps.filter(
-    (gap) => !state.codeReviewConfirmations?.[gap.reviewSignature]?.implementationFlow && !isCodeReviewConfirmed(state, gap.reviewSignature)
-  );
-  const codeFilesKey = (gap) => (gap.codeFiles || []).map((file) => rel(cwd, file)).sort().join("\0");
-  const projectCodeKeys = new Set(rawProjectGaps.map(codeFilesKey));
-  const projectLinkedCode = new Set(
-    Object.values(project?.changeDirs || {}).flatMap(
-      (dir) => (dir.linkedCode || []).map((item) => toPosix(item.path))
-    )
-  );
-  const allCodeFilesTrackedByProject = (gap) => (gap.codeFiles || []).every((file) => projectLinkedCode.has(rel(cwd, file)));
-  const combined = [
-    ...sessionGaps.filter(
-      (gap) => !projectCodeKeys.has(codeFilesKey(gap)) && !allCodeFilesTrackedByProject(gap)
-    ),
-    ...projectGaps
-  ];
-  const seen = /* @__PURE__ */ new Set();
-  return combined.filter((gap) => {
-    const key = JSON.stringify({
-      codeFiles: (gap.codeFiles || []).map((file) => rel(cwd, file)).sort(),
-      reviewTargets: (gap.reviewTargets || []).map((file) => rel(cwd, file)).sort()
-    });
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
-var collectCarryOverDrift = (project) => Object.values(project?.changeDirs || {}).filter((dir) => !dir.archived).filter((dir) => dir.state !== "ALIGNED" && dir.state !== "PROPOSAL_STAGE");
 var carryOverSignature = (project) => hash(
   JSON.stringify(
     collectCarryOverDrift(project).map((dir) => ({
@@ -2582,73 +3812,6 @@ var shouldEmitCarryOverNotice = (state, project) => {
   const driftDirs = collectCarryOverDrift(project);
   if (!driftDirs.length) return false;
   return state.carryOverNotice?.signature !== carryOverSignature(project);
-};
-var formatCarryOverReminder = (project, options = {}) => {
-  const driftDirs = collectCarryOverDrift(project);
-  if (!driftDirs.length) return "";
-  return [
-    `${options.prefix || ""}SDD carry-over drift from prior sessions:`,
-    ...driftDirs.map((dir) => `- ${dir.relDir}: ${dir.state}`),
-    "",
-    "Before final answer, review these active SDD change directories and synchronize design.md/tasks.md with the implementation if needed.",
-    SUBAGENT_REVIEW_RULE
-  ].join("\n");
-};
-var buildPreCompactSummary = (cwdOrProject, stateOrNull = null, projectOrNull = null) => {
-  const legacyCall = typeof cwdOrProject !== "string";
-  const cwd = legacyCall ? "" : cwdOrProject;
-  const state = legacyCall ? null : stateOrNull;
-  const project = legacyCall ? cwdOrProject : projectOrNull;
-  const driftDirs = collectCarryOverDrift(project);
-  const pending = cwd && state ? buildQuestionCheckpointEnforcement(cwd, state, project) : null;
-  const checkpointActive = Boolean(pending?.signature) && state?.subagentCheckpointNotice?.active && state.subagentCheckpointNotice.signature === pending.signature;
-  if (!driftDirs.length && !checkpointActive) return "";
-  if (checkpointActive) {
-    return [
-      "SDD drift checkpoint preserved across compaction:",
-      "Before compaction, the assistant was blocked from asking the user or handing control back because SDD synchronization/review was pending.",
-      "After compaction resumes, handle this SDD work first, then return to the original user task from where it was interrupted.",
-      ...RESUME_ORIGINAL_TASK_RULES,
-      "",
-      pending.message,
-      ...driftDirs.length ? [
-        "",
-        "Active SDD change-dir states:",
-        ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`)
-      ] : []
-    ].join("\n");
-  }
-  return [
-    "SDD drift summary preserved across compaction:",
-    ...driftDirs.slice(0, 20).map((dir) => `- ${dir.relDir}: ${dir.state}`),
-    "",
-    "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed.",
-    ...RESUME_ORIGINAL_TASK_RULES
-  ].join("\n");
-};
-var refreshAlignedBaseline = (cwd, project, state) => {
-  if (!project) return false;
-  const nowMs = Date.now() * 1e3;
-  let changed = false;
-  for (const dir of Object.values(project.changeDirs || {})) {
-    if (dir.archived) continue;
-    const linkedCodeRecords = (dir.linkedCode || []).map((item) => state.files?.[normalizeKey(path.join(cwd, item.path))]).filter((record) => record?.editedSeq && isCodePath(record.path || ""));
-    if (!linkedCodeRecords.length) continue;
-    const latestCodeSeq = Math.max(0, ...linkedCodeRecords.map((record) => Number(record.editedSeq || 0)));
-    if (!latestCodeSeq) continue;
-    const docPaths = [DESIGN_FILE, TASKS_FILE].filter((file) => dir.docs?.[docKeyForFile(file)]?.exists).map((file) => path.join(cwd, dir.relDir, file));
-    if (!docPaths.length) continue;
-    const docSeqs = docPaths.map((file) => editedSeq(state, file));
-    const allDocsEditedBeforeCode = docSeqs.every((seq) => seq > 0 && seq < latestCodeSeq);
-    if (!allDocsEditedBeforeCode) continue;
-    const latestCodeMs = Math.max(0, ...linkedCodeRecords.map((record) => eventMsForFileRecord(record, true)));
-    if (Number(dir.alignedAtMs || 0) >= latestCodeMs) continue;
-    dir.alignedAtMs = Math.max(nowMs, latestCodeMs);
-    dir.alignedAt = (/* @__PURE__ */ new Date()).toISOString();
-    changed = true;
-  }
-  if (changed) recomputeProjectState(project, cwd);
-  return changed;
 };
 var isImplementationFlowCodePending = (cwd, state, pending) => {
   if (pending?.type !== "code") return false;
@@ -2695,185 +3858,6 @@ var markImplementationFlowConfirmation = (cwd, state, pending, project = null) =
   if (project) recomputeProjectState(project, cwd);
   return true;
 };
-var collectReviewTargets = (cwd, state) => {
-  if (!hasSddWorkspace(cwd)) return [];
-  const discoveredDirs = [...state.changeDirs || [], ...discoverChangeDirs(cwd)];
-  const dirs = collectActiveChangeDirs(cwd, state);
-  const targets = [];
-  for (const dir of dirs) {
-    for (const file of REVIEW_FILES) {
-      const target = path.join(dir, file);
-      if (!fs.existsSync(target)) continue;
-      if (!targets.some((existing) => samePath(existing, target))) {
-        targets.push(path.normalize(target));
-      }
-    }
-  }
-  if (targets.length || dirs.length || discoveredDirs.length) return targets;
-  const fallbackRoot = fs.existsSync(path.join(cwd, ".sdd")) ? ".sdd" : "sdd";
-  return REVIEW_FILES.map((file) => path.join(cwd, fallbackRoot, "changes", "<change-id>", file));
-};
-var codeReviewSignature = (cwd, gap) => hash(
-  JSON.stringify({
-    codeFiles: (gap.codeFiles || []).map((file) => rel(cwd, file)).sort(),
-    latestCodeSeq: gap.latestCodeSeq || 0,
-    reviewTargets: (gap.reviewTargets || []).map((file) => rel(cwd, file)).sort()
-  })
-);
-var isCodeReviewConfirmed = (state, signature) => Boolean(signature && state.codeReviewConfirmations?.[signature]?.confirmed);
-var collectCodeGaps = (cwd, state) => {
-  if (!hasSddWorkspace(cwd) || isDtsContextActive(state)) return [];
-  const codeFiles = Object.values(state.files || {}).filter((file) => file.editedSeq && isCodePath(file.path || "")).sort((left, right) => (right.editedSeq || 0) - (left.editedSeq || 0));
-  if (!codeFiles.length) return [];
-  const latestCodeSeq = codeFiles[0].editedSeq || 0;
-  const reviewTargets = collectReviewTargets(cwd, state);
-  const pendingReviewTargets = reviewTargets.filter((file) => touchedSeq(state, file) <= latestCodeSeq);
-  const baseGap = {
-    codeFiles: codeFiles.map((file) => file.path),
-    latestCodeSeq,
-    reviewTargets,
-    pendingReviewTargets
-  };
-  const reviewSignature = codeReviewSignature(cwd, baseGap);
-  if (state.codeReviewConfirmations?.[reviewSignature]?.implementationFlow) return [];
-  const hasReviewEdit = editedSddSeqAfter(state, reviewTargets, latestCodeSeq);
-  const reviewReady = pendingReviewTargets.length === 0;
-  if (reviewReady && (hasReviewEdit || isCodeReviewConfirmed(state, reviewSignature))) return [];
-  return [
-    {
-      ...baseGap,
-      reviewSignature,
-      reviewReady,
-      needsConfirmation: reviewReady && !hasReviewEdit
-    }
-  ];
-};
-var formatGap = (gap) => {
-  const parts = [`required [${gap.required.join(", ")}]`];
-  if (gap.stageOnly) parts.push("stage reminder");
-  if (gap.absent?.length) parts.push(`absent [${gap.absent.join(", ")}]`);
-  if (gap.unsynced?.length) parts.push(`unsynced in this session [${gap.unsynced.join(", ")}]`);
-  if (gap.stale?.length) parts.push(`stale [${gap.stale.join(", ")}]`);
-  return `${gap.relDir}: edited [${gap.edited.join(", ")}], ${parts.join(", ")}`;
-};
-var buildToolEnforcement = (gaps, options = {}) => {
-  const compact = Boolean(options.compact);
-  const stageOnly = gaps.length > 0 && gaps.every((gap) => gap.stageOnly);
-  const detail = gaps.map(
-    (gap) => `- ${formatGap(gap)}. Synchronize: ${gap.required.map((file) => `${gap.relDir}/${file}`).join(", ")}`
-  ).join("\n");
-  if (stageOnly) {
-    return [
-      "SDD proposal stage reminder.",
-      "The preceding tool changed proposal.md. A proposal-only turn is valid; if the current user request only asked for proposal drafting or refinement, you may finish normally.",
-      "If you continue this same request into design work, read the current design.md first and update the appropriate existing section without changing its template.",
-      "Do not create or edit tasks.md directly from proposal.md. Let tasks.md follow only after design.md has been reviewed or updated.",
-      detail
-    ].join("\n");
-  }
-  if (compact) {
-    return [
-      "SDD drift reminder.",
-      "Peer SDD document synchronization is still pending:",
-      detail,
-      "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
-      ...RESUME_ORIGINAL_TASK_RULES
-    ].join("\n");
-  }
-  return [
-    "SDD drift tool result enforcement.",
-    "The preceding tool changed SDD change document(s), but peer document(s) are still unsynchronized:",
-    detail,
-    "",
-    "This assistant turn is incomplete until the required peer document(s) are synchronized.",
-    "Before any final answer, read each listed required peer file, then use edit or write to synchronize it with the edited SDD change document(s). If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
-    ...DOCUMENT_SYNC_RULES,
-    ...RESUME_ORIGINAL_TASK_RULES,
-    "Do not stop or summarize completion until the required peer document(s) are updated."
-  ].join("\n");
-};
-var formatCodeReviewTargets = (cwd, files) => files.map((file) => rel(cwd, file)).join(", ");
-var buildCodeEnforcement = (cwd, gaps, options = {}) => {
-  const compact = Boolean(options.compact);
-  const detail = gaps.map((gap) => {
-    const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ");
-    const reviewList = formatCodeReviewTargets(cwd, gap.reviewTargets || []);
-    const pendingTargets = gap.pendingReviewTargets || gap.reviewTargets || [];
-    const pendingList = pendingTargets.length ? formatCodeReviewTargets(cwd, pendingTargets) : "none; final review confirmation marker is pending";
-    return `- changed code file(s) [${codeList}]. Review SDD document(s): ${reviewList}. Still needs review: ${pendingList}`;
-  }).join("\n");
-  if (compact) {
-    return [
-      "SDD drift tool result enforcement.",
-      "SDD drift reminder: implementation code still has pending SDD review for this code-change batch:",
-      detail,
-      "",
-      "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
-      "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
-      ...ACTIVE_SDD_ALIGNMENT_RULES,
-      ...formatAttributionReviewRules(),
-      "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
-      "After both documents have been reviewed, resume the original user task if anything remains; finish only if the original task is already complete.",
-      ...RESUME_ORIGINAL_TASK_RULES,
-      SUBAGENT_REVIEW_RULE
-    ].join("\n");
-  }
-  return [
-    "SDD drift tool result enforcement.",
-    "The preceding tool changed implementation code. SDD reconciliation review is now pending for this code-change batch:",
-    detail,
-    "",
-    "This is a deferred review checkpoint, not an instruction to stop coding immediately.",
-    "Continue implementation work if more code changes are still required.",
-    "When the implementation for this task is complete, and before any final answer, use the read tool to review the relevant design.md and tasks.md files.",
-    "After review, update active SDD document(s) whenever they no longer match the implemented code. Optimization and refactor work can still require SDD updates.",
-    ...ACTIVE_SDD_ALIGNMENT_RULES,
-    ...formatAttributionReviewRules(),
-    "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
-    "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
-    ...DOCUMENT_SYNC_RULES,
-    "Do not create a no-op edit or add a new section just to satisfy this hook.",
-    SUBAGENT_REVIEW_RULE,
-    ...RESUME_ORIGINAL_TASK_RULES,
-    "Do not give the final answer while this code-change batch still has unreviewed SDD documents."
-  ].join("\n");
-};
-var buildCodeToolReminder = (cwd, gaps) => {
-  const detail = gaps.map((gap) => {
-    const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ");
-    const reviewList = formatCodeReviewTargets(cwd, gap.reviewTargets || []);
-    return `- changed code file(s) [${codeList}]. Review before final answer: ${reviewList}`;
-  }).join("\n");
-  return [
-    "SDD drift code review noted.",
-    "Implementation code changed, so SDD review will be required before the final answer.",
-    detail,
-    "",
-    "Do not stop coding just because this reminder appeared. If more implementation, verification, cleanup, or requested edits remain, continue the original task now.",
-    "When the implementation batch is complete, and before final answer or before asking the user what to do next, read/review the listed active design.md and tasks.md files.",
-    "Update only the SDD documents that are stale; if no document needs changes, leave them unchanged and say which files you reviewed.",
-    SUBAGENT_REVIEW_RULE,
-    ...RESUME_ORIGINAL_TASK_RULES
-  ].join("\n");
-};
-var serializablePeerGap = (gap) => ({
-  relDir: gap.relDir,
-  edited: [...gap.edited].sort(),
-  sourceFiles: [...gap.sourceFiles || []].sort(),
-  stageOnly: Boolean(gap.stageOnly),
-  absent: [...gap.absent || []].sort(),
-  unsynced: [...gap.unsynced || []].sort(),
-  stale: [...gap.stale].sort(),
-  required: [...gap.required].sort()
-});
-var serializableCodeGap = (cwd, gap) => ({
-  codeFiles: gap.codeFiles.map((file) => rel(cwd, file)).sort(),
-  latestCodeSeq: gap.latestCodeSeq || 0,
-  reviewTargets: (gap.reviewTargets || []).map((file) => rel(cwd, file)).sort(),
-  pendingReviewTargets: (gap.pendingReviewTargets || []).map((file) => rel(cwd, file)).sort(),
-  reviewReady: Boolean(gap.reviewReady),
-  needsConfirmation: Boolean(gap.needsConfirmation)
-});
 var clearCodeDriftNoticeIfResolved = (state, codeGaps) => {
   if (codeGaps.length) return;
   state.codeDriftNotice = null;
@@ -2886,7 +3870,6 @@ var clearSubagentCheckpointNoticeIfResolved = (state, pending) => {
   if (pending) return;
   state.subagentCheckpointNotice = null;
 };
-var peerDriftSignature = (peerGaps) => hash(JSON.stringify({ type: "peer", gaps: peerGaps.map(serializablePeerGap) }));
 var markPeerDriftNoticeEmitted = (state, peerGaps) => {
   if (!peerGaps.length) return;
   state.peerDriftNotice = {
@@ -2938,228 +3921,6 @@ var markCodeDriftNoticeEmitted = (cwd, state, codeGaps) => {
     emissionCount: codeDriftToolSessionEmissionCount(state) + 1
   };
 };
-var normalizeCheckpointToolName = (tool) => String(tool || "").trim().toLowerCase().replace(/[-\s.]+/g, "_");
-var isSubagentCheckpointTool = (tool, toolInput = {}) => {
-  const normalized = normalizeCheckpointToolName(tool);
-  if (normalized === "background_task") return false;
-  if (normalized === "call_omo_agent" && toolInput?.run_in_background === true) return false;
-  return SUBAGENT_CHECKPOINT_TOOLS.has(normalized);
-};
-var isQuestionCheckpointTool = (tool) => QUESTION_CHECKPOINT_TOOLS.has(normalizeCheckpointToolName(tool));
-var collectCheckpointStrings = (value, depth = 0, seen = /* @__PURE__ */ new Set()) => {
-  if (value == null || depth > 4) return [];
-  if (typeof value === "string") return [limitString(value, CHECKPOINT_OUTPUT_TEXT_MAX_BYTES)];
-  if (typeof value !== "object") return [];
-  if (seen.has(value)) return [];
-  seen.add(value);
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => collectCheckpointStrings(item, depth + 1, seen));
-  }
-  const texts = [];
-  for (const key of [
-    "output",
-    "content",
-    "text",
-    "message",
-    "summary",
-    "result",
-    "stdout",
-    "value"
-  ]) {
-    if (Object.prototype.hasOwnProperty.call(value, key)) {
-      texts.push(...collectCheckpointStrings(value[key], depth + 1, seen));
-    }
-  }
-  return texts;
-};
-var collectCheckpointOutputText = (input) => {
-  const texts = [];
-  for (const key of CHECKPOINT_OUTPUT_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(input || {}, key)) {
-      texts.push(...collectCheckpointStrings(input[key]));
-    }
-  }
-  return limitString(texts.filter(Boolean).join("\n"), CHECKPOINT_OUTPUT_TEXT_MAX_BYTES);
-};
-var stripCheckpointPathToken = (token) => String(token || "").replace(/^[\s"'`(<\[\-*]+/, "").replace(/^\d+[.)]\s*/, "").replace(/[\s"'`)>.,;:\]]+$/, "");
-var isInsideWorkspace = (cwd, fp) => {
-  const relative = path.relative(path.resolve(cwd), path.resolve(fp));
-  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
-};
-var isIgnoredCheckpointPath = (cwd, fp) => {
-  const relative = rel(cwd, fp);
-  return CHECKPOINT_PATH_IGNORE_RE.test(relative);
-};
-var checkpointLineMayDescribeEdit = (line, priorHeaderLines) => CHECKPOINT_EDIT_LINE_RE.test(line) || priorHeaderLines > 0;
-var extractCheckpointEditedPaths = (cwd, text) => {
-  const paths = [];
-  let headerCarry = 0;
-  for (const rawLine of String(text || "").split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) {
-      headerCarry = 0;
-      continue;
-    }
-    if (CHECKPOINT_EDIT_HEADER_RE.test(line)) {
-      headerCarry = 4;
-    }
-    const mayDescribeEdit = checkpointLineMayDescribeEdit(line, headerCarry);
-    if (headerCarry > 0) headerCarry -= 1;
-    if (!mayDescribeEdit) continue;
-    for (const match of line.matchAll(CHECKPOINT_PATH_RE)) {
-      const token = stripCheckpointPathToken(match[0]);
-      if (!token) continue;
-      const abs = path.isAbsolute(token) ? path.resolve(token) : resolveFile(cwd, token);
-      if (!isInsideWorkspace(cwd, abs)) continue;
-      if (isIgnoredCheckpointPath(cwd, abs)) continue;
-      if (!fs.existsSync(abs)) continue;
-      if (!isCodePath(abs)) continue;
-      if (!paths.some((existing) => samePath(existing, abs))) paths.push(path.normalize(abs));
-    }
-  }
-  return paths;
-};
-var checkpointOutputSuggestsCodeEdit = (text) => CHECKPOINT_EDIT_LINE_RE.test(text || "") || CHECKPOINT_COMPLETION_RE.test(text || "");
-var checkpointMtimeWindowMs = () => {
-  if (!Number.isFinite(CHECKPOINT_MTIME_WINDOW_MS)) return 10 * 60 * 1e3;
-  return Math.max(0, CHECKPOINT_MTIME_WINDOW_MS);
-};
-var checkpointMtimeScanMaxFiles = () => {
-  if (!Number.isFinite(CHECKPOINT_MTIME_SCAN_MAX_FILES)) return 50;
-  return Math.max(1, CHECKPOINT_MTIME_SCAN_MAX_FILES);
-};
-var checkpointMtimeScanMaxVisits = () => {
-  if (!Number.isFinite(CHECKPOINT_MTIME_SCAN_MAX_VISITS)) return 2e3;
-  return Math.max(100, CHECKPOINT_MTIME_SCAN_MAX_VISITS);
-};
-var shouldRecordCheckpointMtimePath = (state, fp, cutoffMs) => {
-  const mtimeMs = fileMtimeMs(fp);
-  if (!mtimeMs || mtimeMs < cutoffMs) return false;
-  const existing = state.files[normalizeKey(fp)];
-  if (existing?.editedSeq && existing?.mtimeMs && mtimeMs <= Number(existing.mtimeMs) + 1) {
-    return false;
-  }
-  return true;
-};
-var scanRecentCheckpointCodePaths = (cwd, state, cutoffMs) => {
-  const found = [];
-  const stack = [path.resolve(cwd)];
-  let visited = 0;
-  const maxFiles = checkpointMtimeScanMaxFiles();
-  const maxVisits = checkpointMtimeScanMaxVisits();
-  while (stack.length && visited < maxVisits && found.length < maxFiles) {
-    const dir = stack.pop();
-    let entries = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (visited >= maxVisits || found.length >= maxFiles) break;
-      const fp = path.join(dir, entry.name);
-      if (!isInsideWorkspace(cwd, fp) && !samePath(cwd, fp)) continue;
-      if (isIgnoredCheckpointPath(cwd, fp)) continue;
-      visited += 1;
-      if (entry.isDirectory()) {
-        stack.push(fp);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (!isCodePath(fp)) continue;
-      if (!shouldRecordCheckpointMtimePath(state, fp, cutoffMs)) continue;
-      found.push(path.normalize(fp));
-    }
-  }
-  return found;
-};
-var hydrateStateFromCheckpointMtime = (cwd, state, input, text = collectCheckpointOutputText(input)) => {
-  const tool = String(input?.tool_name || "").toLowerCase();
-  if (!CHECKPOINT_MTIME_SCAN) return false;
-  if (!hasSddWorkspace(cwd) || isDtsContextActive(state)) return false;
-  if (!isSubagentCheckpointTool(tool, input?.tool_input || {})) return false;
-  const hasText = Boolean(String(text || "").trim());
-  if (hasText && !checkpointOutputSuggestsCodeEdit(text)) return false;
-  const now = Date.now();
-  const createdAt = Date.parse(state.createdAt || "") || now;
-  const cutoffMs = Math.max(createdAt, now - checkpointMtimeWindowMs());
-  let changed = false;
-  for (const fp of scanRecentCheckpointCodePaths(cwd, state, cutoffMs)) {
-    recordFile(state, fp, true);
-    changed = true;
-  }
-  return changed;
-};
-var hydrateStateFromCheckpointOutput = (cwd, state, input) => {
-  const tool = String(input?.tool_name || "").toLowerCase();
-  if (!isSubagentCheckpointTool(tool, input?.tool_input || {})) return false;
-  const text = collectCheckpointOutputText(input);
-  if (!text) return hydrateStateFromCheckpointMtime(cwd, state, input, "");
-  let changed = false;
-  for (const fp of extractCheckpointEditedPaths(cwd, text)) {
-    recordFile(state, fp, true);
-    changed = true;
-  }
-  return changed || hydrateStateFromCheckpointMtime(cwd, state, input, text);
-};
-var buildSubagentCheckpointEnforcement = (cwd, state, project = null) => {
-  const hardPeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false });
-  if (hardPeerGaps.length) {
-    return {
-      type: "peer",
-      signature: hash(JSON.stringify({ type: "subagent-peer", gaps: hardPeerGaps.map(serializablePeerGap) })),
-      message: buildToolEnforcement(hardPeerGaps, { compact: true })
-    };
-  }
-  const pendingCodeGaps = collectCombinedCodeGaps(cwd, state, project).filter((gap) => !gap.reviewReady);
-  if (pendingCodeGaps.length) {
-    return {
-      type: "code",
-      signature: hash(
-        JSON.stringify({
-          type: "subagent-code",
-          gaps: pendingCodeGaps.map((gap) => serializableCodeGap(cwd, gap))
-        })
-      ),
-      message: buildCodeEnforcement(cwd, pendingCodeGaps, { compact: true })
-    };
-  }
-  return null;
-};
-var buildQuestionCheckpointMessage = (message) => [
-  "SDD drift question checkpoint.",
-  "The assistant is about to ask the user a question or hand control back while SDD synchronization or review is still pending.",
-  "Do not ask about commit, next action, or whether to continue before resolving the SDD reminder below.",
-  "Continue the current turn now and handle the pending SDD work first.",
-  "After the pending SDD work is resolved, return to the original user task from where you paused; do not treat this checkpoint itself as task completion.",
-  ...RESUME_ORIGINAL_TASK_RULES,
-  "",
-  message
-].join("\n");
-var buildQuestionCheckpointEnforcement = (cwd, state, project = null) => {
-  const hardPeerGaps = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false });
-  if (hardPeerGaps.length) {
-    return {
-      type: "peer",
-      signature: hash(JSON.stringify({ type: "question-peer", gaps: hardPeerGaps.map(serializablePeerGap) })),
-      message: buildQuestionCheckpointMessage(buildToolEnforcement(hardPeerGaps, { compact: true }))
-    };
-  }
-  const pendingCodeGaps = collectCombinedCodeGaps(cwd, state, project).filter((gap) => !gap.reviewReady);
-  if (pendingCodeGaps.length) {
-    return {
-      type: "code",
-      signature: hash(
-        JSON.stringify({
-          type: "question-code",
-          gaps: pendingCodeGaps.map((gap) => serializableCodeGap(cwd, gap))
-        })
-      ),
-      message: buildQuestionCheckpointMessage(buildCodeEnforcement(cwd, pendingCodeGaps, { compact: true }))
-    };
-  }
-  return null;
-};
 var shouldEmitSubagentCheckpointNotice = (state, pending) => Boolean(pending?.signature) && state.subagentCheckpointNotice?.signature !== pending.signature;
 var markSubagentCheckpointNoticeEmitted = (state, pending, tool) => {
   if (!pending?.signature) return;
@@ -3171,189 +3932,26 @@ var markSubagentCheckpointNoticeEmitted = (state, pending, tool) => {
     emittedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 };
-var pruneCodeReviewConfirmations = (state) => {
-  const entries = Object.entries(state.codeReviewConfirmations || {});
-  if (entries.length <= CODE_REVIEW_CONFIRMATION_CAP) return;
-  entries.sort((left, right) => {
-    const leftAt = Date.parse(left[1]?.confirmedAt || left[1]?.requestedAt || 0) || 0;
-    const rightAt = Date.parse(right[1]?.confirmedAt || right[1]?.requestedAt || 0) || 0;
-    return leftAt - rightAt;
-  }).slice(0, entries.length - CODE_REVIEW_CONFIRMATION_CAP).forEach(([key]) => {
-    delete state.codeReviewConfirmations[key];
-  });
-};
-var markCodeReviewNoEditConfirmation = (state, gaps) => {
-  if (!gaps.length || !gaps.every((gap) => gap.needsConfirmation && gap.reviewReady)) return false;
-  let confirmed = true;
-  for (const gap of gaps) {
-    const signature = gap.reviewSignature;
-    if (!signature) {
-      confirmed = false;
-      continue;
-    }
-    const existing = state.codeReviewConfirmations[signature] || {};
-    state.codeReviewConfirmations[signature] = {
-      ...existing,
-      requested: true,
-      requestedAt: existing.requestedAt || (/* @__PURE__ */ new Date()).toISOString(),
-      confirmed: true,
-      confirmedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      codeSeq: gap.latestCodeSeq || 0,
-      codeFiles: (gap.codeFiles || []).map((file) => file.path || file),
-      reviewTargets: gap.reviewTargets || [],
-      noSddEdit: true,
-      userConfirmationRecommended: true
-    };
-  }
-  pruneCodeReviewConfirmations(state);
-  return confirmed;
-};
-var buildPendingEnforcement = (cwd, state, options = {}) => {
-  const project = options.project || null;
-  const peerGaps = collectCombinedPeerGaps(cwd, state, project, {
-    includeStageOnly: options.includeStageOnly !== false
-  });
-  if (peerGaps.length) {
-    return {
-      type: "peer",
-      message: buildToolEnforcement(peerGaps),
-      signature: peerDriftSignature(peerGaps)
-    };
-  }
-  const codeGaps = collectCombinedCodeGaps(cwd, state, project);
-  if (codeGaps.length) {
-    return {
-      type: "code",
-      message: buildCodeEnforcement(cwd, codeGaps),
-      signature: hash(JSON.stringify({ type: "code", gaps: codeGaps.map((gap) => serializableCodeGap(cwd, gap)) })),
-      gaps: codeGaps
-    };
-  }
-  return null;
-};
 var markStopCodeReviewConfirmation = (state, pending) => {
   if (pending?.type !== "code") return false;
   return markCodeReviewNoEditConfirmation(state, pending.gaps || []);
-};
-var buildStopEnforcement = (pendingMessage) => [
-  "SDD drift stop enforcement.",
-  "The assistant attempted to stop while required SDD synchronization or review is still missing.",
-  "",
-  pendingMessage,
-  "",
-  "Continue the current task now. Do not ask the user for permission to continue.",
-  "After the required SDD work is resolved, resume the original user task if anything remains; do not stop only because the SDD checkpoint is resolved.",
-  "For code-review gaps, read/review the listed SDD document(s), then update only the files that actually need changes.",
-  "If those documents have already been reviewed and no edit is needed, stop again with a concise final answer; the hook will record the review confirmation marker.",
-  "For peer-sync gaps, use read, then edit or write, to synchronize the listed SDD document(s) before trying to stop again."
-].join("\n");
-var confirmationStillNeedsHumanReview = (state, confirmation) => !editedSddSeqAfter(state, confirmation?.reviewTargets || [], Number(confirmation?.codeSeq || 0));
-var collectCodeReviewAdvisoryLines = (cwd, state) => Object.values(state.codeReviewConfirmations || {}).filter((confirmation) => confirmation?.confirmed && confirmation?.userConfirmationRecommended).filter((confirmation) => confirmationStillNeedsHumanReview(state, confirmation)).sort((left, right) => {
-  const leftSeq = Number(left.codeSeq || 0);
-  const rightSeq = Number(right.codeSeq || 0);
-  return rightSeq - leftSeq;
-}).map((confirmation) => {
-  const codeList = (confirmation.codeFiles || []).map((file) => rel(cwd, file)).join(", ");
-  const reviewList = (confirmation.reviewTargets || []).map((file) => rel(cwd, file)).join(", ");
-  return `  - reviewed SDD document(s) after code change(s) [${codeList || "unknown"}] and made no SDD edits. User confirmation recommended for: ${reviewList || "design.md, tasks.md"}`;
-});
-var collectReportLines = (cwd, state, project = null) => {
-  const lines = collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false }).map(
-    (gap) => `  - ${formatGap(gap)}`
-  );
-  for (const gap of collectCombinedCodeGaps(cwd, state, project)) {
-    const codeList = gap.codeFiles.map((file) => rel(cwd, file)).join(", ");
-    const reviewList = (gap.pendingReviewTargets || gap.reviewTargets || []).map((file) => rel(cwd, file)).join(", ");
-    lines.push(
-      `  - edited code file(s) [${codeList}], but did not review SDD document(s) after the code change: ${reviewList}`
-    );
-  }
-  lines.push(...collectCodeReviewAdvisoryLines(cwd, state));
-  return lines;
-};
-var refreshReport = (cwd, state, project = null) => {
-  const reportPath = path.join(cwd, ".sdd-drift-report.md");
-  const lines = collectReportLines(cwd, state, project);
-  if (lines.length) {
-    try {
-      const body = lines.join("\n") + "\n";
-      try {
-        const existing = fs.readFileSync(reportPath, "utf8");
-        if (existing.replace(/^## .*\r?\n/, "") === body) return;
-      } catch {
-      }
-      writeTextAtomic(reportPath, "## " + (/* @__PURE__ */ new Date()).toISOString() + "\n" + body);
-    } catch {
-    }
-    return;
-  }
-  try {
-    fs.unlinkSync(reportPath);
-  } catch {
-  }
 };
 var isOpenCodeHookInput = (input) => {
   if (OUTPUT_MODE === "opencode") return true;
   if (OUTPUT_MODE === "claude" || OUTPUT_MODE === "claude-code") return false;
   return input?.hook_source === "opencode-plugin";
 };
-var buildClaudeCodeOutput = (hookEventName, message) => JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: hookEventName || "PostToolUse",
-    additionalContext: message
-  }
+var {
+  buildClaudeCodeOutput,
+  buildPreToolUseDenyOutput,
+  buildStopOutput,
+  emitEnforcement,
+  emitStopEnforcement
+} = createOutputHelpers({
+  isOpenCodeHookInput,
+  opencodeStopReportOnly: OPENCODE_STOP_REPORT_ONLY,
+  strictBlock: STRICT_BLOCK
 });
-var buildPreToolUseDenyOutput = (message) => JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "deny",
-    permissionDecisionReason: message,
-    additionalContext: message
-  }
-});
-var buildStopOutput = (input, message) => {
-  if (isOpenCodeHookInput(input)) {
-    if (OPENCODE_STOP_REPORT_ONLY) {
-      return JSON.stringify({
-        decision: "approve",
-        stop_hook_active: false,
-        sdd_drift_report_only: true
-      });
-    }
-    return JSON.stringify({
-      decision: "block",
-      reason: "SDD drift check found pending SDD synchronization or review. Attempting OpenCode Stop continuation; see .sdd-drift-report.md if the session does not continue.",
-      inject_prompt: message,
-      stop_hook_active: true
-    });
-  }
-  return JSON.stringify({
-    decision: "block",
-    reason: message
-  });
-};
-var emitEnforcement = (input, message) => {
-  if (STRICT_BLOCK) {
-    process.stderr.write(message);
-    process.exit(2);
-  }
-  if (input?.hook_event_name === "PreToolUse") {
-    process.stdout.write(buildPreToolUseDenyOutput(message));
-    return;
-  }
-  if (isOpenCodeHookInput(input)) {
-    process.stdout.write(message);
-    return;
-  }
-  process.stdout.write(buildClaudeCodeOutput(input?.hook_event_name, message));
-};
-var emitStopEnforcement = (input, message) => {
-  if (STRICT_BLOCK) {
-    process.stderr.write(message);
-    process.exit(2);
-  }
-  process.stdout.write(buildStopOutput(input, message));
-};
 var dispatch = async (input) => {
   const cwd = input.cwd || process.cwd();
   if (!hasSddWorkspace(cwd)) return;

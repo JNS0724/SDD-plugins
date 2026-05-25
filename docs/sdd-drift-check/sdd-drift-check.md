@@ -4,44 +4,56 @@ OpenCode / Claude Code compatible hook for SDD drift checks.
 
 ## Current Status
 
-`PostToolUse` is optional for Claude Code, but recommended for OpenCode through
-oh-my-opencode. The checked-in baseline keeps `UserPromptSubmit` for silent
-context capture and `Stop` for final checks. In OpenCode/OMO, Stop is only a
-best-effort continuation attempt because it fires after `session.idle`; the
-reliable model-visible path is still `PostToolUse`.
+Claude Code uses the command-hook artifact. OpenCode uses the native plugin
+adapter. Both runtime faces share the same drift rules, state files, reports,
+and diagnostic logs. In native OpenCode, Stop continuation is best effort
+because it fires after `session.idle`; the reliable model-visible path is still
+`tool.execute.after`.
 
 ## Runtime Environment
 
 This package has two entrypoints:
 
 - `sdd-drift-check-hook.js`: Claude Code-compatible command hook. Use this with
-  Claude Code or with OpenCode through `oh-my-opencode` hook bridging.
+  Claude Code hook configuration.
 - `sdd-drift-check-opencode.js`: native OpenCode plugin adapter. Use this when
   you want OpenCode to load the plugin directly from `.opencode/plugins/`.
 
 Both entrypoints share the same drift rules, state files, reports, and
-diagnostic logs. The native OpenCode adapter listens to `chat.message`,
-`tool.execute.after`, and `session.idle`. It captures user-message context for
-issue-ticket detection, converts tool/idle events into the shared hook input
-shape, and appends model-visible reminders to the tool result when drift is
-detected.
+diagnostic logs. The native OpenCode adapter is intentionally separate from the
+Claude-compatible command hook: Claude uses `sdd-drift-check-hook.js`, while
+pure OpenCode loads `sdd-drift-check-opencode.js` as a plugin adapter and calls
+the shared hook file behind the scenes.
 
-Native OpenCode caveat: `session.idle` is an event, not a mutable Stop hook
-response. The native adapter can refresh reports/logs at idle time, but current
-OpenCode plugin hooks do not provide a direct Stop-continuation output channel.
-For reliable continuation in OpenCode, keep `tool.execute.after` enabled.
+The native OpenCode adapter listens to `chat.message`, `tool.execute.before`,
+`tool.execute.after`, `session.idle`, and OpenCode's `session.status` idle
+event. It captures user-message context for issue-ticket detection, caches tool
+arguments in `tool.execute.before`, converts tool/idle events into the shared
+hook input shape, and appends model-visible reminders to the tool result when
+drift is detected. Question-like tools are checked in `tool.execute.before`, so
+an agent that is about to ask "commit now?" can be redirected to finish the SDD
+checkpoint first.
 
-Important OpenCode note: real testing with OpenCode 1.2.27 +
-`oh-my-opencode@3.17.2` showed that `Stop`-only did not reliably trigger
-continuation in `opencode run`. Stop output can appear after the assistant has
-already ended, without causing another model turn. For reliable OpenCode cascade
-today, enable the optional `PostToolUse` hook below. Stop remains enabled as a
-bounded best-effort continuation attempt plus final report/log checkpoint. If
-you prefer no OpenCode Stop continuation attempt at all, set
+Native OpenCode caveat: `session.idle` / idle `session.status` is an event, not
+a mutable Stop hook response. The native adapter can refresh reports/logs and,
+when the shared Stop hook returns `inject_prompt`, makes a best-effort
+`session.prompt` continuation call. Current OpenCode plugin hooks still do not
+provide a direct Stop-continuation output channel. For reliable continuation in
+OpenCode, keep `tool.execute.after` enabled.
+
+Important OpenCode note: real testing with OpenCode 1.2.27 showed that
+Stop-only did not reliably trigger continuation in `opencode run`. Stop output
+can appear after the assistant has already ended, without causing another model
+turn. For reliable OpenCode cascade today, keep the native plugin's
+`tool.execute.after` handling enabled. Stop remains enabled as a bounded
+best-effort continuation attempt plus final report/log checkpoint. If you prefer
+no OpenCode Stop continuation attempt at all, set
 `SDD_DRIFT_OPENCODE_STOP_MODE=report-only`.
 
-The hook does not use `console.error`, `messages.transform`, or
-`session.prompt`. It is silent unless it has to return model-visible hook output.
+The shared command hook does not use `console.error` or `messages.transform`.
+The native OpenCode adapter only uses `session.prompt` as a best-effort Stop
+continuation path after parsing a structured `inject_prompt`; ordinary
+model-visible reminders still go through tool results.
 
 ## Behavior
 
@@ -115,12 +127,13 @@ because code-ahead-of-doc review is a human-confirmable checkpoint, not a hard
 peer-document synchronization requirement. Peer-document sync still uses
 `SDD_DRIFT_STOP_MAX_BLOCKS` and defaults to two blocks.
 
-In OpenCode/OMO mode, Stop returns a short `reason` and a full `inject_prompt`
-so OMO can attempt continuation without dumping the full SDD prompt as the
-visible block reason. This is best effort only: if the session has already
-settled, OpenCode may still not start another model turn. Claude Code receives
-normal `decision: "block"` Stop output. To make OpenCode Stop report-only, set
-`SDD_DRIFT_OPENCODE_STOP_MODE=report-only` or `SDD_DRIFT_OPENCODE_STOP_INJECT=0`.
+In native OpenCode mode, Stop returns a short `reason` and a full
+`inject_prompt` so the OpenCode adapter can attempt continuation without dumping
+the full SDD prompt as the visible block reason. This is best effort only: if
+the session has already settled, OpenCode may still not start another model
+turn. Claude Code receives normal `decision: "block"` Stop output. To make
+OpenCode Stop report-only, set `SDD_DRIFT_OPENCODE_STOP_MODE=report-only` or
+`SDD_DRIFT_OPENCODE_STOP_INJECT=0`.
 
 The hook also writes a lightweight JSONL diagnostic log by default:
 
@@ -176,45 +189,6 @@ $env:SDD_DRIFT_NODE = "C:\Program Files\nodejs\node.exe"
 opencode
 ```
 
-### OpenCode With oh-my-opencode
-
-Install `oh-my-opencode`:
-
-```powershell
-npm install --save-dev oh-my-opencode@3.17.2
-```
-
-Copy the hook:
-
-```powershell
-New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
-Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js
-```
-
-Create `.opencode/plugin/oh-my-opencode.ts`:
-
-```powershell
-New-Item -ItemType Directory -Force .opencode\plugin
-Set-Content .opencode\plugin\oh-my-opencode.ts 'export { default } from "oh-my-opencode"'
-```
-
-Create `.opencode/oh-my-openagent.jsonc`:
-
-```jsonc
-{
-  "$schema": "../node_modules/oh-my-opencode/schema.json",
-  "disabled_hooks": ["legacy-plugin-toast"],
-  "claude_code": {
-    "commands": false,
-    "skills": false,
-    "agents": false,
-    "mcp": false,
-    "plugins": false,
-    "hooks": true
-  }
-}
-```
-
 ### Claude Code Or Claude-Compatible Hook Config
 
 For Claude Code, this minimal Stop-only config captures `UserPromptSubmit`
@@ -254,99 +228,6 @@ New-Item -ItemType Directory -Force .claude
 }
 ```
 
-For OpenCode through `oh-my-opencode`, use the full cascade config below.
-It enables `PostToolUse` for reliable model-visible reminders, keeps `Stop`
-as a best-effort final continuation checkpoint, captures prior-session drift
-through `UserPromptSubmit`, and adds `PreCompact` so context compaction can
-carry SDD state forward. `PreToolUse` is only used for question-like handoff
-tools, so a model that asks whether to commit or continue is denied that
-question call and receives the pending SDD work as the tool-denial reason before
-control returns to the user:
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Use an explicit `PostToolUse` matcher for OpenCode through oh-my-opencode:
-include file tools plus subagent result tools such as `Task`, `task`,
-`call_omo_agent`, `background_output`, and `delegate_task`; also include
-question-like tools such as `question` / `AskUserQuestion` / `Confirm` so
-commit-or-continue handoffs become SDD checkpoints. Avoid `matcher: "*"` unless
-you are debugging,
-because it makes every tool result run the command hook and can amplify
-oh-my-opencode/Bun instability in long sessions. File tools let the hook record
-actual Read/Edit/Write state, subagent result tools provide a checkpoint where
-unresolved SDD drift can be re-shown to the main agent, and question tools catch
-the common "work is done; should I commit?" handoff before the model stops
-working. When a question-like tool is intercepted by `PreToolUse`, the hook
-returns a structured `permissionDecision: "deny"` with the SDD reminder as the
-reason, so the model sees feedback and can continue the current turn. Other
-tools stay silent unless there is already an unresolved SDD gap.
-Question checkpoints only fire when the runtime exposes a question-like tool
-event. Plain OpenCode agents may not expose `question`; OpenCode + OMO and
-Claude-compatible hook bridges are the main target for this handoff case.
-The hook treats
-`Edit`, `Write`, and Claude Code's common `MultiEdit` tool as edits, and `Read`
-as review evidence. It deduplicates repeated file-tool `PostToolUse` calls by
-`tool_use_id`, so having a user-level and project-level hook config should not
-create duplicate enforcement or design/tasks ping-pong.
-
 After installing in a real project, verify that the hook is being called:
 
 ```powershell
@@ -364,8 +245,8 @@ Get-ChildItem -Force "$env:TEMP\sdd-drift-check"
 Useful diagnostic events include `hook_start`,
 `user_prompt_context_captured`, `posttooluse_no_output`,
 `emit_subagent_checkpoint_enforcement`, and `stop_allow_no_pending`. If none
-of them appear after an OpenCode/OMO conversation, the hook bridge or command
-path is not wired correctly.
+of them appear after an OpenCode or Claude Code conversation, the plugin or
+command-hook path is not wired correctly.
 
 If compaction happens immediately after a question checkpoint, `PreCompact`
 preserves that active checkpoint explicitly. The compacted context tells the
@@ -427,11 +308,9 @@ or when `SDD_DRIFT_DTS_CONTEXT=1` is set for the session. In Claude Code, enable
 the `UserPromptSubmit` hook so the original user request is captured before
 later `PostToolUse` events. In OpenCode native plugin mode, the adapter captures
 user messages through `chat.message` before later `tool.execute.after` events,
-so the issue-ticket marker can be persisted in hook state. In OpenCode through
-oh-my-opencode `PostToolUse`, current hook input can still be limited to
-hook/session/tool metadata, so prompt-based issue inference remains best effort
-there. For reliable OpenCode issue-ticket handling, set
-`SDD_DRIFT_DTS_CONTEXT=1` on that run. Set `SDD_DRIFT_DTS_SKIP=0` to disable this
+so the issue-ticket marker can be persisted in hook state. For explicit
+issue-ticket handling in either runtime, set `SDD_DRIFT_DTS_CONTEXT=1` on that
+run. Set `SDD_DRIFT_DTS_SKIP=0` to disable this
 exception entirely. The exception does not disable peer synchronization after
 explicit SDD document edits.
 
@@ -476,22 +355,18 @@ is unchanged.
 When the environment supports subagents and the current project allows them, the
 prompt suggests using a read-only subagent for SDD review. This is optional:
 without subagents, the main agent performs the same review with normal `Read`
-tools and remains responsible for any edits. In OpenCode through oh-my-opencode,
-the `PostToolUse` matcher must include the subagent result tools listed above;
-otherwise those tools do not invoke the hook, and the main agent may miss the
-pending SDD reminder after a subagent analysis returns.
+tools and remains responsible for any edits.
 
-For OpenCode through oh-my-opencode and for OpenCode native plugin mode,
-subagent checkpoint events can also pass the tool result text into the command
-hook (`tool_response` in OMO, `tool_output` in native plugin mode). If an OMO
-plan/task agent edits code in a child context and returns a changed-files
-summary, the hook uses that summary to hydrate the parent-session state before
-checking SDD drift. This fallback is conservative: it only trusts checkpoint
-output lines that describe changed files and only records existing code paths
-inside the current workspace. If the child result says implementation/edit work
-completed but does not list files, or the checkpoint event has no text output at
-all, the hook can also scan recently modified code files in the current
-workspace (`SDD_DRIFT_CHECKPOINT_MTIME_SCAN=0` disables that fallback).
+For native OpenCode mode, subagent checkpoint events can pass the tool result
+text into the command hook as `tool_output`. If a child context edits code and
+returns a changed-files summary, the hook uses that summary to hydrate the
+parent-session state before checking SDD drift. This fallback is conservative:
+it only trusts checkpoint output lines that describe changed files and only
+records existing code paths inside the current workspace. If the child result
+says implementation/edit work completed but does not list files, or the
+checkpoint event has no text output at all, the hook can also scan recently
+modified code files in the current workspace
+(`SDD_DRIFT_CHECKPOINT_MTIME_SCAN=0` disables that fallback).
 
 Recommended `.gitignore` entries:
 
@@ -503,19 +378,31 @@ Recommended `.gitignore` entries:
 
 ## Build And Package
 
-The runtime package is still a single CommonJS hook file:
+The committed runtime artifacts are:
 
 ```text
 plugins/sdd-drift-check/sdd-drift-check-hook.js
+plugins/sdd-drift-check/sdd-drift-check-opencode.js
 ```
 
-The maintainable source lives under:
+The adapter sources live under:
 
 ```text
-plugins/sdd-drift-check/src/
+plugins/sdd-drift-check/src/core/output.js
+plugins/sdd-drift-check/src/core/runtime-config.js
+plugins/sdd-drift-check/src/core/sdd-rules.js
+plugins/sdd-drift-check/src/core/tool-events.js
+plugins/sdd-drift-check/src/adapters/claude-code/command-hook.js
+plugins/sdd-drift-check/src/adapters/opencode/native-plugin.js
 ```
 
-After changing `src/`, rebuild the distributable hook:
+`src/core/` contains runtime-neutral shared code used by the adapters:
+tool event classification, runtime config parsing, output protocol helpers, and
+SDD rule text/constants. The remaining drift-state logic still lives in the
+Claude command-hook adapter in this phase and can move into `src/core/`
+incrementally.
+
+After changing `src/`, rebuild the distributable artifacts:
 
 ```powershell
 cd plugins\sdd-drift-check
@@ -529,13 +416,9 @@ Then verify the committed artifact is in sync:
 npm run build:check
 ```
 
-`build:check` creates a temporary bundle and byte-compares it with
-`sdd-drift-check-hook.js`. If it fails, run `npm run build` and commit the
-updated hook file together with the source change.
-
-The native OpenCode adapter `sdd-drift-check-opencode.js` is not bundled by this
-step; it loads the shared hook file at runtime. For user installs, copy both the
-adapter and the rebuilt hook as shown above.
+`build:check` creates temporary artifacts and byte-compares them with both
+committed runtime files. If it fails, run `npm run build` and commit the updated
+artifact(s) together with the source change.
 
 ## Tests
 
@@ -687,8 +570,8 @@ opencode
 ```
 
 Use this only if the post-idle Stop prompt is more distracting than useful in
-your environment. In normal OpenCode/OMO usage, keep `PostToolUse` enabled; it
-handles the reliable model-visible continuation path.
+your environment. In normal native OpenCode usage, keep `tool.execute.after`
+enabled; it handles the reliable model-visible continuation path.
 
 Hook bug diagnostics:
 

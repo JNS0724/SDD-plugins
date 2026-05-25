@@ -859,7 +859,7 @@ if ($isNoPeerScenario) {
   if ($outText -match "SDD drift tool result enforcement") {
     throw "expected no SDD drift enforcement for $Scenario"
   }
-  if ($outText -match "SDD reconciliation review is now pending") {
+  if ($outText -match "SDD reconciliation review is now pending" -or $outText -match "SDD drift code review noted") {
     throw "expected no code-ahead-of-doc review for $Scenario"
   }
   if ($Scenario -eq "no-sdd-code" -and (Test-Path -LiteralPath (Join-Path $workRoot "sdd"))) {
@@ -881,12 +881,17 @@ if ($isNoPeerScenario) {
   throw "expected OpenCode output to include SDD drift tool result enforcement"
 }
 if ($Scenario -eq "multi-code-cascade") {
-  $codeEnforcementCount = [regex]::Matches(
-    $outText,
-    [regex]::Escape("SDD reconciliation review is now pending for this code-change batch")
-  ).Count
+  $codeEnforcementCount =
+    [regex]::Matches(
+      $outText,
+      [regex]::Escape("SDD reconciliation review is now pending for this code-change batch")
+    ).Count +
+    [regex]::Matches(
+      $outText,
+      [regex]::Escape("SDD drift code review noted.")
+    ).Count
   if ($codeEnforcementCount -ne 1) {
-    throw "expected exactly one code drift enforcement for consecutive code edits, got $codeEnforcementCount"
+    throw "expected exactly one code drift enforcement/reminder for consecutive code edits, got $codeEnforcementCount"
   }
 }
 if ($Scenario -eq "continue-after-sdd-code") {
@@ -938,12 +943,17 @@ if ($isDocRequiredScenario) {
   }
 }
 if ($Scenario -eq "code-no-doc-change") {
-  $codeEnforcementCount = [regex]::Matches(
-    $outText,
-    [regex]::Escape("SDD reconciliation review is now pending for this code-change batch")
-  ).Count
+  $codeEnforcementCount =
+    [regex]::Matches(
+      $outText,
+      [regex]::Escape("SDD reconciliation review is now pending for this code-change batch")
+    ).Count +
+    [regex]::Matches(
+      $outText,
+      [regex]::Escape("SDD drift code review noted.")
+    ).Count
   if ($codeEnforcementCount -ne 1) {
-    throw "expected exactly one full code drift enforcement for no-doc-change, got $codeEnforcementCount"
+    throw "expected exactly one code drift enforcement/reminder for no-doc-change, got $codeEnforcementCount"
   }
   $compactCodeReminderCount = [regex]::Matches(
     $outText,

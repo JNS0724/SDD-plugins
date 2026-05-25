@@ -485,10 +485,7 @@ try {
     hook.markCodeDriftNoticeEmitted(cwd, state, codeGaps)
     assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
     assert.strictEqual(hook.isSubagentCheckpointTool("background_output"), true)
-    assert.strictEqual(
-      hook.isSubagentCheckpointTool("call_omo_agent", { run_in_background: true }),
-      false
-    )
+    assert.strictEqual(hook.isSubagentCheckpointTool("background_task"), false)
 
     const pending = hook.buildSubagentCheckpointEnforcement(cwd, state)
     assert.strictEqual(pending.type, "code")
