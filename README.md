@@ -37,6 +37,12 @@ plugins/
 docs/
   sdd-drift-check/
     sdd-drift-check.md
+    opencode-omo-getting-started.md
+    sdd-drift-check-core-refactor-plan.zh.md
+    sdd-drift-check-hook.prd.zh.md
+    sdd-drift-check-hook.design.zh.md
+    sdd-drift-check-hook.refactor.zh.md
+    sdd-drift-check-hook.review.zh.md
 test/
   opencode-sdd-drift-e2e/
   claude-code-sdd-drift-e2e/
@@ -83,12 +89,24 @@ It supports:
 - Issue-ticket/DTS context suppression for code-ahead-of-doc reminders.
 - Bounded code-review reminders to avoid repeated tool-result injection loops.
 - Diagnostic JSONL logs with default 3-day retention.
+- Structured model-visible reminders wrapped as `<system-reminder>` with a
+  `[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - ...]` header, so Claude Code and
+  OpenCode receive the same high-priority SDD review language.
 
 See the plugin documentation for installation and behavior details:
 
 ```text
 docs/sdd-drift-check/sdd-drift-check.md
 ```
+
+Historical OpenCode + OMO bridge notes are kept separately:
+
+```text
+docs/sdd-drift-check/opencode-omo-getting-started.md
+```
+
+That file is legacy reference only. New OpenCode users should prefer the native
+OpenCode plugin entrypoint documented in `sdd-drift-check.md`.
 
 ## Build And Package
 
@@ -110,9 +128,15 @@ npm run build
 npm run build:check
 ```
 
-`npm run build` updates both distributable files. `npm run build:check`
-generates temporary artifacts and compares them with the committed files; a
-non-zero exit means a package artifact is stale.
+`npm run build` updates both distributable files:
+
+- `sdd-drift-check-hook.js`
+- `sdd-drift-check-opencode.js`
+
+`npm run build:check` generates temporary artifacts and compares them with the
+committed files; a non-zero exit means a package artifact is stale. Prompt-only
+changes still need this check because the generated hook artifact embeds
+`src/core/prompts.js`.
 
 ## Testing
 
@@ -132,6 +156,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\run-sdd-drift-real-matr
 
 The real matrix runs both OpenCode and Claude Code harnesses against DeepSeek
 and MiniMax when those providers are configured locally.
+
+The current structured-prompt implementation was regression-checked on
+2026-05-26 with:
+
+- OpenCode native plugin + DeepSeek
+- OpenCode native plugin + MiniMax
+- Claude Code command hook + DeepSeek
+- Claude Code command hook + MiniMax
 
 OpenCode real-workflow validation:
 

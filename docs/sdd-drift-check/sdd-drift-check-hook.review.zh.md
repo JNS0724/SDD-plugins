@@ -6,6 +6,11 @@
 **基准文档:** [sdd-drift-check-hook.design.zh.md](./sdd-drift-check-hook.design.zh.md) v1.1 / [sdd-drift-check-hook.prd.zh.md](./sdd-drift-check-hook.prd.zh.md) v1.2
 **审查者:** Claude（Opus 4.7）
 
+> 维护说明（2026-05-26）：本文件是历史设计符合性审查记录，保留当时的
+> 问题定位和处理记录。当前实现已完成多文件 core/adapter 重构，并以
+> Claude Code command hook 与 OpenCode native plugin 为主用户面；最新使用方式
+> 见 [sdd-drift-check.md](./sdd-drift-check.md)。
+
 本报告对照设计文档 v1.1 的每一项契约，给出实施现状的 ALIGNED / PARTIAL / MISSING 判定，并按行为正确性优先级排出修复顺序。
 
 ---

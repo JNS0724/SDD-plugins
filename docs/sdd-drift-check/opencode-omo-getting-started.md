@@ -1,10 +1,16 @@
-# sdd-drift-check 入门：让 OpenCode + OMO 别忘了同步 SDD
+# sdd-drift-check 旧版 OpenCode + OMO 桥接指南
 
-`sdd-drift-check` 是一个给 OpenCode + OMO 使用的 SDD 文档漂移检查 hook。
+> 当前推荐入口是 OpenCode 原生插件或 Claude Code command hook，见
+> [sdd-drift-check.md](./sdd-drift-check.md)。本文保留给仍在使用
+> OpenCode + OMO hook bridge 的项目作为历史兼容参考，不进入当前主验收矩阵。
+
+`sdd-drift-check` 是一个 SDD 文档漂移检查 hook。旧版 OpenCode + OMO
+桥接可以把 Claude Code 风格 hook 转接给 OpenCode，但 Stop continuation
+和部分 checkpoint 行为取决于 OMO 的桥接能力，稳定性不如 OpenCode 原生插件。
 
 它不负责“自动写好文档”，只负责在模型改代码或改 SDD 文档后提醒它：`design.md`、`tasks.md` 这些活跃 SDD 文档可能也要同步。换句话说，它是一个不太爱说话的流程提醒器，平时安静，文档落后时敲一下桌子。
 
-本文默认你已经会使用 OpenCode 和 OMO，只讲这个插件怎么装、怎么用、怎么排查。
+本文默认你已经会使用 OpenCode 和 OMO，只讲旧桥接方式怎么装、怎么用、怎么排查。新项目请优先使用原生 OpenCode 插件安装方式。
 
 ## 适用目录
 
@@ -51,9 +57,9 @@ sdd/changes/<change-id>/
 
 纯格式化、注释、测试脚手架这类无设计影响的改动，可以不更新文档，但模型需要先评审 SDD。
 
-## 推荐模式
+## 推荐模式（旧 OMO 桥接）
 
-OpenCode + OMO 建议启用：
+OpenCode + OMO 旧桥接建议启用：
 
 - `UserPromptSubmit`：捕获用户原始意图，用于识别 DTS / 问题单上下文。
 - `PreCompact`：上下文压缩前注入未完成的 SDD 状态摘要。
@@ -103,6 +109,17 @@ OpenCode + OMO 建议启用：
 SDD 审查完成后，模型应该回到原始用户任务/请求继续推进；只有原任务也完成时才应该最终回复。若你看到模型“审查完 SDD 就结束会话”，优先看日志里最后一次提醒是否来自 `emit_code_tool_reminder`、`emit_question_checkpoint_enforcement` 或 `stop_block_emit`，这些路径的提示词都会要求模型回到原任务。
 
 红字 `SDD drift question checkpoint` 容易误导。它不是 `console.error`，也不是 JS 异常；它是 hook 返回了结构化的 `permissionDecision: "deny"`，OpenCode/OMO 把“工具被拒绝”渲染成红色。它的目标是阻止模型在 SDD 还没处理时把问题抛给你。
+
+当前提示词正文会以这类结构出现：
+
+```text
+<system-reminder>
+[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - QUESTION CHECKPOINT]
+...
+</system-reminder>
+```
+
+这不是隐藏系统消息，而是通过 hook/tool 结果传给模型的高优先级可见提醒。正常情况下，模型应完成 SDD review/sync 后回到原来的任务，而不是把 SDD 审查当成最终任务。
 
 需要当成问题排查的情况是：
 

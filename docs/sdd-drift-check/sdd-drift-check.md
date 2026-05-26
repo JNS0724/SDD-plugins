@@ -55,6 +55,49 @@ The native OpenCode adapter only uses `session.prompt` as a best-effort Stop
 continuation path after parsing a structured `inject_prompt`; ordinary
 model-visible reminders still go through tool results.
 
+## Model-Visible Prompt Shape
+
+All SDD prompts now use the same structured wrapper:
+
+```text
+<system-reminder>
+[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - <TYPE>]
+
+STATE
+...
+
+REQUIRED ACTION
+...
+
+SDD EDIT RULES / ALIGNMENT RULES / EXIT CRITERIA
+...
+</system-reminder>
+```
+
+This is intentionally model-visible directive text, not a hidden system-role
+override. The hook still depends on the runtime channel that carries the text:
+Claude Code receives command-hook output, while native OpenCode receives tool
+result reminders and best-effort Stop continuation prompts.
+
+Prompt types currently include:
+
+| Type | When it appears |
+| --- | --- |
+| `CODE REVIEW NOTICE` | First weak notice after implementation code changes; it tells the model to keep working now and review SDD before final answer |
+| `CODE REVIEW CHECKPOINT` / `CODE REVIEW REMINDER` | Stage-end code review requirement for active `design.md` / `tasks.md` |
+| `PEER SYNC CHECKPOINT` / `PEER SYNC REMINDER` | Existing `design.md` and `tasks.md` peers are out of sync after an SDD document edit |
+| `PROPOSAL STAGE REMINDER` | `proposal.md` changed and `design.md` already exists |
+| `QUESTION CHECKPOINT` | A question/confirm/handoff tool is about to return control before SDD review is done |
+| `STOP ENFORCEMENT` | Claude-compatible Stop path found unresolved SDD work |
+| `COMPACTION CHECKPOINT RECOVERY` / `COMPACTION DRIFT SUMMARY` | `PreCompact` preserves pending SDD state through context compression |
+| `CARRY-OVER DRIFT` | New session sees unresolved project-level drift from prior sessions |
+| `ATTRIBUTION REVIEW` | Multiple active change directories could own the same code change |
+
+The section layout is part of the tested prompt contract. In particular, SDD
+edits must preserve existing headings/templates, modify the closest stale
+paragraph or task item, avoid adding new sections merely to satisfy the hook,
+and return to the original user task after the SDD checkpoint is handled.
+
 ## Behavior
 
 | Scenario | Result |
@@ -352,6 +395,13 @@ records such as `hook_start`, `posttooluse_no_output`, or
 reminder text and must not rewrite `.sdd-drift-report.md` when the report body
 is unchanged.
 
+In OpenCode, a `QUESTION CHECKPOINT` can be rendered as a red denied-tool result
+because the hook blocks the question/handoff tool before control returns to the
+user. That is expected when the text begins with `SDD drift question checkpoint`
+or the structured `<system-reminder>` wrapper. Treat it as a bug only if the
+model does not continue with SDD review, the same checkpoint loops repeatedly,
+or the diagnostic log records `handler_exception` / `circuit_open`.
+
 When the environment supports subagents and the current project allows them, the
 prompt suggests using a read-only subagent for SDD review. This is optional:
 without subagents, the main agent performs the same review with normal `Read`
@@ -502,6 +552,15 @@ Observed on 2026-05-16:
 | DeepSeek | `stop-only` | Failed: OpenCode reached `session.idle`, but Stop continuation was not invoked |
 | DeepSeek | `posttooluse-and-stop` | Passed: `tasks.md` was synchronized, no report remained |
 | Minimax M2.7 | `posttooluse-and-stop` | Passed: `tasks.md` was synchronized, no report remained |
+
+Observed on 2026-05-26 after the structured prompt wrapper change:
+
+| Runtime | Provider | Scenario | Result |
+| --- | --- | --- | --- |
+| OpenCode native plugin | DeepSeek | `multi-code-cascade` focused regression | Passed: model saw structured SDD directive and no unresolved report remained |
+| OpenCode native plugin | MiniMax | `multi-code-cascade` focused regression | Passed: model saw structured SDD directive and no unresolved report remained |
+| Claude Code command hook | DeepSeek | `multi-code-cascade` focused regression | Passed: Stop/checkpoint language preserved original-task resumption |
+| Claude Code command hook | MiniMax | `multi-code-cascade` focused regression | Passed: Stop/checkpoint language preserved original-task resumption |
 
 ## Debug Switches
 
