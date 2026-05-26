@@ -5,13 +5,13 @@
 **修订记录:** v1.3 — 同步当前实现目标用户面（Claude Code + OpenCode 原生插件），补充结构化提示词协议；v1.2 — ProjectState 文档同步证据改名为 `docSyncs`；补齐 Dispatcher / CircuitBreaker / Attribution 实施记录；补充 R8 诊断日志采样约束
 **作者:** Claude（Opus 4.7）+ 用户协同
 **输入文档:** [sdd-drift-check-hook.prd.zh.md](./sdd-drift-check-hook.prd.zh.md) v1.2
-**版本锁定:** `opencode-ai@1.2.27` + `@opencode-ai/plugin@1.2.27`；`oh-my-opencode@3.17.2` 仅作为旧桥接兼容参考
+**版本锁定:** `opencode-ai@1.2.27` + `@opencode-ai/plugin@1.2.27`
 
 **文档更新日志:**
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
-| v1.3 | 2026-05-26 | 明确当前主用户面为 Claude Code command hook 与 OpenCode native plugin；OMO 旧桥接不作为主验收目标；补充 `<system-reminder>` / `SYSTEM DIRECTIVE` 提示词结构与真实模型回归记录 |
+| v1.3 | 2026-05-26 | 明确当前主用户面为 Claude Code command hook 与 OpenCode native plugin；补充 `<system-reminder>` / `SYSTEM DIRECTIVE` 提示词结构与真实模型回归记录 |
 | v1.2 | 2026-05-22 | ProjectState 文档同步证据改名为 `docSyncs`；补齐 Dispatcher / CircuitBreaker / Attribution 实施记录；补充 R8 诊断日志采样约束 |
 | v1.1 | 2026-05-22 | 修正状态机 peer-exists 与 per-doc review 规则；补齐 `PreToolUse` 提问检查点；统一 ProjectState 存储路径；修正实施阶段依赖 |
 | v1.0 | 2026-05-22 | 初版方案设计 |
@@ -22,7 +22,7 @@
 
 ## 当前实现补充（2026-05-26）
 
-本设计最早以 Claude Code / OMO 共有 hook 面为起点。当前实现已经调整为两个平级用户面：
+当前实现有两个平级用户面：
 
 - **Claude Code**：使用 `sdd-drift-check-hook.js` command hook。
 - **OpenCode**：使用 `sdd-drift-check-opencode.js` native plugin adapter。
@@ -49,8 +49,6 @@ SDD EDIT RULES / ALIGNMENT RULES / EXIT CRITERIA
 ```
 
 该结构用于减少不同模型把提示当成普通日志忽略的概率，同时保持“SDD 审查是当前任务中的 checkpoint，不是最终任务”这一约束。实际回归已覆盖 Claude Code / OpenCode native 各自使用 DeepSeek 与 MiniMax 的重点场景。
-
-OMO 旧桥接若仍输出 Claude-style hook input，可继续 best-effort 使用，但不进入当前主验收矩阵。
 
 ---
 
@@ -81,7 +79,7 @@ OMO 旧桥接若仍输出 Claude-style hook input，可继续 best-effort 使用
 2. **状态分层**：session state（短命，per-sessionID）+ project state（长命，per-cwd）
 3. **决策外包**：模糊归属由 LLM 在 `ATTRIBUTION_REVIEW_RULES` 下评审；hook 只是上下文设置器与动作观察者
 4. **fail-open**：永不阻塞用户主流程；任何异常路径最终 `process.exit(0)`
-5. **能力探测**：Claude Code vs OpenCode native 自动降级；OMO 旧桥接仅按兼容输入 best-effort 处理
+5. **能力探测**：Claude Code vs OpenCode native 自动降级
 6. **行为可观测**：诊断日志事件名枚举化，可被外部工具 grep
 7. **向后兼容**：现有 `module.exports`、state schema、env 变量、`.sdd-drift-report.md` 格式全部保留
 
@@ -169,7 +167,6 @@ interface SessionState {
   attributionReviews: Record<Signature, AttributionReview>  // FR11 评审追踪
   noEditSession?: boolean                     // FR13 纯讨论标记
   circuitBreaker: Record<HookName, CircuitState>            // 熔断状态
-  subagentContext?: { parentSessionId: string }              // FR5 legacy bridge 路径
 }
 
 interface AttributionReview {
@@ -316,7 +313,7 @@ loadProjectState(cwd):
 
 ```
 §1   Config              env 解析（唯一 process.env 入口）
-§2   Caps                能力探测（Claude Code vs OpenCode native；legacy bridge best-effort）
+§2   Caps                能力探测（Claude Code vs OpenCode native）
 §3   Paths               toPosix / normalizeKey / isSddPath / CODE_EXT
 §4   FsLock              acquireFileLock / writeTextAtomic
 §5   Log                 writeDiagnosticLog + 错误率采样（R8）
@@ -330,7 +327,7 @@ loadProjectState(cwd):
 §13  StateMachine        ★ 新增：per-change-dir 状态机 + alignedAtMs（FR2/FR3）
 §14  Attribution         ★ 新增：归属决策（active TTL + LLM review fork）（FR8/FR11）
 §15  Gaps                drift / collectPeerGaps / collectCodeGaps
-§16  Checkpoint          subagent checkpoint + parentSessionId（FR5）
+§16  Checkpoint          subagent checkpoint（FR5）
 §17  Messages            buildToolEnforcement / buildCodeEnforcement / buildAttributionReview（FR11）
 §18  Notices             三套通知去重 + AttributionReview 节流
 §19  Report              refreshReport（始终先写盘再 emit）
@@ -440,7 +437,7 @@ const Actions = {
 
 ```
 1. 仅识别 question-like / handoff-like 工具：
-    - OpenCode / legacy bridge task-plan 相关的用户确认工具
+    - OpenCode task-plan 相关的用户确认工具
     - commit / continue / ask-user 类语义的交接动作
     - 非提问类工具直接 silent
 2. 加载 ProjectState，聚合所有未归档 ChangeDir 的 pending drift
@@ -482,7 +479,7 @@ const Actions = {
     (c) Code drift (in single attributed dir) → emit code enforcement
     (d) Stage reminder → emit stage reminder
     (e) 都没有 → silent
-7. 子代理 checkpoint 路径（task / call_omo_agent / delegate_task / background_output）：
+7. 子代理 checkpoint 路径（task / delegate_task / background_output）：
     - hydrateStateFromCheckpointOutput
     - 若有 pending → emit subagent checkpoint enforcement
 8. 提问/交接 checkpoint 不在 PostToolUse 处理；统一由 PreToolUse 处理，避免工具结果里重复注入同类提示。
@@ -529,10 +526,7 @@ const Actions = {
 1. DTS 单次检测 (R3):
     - if isDtsContextText(input.prompt):
         session.dtsContext = { active: true, source: "user-prompt", ... }
-2. parentSessionId 探测 (FR5):
-    - if input.parentSessionId (legacy bridge / subagent path 才有):
-        session.subagentContext = { parentSessionId: input.parentSessionId }
-3. 首事件检测 (FR6):
+2. 首事件检测 (FR6):
     - if !session.firstEventAt:
         session.firstEventAt = isoNow
         project = loadProjectState(cwd)
@@ -541,7 +535,7 @@ const Actions = {
             return [{
               EMIT_MESSAGE: buildClaudeCodeOutput("UserPromptSubmit", carryOverText),
             }, { SAVE_SESSION }]
-4. 否则:
+3. 否则:
     - log + return [SAVE_SESSION]
 ```
 
@@ -901,7 +895,7 @@ Active change-dir: sdd/changes/feature-x (TTL: 16h remaining)
 | **R1** | session.files LRU 上限 1000 | §7 SessionState.gc |
 | **R2** | transcript 增量 hydration（byteOffset cursor） | §9 Transcript.hydrateIncremental |
 | **R3** | DTS 检测在 UserPromptSubmit 单次完成；其余路径用缓存 | §10 DtsContext.detectOnce |
-| **R6** | OpenCode native checkpoint / tool output hydration；旧 OMO parentSessionId 辅助只作为兼容兜底 | §16 Checkpoint.fromParentSession |
+| **R6** | OpenCode native checkpoint / tool output hydration；mtime 启发式保留兜底 | §16 Checkpoint.fromParentSession |
 | **R7** | state.json 破损时 `*.corrupt-<ts>` 归档 | §7 SessionState.quarantineOnParseFail；§8 ProjectState 同 |
 | **R8** | 错误率采样汇总日志 | §5 Log.summary |
 | **R9** | stdin 5s 超时 | §6 Stdin.readWithTimeout |
@@ -930,14 +924,14 @@ e.g., alignedAtMs 回退 → 保留较大值
 
 ### 10.4 Caps 能力降级矩阵
 
-| 能力 | Claude Code | OpenCode native plugin | 旧 OMO bridge |
-|------|-------------|------------------------|---------------|
-| Tool result model-visible emit | 完整 | `tool.execute.after` 追加工具结果 | best-effort，取决于桥接 |
-| Question checkpoint | `permissionDecision: "deny"` | `tool.execute.before` deny / append context | best-effort，未命中时降级 |
-| Stop continuation | 完整 Stop block | `session.idle` 后 best-effort `session.prompt`；不可视为强 continuation | 历史上不稳定 |
-| UserPromptSubmit / user context | 完整 | `chat.message` 捕获 | best-effort |
-| PreCompact | 完整 | 无直接等价；依赖 OpenCode 可见事件能力 | best-effort |
-| subagent/checkpoint hydration | transcript/tool result | checkpoint tool output + mtime fallback | parentSessionId / bridge output fallback |
+| 能力 | Claude Code | OpenCode native plugin |
+|------|-------------|------------------------|
+| Tool result model-visible emit | 完整 | `tool.execute.after` 追加工具结果 |
+| Question checkpoint | `permissionDecision: "deny"` | `tool.execute.before` deny / append context |
+| Stop continuation | 完整 Stop block | `session.idle` 后 best-effort `session.prompt`；不可视为强 continuation |
+| UserPromptSubmit / user context | 完整 | `chat.message` 捕获 |
+| PreCompact | 完整 | 无直接等价；依赖 OpenCode 可见事件能力 |
+| subagent/checkpoint hydration | transcript/tool result | checkpoint tool output + mtime fallback |
 
 ---
 
@@ -1015,7 +1009,7 @@ J13 fixture（multi-dir，LLM 选 X）:
 | **P2** | Dispatcher（§22）+ 熔断 + R11 + 不变量断言 | NFR1 NFR5 | – |
 | **P3** | 容量与时延：R1 R2 R3 R8 | NFR2 NFR4 | – |
 | **P4** | ProjectState（§8）基础 + StateMachine（§13）+ alignedAtMs（FR2/FR3）+ FR12 归档即时反映 + FR13 纯讨论静默 | FR1 FR2 FR3 FR7 FR9 FR10 FR12 FR13 NFR7 | J1 J2 J3 J4 J5 J9 J10 J15 |
-| **P5** | UserPromptSubmit handler + PreCompact handler + R6 parentSessionId + PreToolUse question checkpoint | FR5（部分）FR6（CC 路径）FR7 NFR3 | J5 J8 J12 |
+| **P5** | UserPromptSubmit handler + PreCompact handler + R6 checkpoint hydration + PreToolUse question checkpoint | FR5（部分）FR6（CC 路径）FR7 NFR3 | J5 J8 J12 |
 | **P6** | Attribution（§14）+ LLM 评审（FR11）+ `ATTRIBUTION_REVIEW_RULES` 常量 + FR6 carry-over（完整）+ FR8 active TTL | FR4 FR6（完整）FR8 FR11 | J6 J7 J8 J11 J13 J14 J16 |
 
 **关键依赖**：
@@ -1124,13 +1118,10 @@ J13 fixture（multi-dir，LLM 选 X）:
 ```
 opencode-ai          1.2.27 (locked)
 @opencode-ai/plugin  1.2.27 (locked)
-oh-my-opencode       3.17.2 (legacy bridge reference only)
 ```
 
 升级风险点（不在本设计范围）：
 - OpenCode 升级 → plugin hook 事件结构、`session.idle` / `session.status`、tool result 追加方式可能变
-- OMO legacy bridge 升级 → PreCompact 实验事件、Stop 处理、UserPromptSubmit 桥接位置可能变
-- OC 升级 → tool.execute.before/after 事件结构可能变
 - 升级时先跑 16 个旅程的 snapshot 回归
 
 ---

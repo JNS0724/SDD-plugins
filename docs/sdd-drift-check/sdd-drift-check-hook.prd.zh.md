@@ -8,13 +8,13 @@
 **配套文档:**
 - [sdd-drift-check-hook.design.zh.md](./sdd-drift-check-hook.design.zh.md)：实施方案设计文档（PRD 的工程实现）
 
-**版本锁定:** `opencode-ai@1.2.27` + `@opencode-ai/plugin@1.2.27`；`oh-my-opencode@3.17.2` 仅作为旧桥接兼容参考
+**版本锁定:** `opencode-ai@1.2.27` + `@opencode-ai/plugin@1.2.27`
 
 **文档更新日志:**
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
-| v1.3 | 2026-05-26 | 当前主用户面调整为 Claude Code command hook 与 OpenCode native plugin；OMO 旧桥接降为历史兼容参考；明确 `<system-reminder>` / `SYSTEM DIRECTIVE` 是模型可见提示词契约 |
+| v1.3 | 2026-05-26 | 当前主用户面调整为 Claude Code command hook 与 OpenCode native plugin；明确 `<system-reminder>` / `SYSTEM DIRECTIVE` 是模型可见提示词契约 |
 | v1.2 | 2026-05-22 | 修正 peer 文件不存在时不触发 doc-doc drift；明确 `codeAheadOfDocs` 逐文档 review；新增 `PreToolUse` 提问/交接 checkpoint 范围；统一 ProjectState 存储路径 |
 | v1.1 | 2026-05-22 | 新增 J9–J16 旅程；FR11 改为 LLM 评审驱动归属；新增 FR12 / FR13；新增附录 A `ATTRIBUTION_REVIEW_RULES` 草案 |
 
@@ -47,7 +47,7 @@
 - Claude Code 原生 command hook。
 - OpenCode native plugin。
 
-旧版 OpenCode + OMO hook bridge 仍可作为历史兼容路径，但不作为当前主验收矩阵。OpenCode native 场景下，Stop continuation 仍是 best effort；可靠的模型可见提醒主要通过 `tool.execute.after` 的工具结果、`tool.execute.before` 的 question checkpoint，以及 compaction/carry-over 摘要完成。
+OpenCode native 场景下，Stop continuation 仍是 best effort；可靠的模型可见提醒主要通过 `tool.execute.after` 的工具结果、`tool.execute.before` 的 question checkpoint，以及 compaction/carry-over 摘要完成。
 
 模型收到的 SDD 提醒统一为结构化可见文本：
 
@@ -106,7 +106,7 @@ Day 3 (session C): 评审 tasks.md，发现 design.md 落后
 | **drift / 偏差** | 文档与代码、或文档之间，因编辑顺序产生的"待同步"状态 |
 | **alignment** | drift 的反面，所有相关文档与代码在编辑时序上一致 |
 | **session** | 一次 Claude Code 或 OpenCode 会话，由 `session_id` 标识 |
-| **subagent** | 子代理；通过 `task` / `call_omo_agent` / `delegate_task` 等工具调起 |
+| **subagent** | 子代理；通过 `task` / `delegate_task` 等工具调起 |
 | **changes mode** | 项目内已存在至少一个未归档的 change-dir 的状态 |
 | **vibe coding** | 用户跳过 SDD 流程、直接让 agent 改代码的非正式开发模式 |
 | **carry-over drift** | 跨会话遗留的、本会话尚未感知的 drift |
@@ -313,8 +313,8 @@ Day 3 (session C): 评审 tasks.md，发现 design.md 落后
 
 ### FR5 子代理编辑归属（驱动 J2 / J6 / J7 / J8）
 
-- 子代理通过 `task` / `call_omo_agent` / `delegate_task` 等工具被调起时，其代码改动归属到**父会话的 active change-dir**
-- OpenCode native 端利用 checkpoint tool output 与 mtime fallback 进一步加固；legacy bridge 若提供 `parentSessionId`，可作为额外证据
+- 子代理通过 `task` / `delegate_task` 等工具被调起时，其代码改动归属到**父会话的 active change-dir**
+- OpenCode native 端利用 checkpoint tool output 与 mtime fallback 进一步加固
 - CC 端保留现有 mtime + 输出文本启发式
 
 ### FR6 跨会话 carry-over 提醒（驱动 J4 / J6 / J7 / J8）
@@ -399,7 +399,7 @@ Day 3 (session C): 评审 tasks.md，发现 design.md 落后
 |---|---|
 | NFR1 | Hook 故障**永不**阻塞用户主流程（fail-open 兜底 `process.exit(0)`） |
 | NFR2 | 单次 hook 时延 P99 < 500ms（PreCompact / UserPromptSubmit < 300ms） |
-| NFR3 | 支持 Claude Code 原生 + OpenCode native plugin 两条主路径；OMO 3.17.2 旧桥接仅 best-effort 兼容，能力差异自动降级 |
+| NFR3 | 支持 Claude Code 原生 + OpenCode native plugin 两条主路径，能力差异自动降级 |
 | NFR4 | state.json + project.json 大小有界（state.files LRU 1000；project.json change-dir 上限自然取决于项目） |
 | NFR5 | 异常隔离（熔断：单 hook 类型连续 5 次失败 → 60s 静默） |
 | NFR6 | 所有状态变更与决策有诊断日志可追溯（`.sdd-drift-check.log.jsonl`） |
@@ -551,7 +551,7 @@ PostToolUse / Stop / UserPromptSubmit / PreCompact。OpenCode native adapter
 ### 8.1 PostToolUse（核心）
 
 - 收到 Edit / Write / MultiEdit / Read 事件 → 更新 SessionState 与 ProjectState
-- 若是 task / call_omo_agent / delegate_task / background_output → 走子代理归属路径
+- 若是 task / delegate_task / background_output → 走子代理归属路径
 - 决定是否在本次工具返回时立即注入"实时"提醒（仅强 drift 场景）
 - **归属决策分支**：
   - 清晰归属（J1 / J2 / J3 / J4 / J5 / J6 / J7 / J8）→ activeChangeDir + TTL 算法路径
@@ -780,7 +780,7 @@ PostToolUse / Stop / UserPromptSubmit / PreCompact。OpenCode native adapter
 | FR2 实现阶段识别（J1/J2 不误报） | 当前固定按时序判 drift | **缺**：需新规则—— SDD 文档本会话已编辑 + 紧随其后的代码编辑视为正常实现 |
 | FR3 完成基线刷新 | 部分有（codeReviewConfirmations）| **缺**：需在 Stop 无 drift 时自动刷新基线时间戳 |
 | FR4 双向 doc-doc drift | [CHANGE_DOC_REQUIREMENTS](./sdd-drift-check-hook.js) 已支持 tasks→design | **跨会话部分缺**：需要 project.json 承载 |
-| FR5 子代理归属 | mtime + 文本启发式（[L1593-1791](./sdd-drift-check-hook.js)） | **加固**：OpenCode native 用 checkpoint output 增强；legacy bridge 的 parentSessionId 仅作额外证据；现有启发式保留兜底 |
+| FR5 子代理归属 | mtime + 文本启发式（[L1593-1791](./sdd-drift-check-hook.js)） | **加固**：OpenCode native 用 checkpoint output 增强；现有启发式保留兜底 |
 | FR6 跨会话 carry-over 提醒 | 无 | **缺**：需 UserPromptSubmit handler |
 | FR7 Stop 强制检测 / 提问前 checkpoint | 当前 Stop 已检测；PreToolUse question checkpoint 已有初步实现 | **细化**：与 FR2 / FR3 / ProjectState 联动，统一节流与降级规则 |
 | FR8 active change-dir + TTL | 无 | **缺**：需 project.json 维护 |
@@ -791,7 +791,7 @@ PostToolUse / Stop / UserPromptSubmit / PreCompact。OpenCode native adapter
 | FR13 纯讨论 Stop 静默 | 现有 Stop 在 hydrate 后总会跑 collect | **加守门**：本会话无 edit 事件时整段短路 |
 | NFR1 永不阻塞 | `process.exit(0)` 兜底 | **保持** |
 | NFR2 时延 P99 < 500ms | 长会话 transcript 全量回放有风险 | **改为增量 hydration**（refactor doc R2）|
-| NFR3 Claude Code + OpenCode native 兼容 | 已两端支持 | **加固**：双向能力探测；旧 OMO bridge best-effort |
+| NFR3 Claude Code + OpenCode native 兼容 | 已两端支持 | **加固**：双向能力探测 |
 | NFR4 状态有界 | state.files 无上限 | **加 LRU**（refactor R1） |
 | NFR5 异常隔离 | 无熔断 | **加熔断**（refactor doc）|
 | NFR6 诊断日志 | 已有 | **保持** |
@@ -871,7 +871,7 @@ PRD 落地建议路径：
 2. **阶段 1**：依 [design.zh.md](./sdd-drift-check-hook.design.zh.md) 的 P1–P3 落地结构与防御性修复（不依赖 PRD 业务需求）
 3. **阶段 2**：实现 FR1 / FR8 / FR12（project.json + active change-dir + TTL + 归档即时反映），无新业务规则，纯持久化扩展
 4. **阶段 3**：实现 FR2 / FR3 / FR13（J1 / J2 / J3 / J10 的正确判定 + 纯讨论静默），关键业务变化点
-5. **阶段 4**：实现 FR5 加固（OpenCode native checkpoint output / legacy parentSessionId）+ FR6（UserPromptSubmit / chat.message 注入）
+5. **阶段 4**：实现 FR5 加固（OpenCode native checkpoint output）+ FR6（UserPromptSubmit / chat.message 注入）
 6. **阶段 5**：实现 FR11（LLM 评审驱动归属 + `ATTRIBUTION_REVIEW_RULES` 常量 + 注入逻辑），驱动 J11 / J13 / J14
 7. **阶段 6**：所有 16 个旅程的 e2e 验收测试
 

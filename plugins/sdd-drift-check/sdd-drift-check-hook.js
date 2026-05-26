@@ -467,9 +467,6 @@ var require_user_prompt_submit = __commonJS({
       const { state, project } = ctx;
       const isFirstEvent = !state.firstEventAt;
       if (isFirstEvent) state.firstEventAt = (/* @__PURE__ */ new Date()).toISOString();
-      if (input.parentSessionId) {
-        state.subagentContext = { parentSessionId: input.parentSessionId };
-      }
       if (project) ctx.applySessionToProject(ctx.cwd, project, state, ctx.sessionID);
       const reminder = isFirstEvent && !ctx.isDtsContextActive(state) && ctx.shouldEmitCarryOverNotice(state, project) ? ctx.formatCarryOverReminder(project) : "";
       if (reminder) ctx.markCarryOverNoticeEmitted(state, project, input.hook_event_name);

@@ -65,9 +65,8 @@ preserves active SDD drift or question-checkpoint state across compaction.
 handoff tools, so a pending SDD reminder can deny the question call before the
 model asks the user about commit/next steps. `PostToolUse` uses an explicit
 matcher for file tools, subagent result checkpoints, and question tools,
-avoiding the broad
-`matcher: "*"` shape that can make OpenCode/oh-my-opencode run the hook for
-unrelated tools. For Claude Code,
+avoiding the broad `matcher: "*"` shape that can run the hook for unrelated
+tools. For Claude Code,
 `PostToolUse` returns
 `additionalContext`, and `Stop` returns `{"decision":"block","reason":"..."}`
 when synchronization or review is still missing.

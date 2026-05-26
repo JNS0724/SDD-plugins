@@ -37,7 +37,7 @@ plugins/
 docs/
   sdd-drift-check/
     sdd-drift-check.md
-    opencode-omo-getting-started.md
+    getting-started.md
     sdd-drift-check-core-refactor-plan.zh.md
     sdd-drift-check-hook.prd.zh.md
     sdd-drift-check-hook.design.zh.md
@@ -99,14 +99,11 @@ See the plugin documentation for installation and behavior details:
 docs/sdd-drift-check/sdd-drift-check.md
 ```
 
-Historical OpenCode + OMO bridge notes are kept separately:
+For a quick installation and first-use guide:
 
 ```text
-docs/sdd-drift-check/opencode-omo-getting-started.md
+docs/sdd-drift-check/getting-started.md
 ```
-
-That file is legacy reference only. New OpenCode users should prefer the native
-OpenCode plugin entrypoint documented in `sdd-drift-check.md`.
 
 ## Build And Package
 
@@ -145,7 +142,6 @@ Static and fake-provider tests:
 ```powershell
 cd test\opencode-sdd-drift-e2e
 npm test
-npm run e2e -- -Scenario code -HookMode posttooluse-and-stop
 ```
 
 Real provider matrix, after local provider keys are configured:
@@ -165,17 +161,13 @@ The current structured-prompt implementation was regression-checked on
 - Claude Code command hook + DeepSeek
 - Claude Code command hook + MiniMax
 
-OpenCode real-workflow validation:
+OpenCode native real-provider validation:
 
 ```powershell
 cd test\opencode-sdd-drift-e2e
-npm run e2e:real:snake -- -Provider deepseek
-npm run e2e:real:silent -- -Provider deepseek
+npm run e2e:real -- -Provider deepseek
+npm run e2e:real -- -Provider minimax
 ```
-
-The silent check reuses the latest generated Snake workroot and verifies that
-unrelated scratch-file reads/writes do not emit model-visible SDD reminders and
-do not rewrite an unchanged `.sdd-drift-report.md`.
 
 ## Local Secrets
 

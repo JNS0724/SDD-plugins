@@ -5,7 +5,7 @@
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
 | v1.2 | 2026-05-26 | 同步当前实现状态：Claude Code / OpenCode 原生为目标用户面；core 模块已拆分到 `src/core/`；模型提示词统一为 `<system-reminder>` + `SYSTEM DIRECTIVE` 结构，并补充真实模型回归记录。 |
-| v1.1 | 2026-05-26 | 根据评审记录补充 PRD/design 对齐关系、FR11 当前状态、核心模块依赖图、3A 安全网拆分、阶段回滚约定和 OMO 边界。 |
+| v1.1 | 2026-05-26 | 根据评审记录补充 PRD/design 对齐关系、FR11 当前状态、核心模块依赖图、3A 安全网拆分和阶段回滚约定。 |
 | v1.0 | 2026-05-22 | 初始核心重构方案。 |
 
 ## 目标
@@ -142,7 +142,6 @@ src/adapters/opencode/native-plugin.js
 ```
 
 当前目标用户面是 Claude Code command hook 和 OpenCode native plugin。
-OMO 旧桥接仅保留历史兼容文档，不作为本重构方案的验收目标。
 
 ## 执行原则
 
@@ -638,7 +637,6 @@ npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
 | Windows 路径大小写和斜杠问题 | `test-core-paths.cjs` 覆盖 |
 | core 模块互相引用形成环 | 依赖图按 L0-L7 单向检查 |
 | FR11 attribution 迁移后行为变弱 | 先补 attribution characterization，再迁移实现 |
-| OMO 旧桥接行为被误当目标用户面 | 文档明确 OMO 非目标用户面，验收只覆盖 Claude Code / OpenCode |
 
 ## 分阶段完成标准
 
@@ -649,7 +647,7 @@ npm run e2e:real -- -Provider minimax -Scenario multi-code-cascade
 - `npm test` 成功。
 - 发布件 `sdd-drift-check-hook.js` 和 `sdd-drift-check-opencode.js` 已同步。
 - 不改变用户安装路径。
-- 不重新引入 OMO 作为目标用户面。旧 OMO 桥接若仍输出 Claude-style hook input，可能 best-effort 可用，但不进入本方案验收矩阵；推荐用户面是 Claude Code command hook 或 OpenCode native plugin。
+- 推荐用户面是 Claude Code command hook 或 OpenCode native plugin。
 
 ---
 
@@ -785,15 +783,6 @@ PreCompact 相关：
 - 阶段失败时 `git reset` 到上阶段 commit
 - 每阶段 commit 信息固定格式（如 `refactor(core/3D): extract session state`）
 
-#### Issue 10：OMO 用户迁移路径未交代
-
-文档明示「不重新引入 OMO 作为目标用户面」。但当前 `test/opencode-sdd-drift-e2e/.claude/settings.json` 走 OMO 桥接。重构后：
-
-- OMO 用户继续用 command-hook（OMO 桥接 → command-hook → core）？
-- 还是建议迁移到 native-plugin？
-
-**建议**：补一节"现有 OMO 用户迁移"——若 command-hook 仍兼容 OMO 桥接输入，他们无需迁移；若行为有差异，列出迁移步骤。
-
 ### 低严重度（可解决）
 
 #### Issue 11：验收命令全为 PowerShell
@@ -841,13 +830,12 @@ npm test
 | 风险表覆盖关键风险（state 漂移 / 输出差异 / prompt 丢失 / report 刷新 / Windows 路径）| "风险和控制" |
 | 最终验收含真实模型 E2E（deepseek / minimax）| "最终验收" |
 | Build + test 作为每阶段闸门 | "分阶段完成标准" |
-| OMO pivot 明示 | "分阶段完成标准" |
 | 适度禁止 big-bang 大搬迁 | "执行原则" |
 
 ### 推荐处理顺序
 
 1. **优先解决 Issue 1–4**（与 design 关系 + FR11 范围 + 3A 拆分 + 依赖图）——影响整体执行可行性
-2. **Issue 5–10 在每阶段动工前精细化**
+2. **Issue 5–9 在每阶段动工前精细化**
 3. **Issue 11–15 在文档定稿时一并修**
 
 ### 评审处理记录 v1.1
@@ -863,7 +851,6 @@ npm test
 | Issue 7 | 接收并修正口径 | 说明 `collectCombined*` / `buildQuestionCheckpointEnforcement` 当前已存在，本轮是迁移到 core。 |
 | Issue 8 | 接收 | 3D / 3G 明确 PreCompact 状态和 handler 注册边界。 |
 | Issue 9 | 部分接收 | 增加每阶段 commit 和失败处理约定，但不默认推荐 destructive reset；已推送提交优先 revert 或新分支重做。 |
-| Issue 10 | 反驳迁移路径要求，接收边界说明 | OMO 不再作为目标用户面；旧桥接只视为 best-effort，不进入验收矩阵。 |
 | Issue 11 | 接收 | 最终验收和阶段验收补 bash 命令。 |
 | Issue 12 | 接收 | 执行原则说明 `src/index.js` 是导出聚合入口。 |
 | Issue 13 | 接收 | 3G 增加 prompt 原文测试锚点。 |

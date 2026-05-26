@@ -6,10 +6,7 @@ param(
   [string]$Scenario = "multi-code-cascade",
 
   [ValidateSet("opencode", "claude", "both")]
-  [string]$Target = "both",
-
-  [ValidateSet("stop-only", "posttooluse-and-stop")]
-  [string]$OpenCodeHookMode = "posttooluse-and-stop"
+  [string]$Target = "both"
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +17,7 @@ foreach ($providerName in $providers) {
   if ($Target -eq "opencode" -or $Target -eq "both") {
     Push-Location (Join-Path $testRoot "opencode-sdd-drift-e2e")
     try {
-      & npm.cmd run e2e:real -- -Provider $providerName -Scenario $Scenario -HookMode $OpenCodeHookMode
+      & npm.cmd run e2e:real -- -Provider $providerName
       if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
       }

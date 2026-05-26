@@ -476,46 +476,21 @@ artifact(s) together with the source change.
 cd test\opencode-sdd-drift-e2e
 npm install
 npm test
-npm run e2e -- -Scenario sdd-design
-npm run e2e -- -Scenario sdd-cascade
-npm run e2e -- -Scenario code
-npm run e2e -- -Scenario code-no-doc-change
 ```
 
-Real model checks:
+OpenCode native real model checks:
 
 ```powershell
-npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode stop-only
-npm run e2e:real -- -Provider deepseek -Scenario design-cascade -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider minimax -Scenario design-cascade -HookMode posttooluse-and-stop
+npm run e2e:real -- -Provider deepseek
+npm run e2e:real -- -Provider minimax
 ```
 
-Real model semantic-drift matrix:
-
-```powershell
-npm run e2e:real -- -Provider deepseek -Scenario optimization-doc-required -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider deepseek -Scenario behavior-doc-required -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider deepseek -Scenario api-contract-doc-required -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider deepseek -Scenario error-handling-doc-required -HookMode posttooluse-and-stop
-
-npm run e2e:real -- -Provider minimax -Scenario optimization-doc-required -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider minimax -Scenario behavior-doc-required -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider minimax -Scenario api-contract-doc-required -HookMode posttooluse-and-stop
-npm run e2e:real -- -Provider minimax -Scenario error-handling-doc-required -HookMode posttooluse-and-stop
-```
-
-These scenarios cover performance strategy, user-visible behavior, API contract,
-and error-handling drift. They fail if `design.md` only receives a marker or
+The static/fake-provider `npm test` suite covers the semantic drift cases,
+including performance strategy, user-visible behavior, API contract, and
+error-handling drift. Those cases fail if `design.md` only receives a marker or
 completion note while stale facts still contradict the changed code.
 
-Real OpenCode workflow and silent-regression checks:
-
-```powershell
-npm run e2e:real:snake -- -Provider deepseek
-npm run e2e:real:silent -- -Provider deepseek
-```
-
-Native OpenCode plugin check:
+Native OpenCode plugin check is also available under the explicit alias:
 
 ```powershell
 npm run e2e:real:native -- -Provider deepseek
@@ -544,14 +519,6 @@ Run the same real-model scenario across both harnesses:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File test\run-sdd-drift-real-matrix.ps1 -Provider deepseek -Scenario multi-code-cascade -Target both
 ```
-
-Observed on 2026-05-16:
-
-| Provider | Hook mode | Result |
-| --- | --- | --- |
-| DeepSeek | `stop-only` | Failed: OpenCode reached `session.idle`, but Stop continuation was not invoked |
-| DeepSeek | `posttooluse-and-stop` | Passed: `tasks.md` was synchronized, no report remained |
-| Minimax M2.7 | `posttooluse-and-stop` | Passed: `tasks.md` was synchronized, no report remained |
 
 Observed on 2026-05-26 after the structured prompt wrapper change:
 

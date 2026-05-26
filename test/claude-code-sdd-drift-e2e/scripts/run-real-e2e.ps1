@@ -173,7 +173,7 @@ $settingsObject = [ordered]@{
     )
     PostToolUse = @(
       [ordered]@{
-        matcher = "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|call_omo_agent|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm"
+        matcher = "Read|Edit|Write|MultiEdit|read|edit|write|multiedit|multi_edit|Task|task|background_output|delegate_task|Question|question|AskUserQuestion|ask_user_question|askuserquestion|Confirm|confirm"
         hooks = @(
           [ordered]@{
             type = "command"
