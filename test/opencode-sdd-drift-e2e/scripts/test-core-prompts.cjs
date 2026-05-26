@@ -32,6 +32,12 @@ const codeGaps = [
 ]
 
 const peerPrompt = prompts.buildToolEnforcement(peerGaps)
+assert.match(peerPrompt, /<system-reminder>/)
+assert.match(peerPrompt, /\[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - PEER SYNC CHECKPOINT\]/)
+assert.match(peerPrompt, /\nSTATE\n/)
+assert.match(peerPrompt, /\nREQUIRED ACTION\n/)
+assert.match(peerPrompt, /\nSDD EDIT RULES\n/)
+assert.match(peerPrompt, /\nEXIT CRITERIA\n/)
 assert.match(peerPrompt, /SDD drift tool result enforcement/)
 assert.match(peerPrompt, /Do not add new sections\./)
 assert.match(peerPrompt, /Do not rewrite the document template\./)
@@ -43,12 +49,16 @@ assert.match(
 )
 
 const codePrompt = prompts.buildCodeEnforcement(cwd, codeGaps)
+assert.match(codePrompt, /\[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - CODE REVIEW CHECKPOINT\]/)
+assert.match(codePrompt, /\nALIGNMENT RULES\n/)
 assert.match(codePrompt, /implementation code/)
 assert.match(codePrompt, /src[\\/]feature\.ts/)
 assert.match(codePrompt, /Do not add new sections\./)
 assert.match(codePrompt, /read-only review subagent/)
 
 const checkpoint = prompts.buildQuestionCheckpointMessage("inner reminder")
+assert.match(checkpoint, /\[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - QUESTION CHECKPOINT\]/)
+assert.match(checkpoint, /\nPENDING SDD REMINDER\n/)
 assert.match(checkpoint, /SDD drift question checkpoint/)
 assert.match(checkpoint, /inner reminder/)
 assert.match(checkpoint, /return to the original user task/)
