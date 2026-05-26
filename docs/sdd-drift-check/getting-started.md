@@ -12,7 +12,7 @@
 
 | 运行环境 | 使用文件 | 推荐场景 |
 | --- | --- | --- |
-| OpenCode | `sdd-drift-check-opencode.js` + `sdd-drift-check-hook.js` | OpenCode 原生插件方式，推荐给 OpenCode 用户 |
+| OpenCode | `sdd-drift-check-opencode.js` | OpenCode 原生插件方式，推荐给 OpenCode 用户 |
 | Claude Code | `sdd-drift-check-hook.js` | Claude Code command hook |
 
 OpenCode 用户请使用原生插件入口；Claude Code 用户请使用 command hook 入口。
@@ -47,31 +47,11 @@ sdd/changes/<change-id>/
 
 ```powershell
 New-Item -ItemType Directory -Force .opencode\plugins
-New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
 
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js .opencode\plugins\sdd-drift-check-opencode.js
-Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js
 ```
 
-OpenCode 会自动加载 `.opencode/plugins/` 下的本地插件。原生插件会调用共享 hook：
-
-```text
-.opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js
-```
-
-如果你想把 hook 放到其他位置，启动 OpenCode 前设置：
-
-```powershell
-$env:SDD_DRIFT_HOOK_SCRIPT = "E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js"
-opencode
-```
-
-如果 `node` 不在 `PATH`：
-
-```powershell
-$env:SDD_DRIFT_NODE = "C:\Program Files\nodejs\node.exe"
-opencode
-```
+OpenCode 会自动加载 `.opencode/plugins/` 下的本地插件。`sdd-drift-check-opencode.js` 是自包含发布件，不需要再复制 Claude hook，也不需要设置 `SDD_DRIFT_HOOK_SCRIPT`。
 
 ## Claude Code 安装
 

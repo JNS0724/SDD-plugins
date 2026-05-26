@@ -22,8 +22,9 @@ This package has two entrypoints:
 Both entrypoints share the same drift rules, state files, reports, and
 diagnostic logs. The native OpenCode adapter is intentionally separate from the
 Claude-compatible command hook: Claude uses `sdd-drift-check-hook.js`, while
-pure OpenCode loads `sdd-drift-check-opencode.js` as a plugin adapter and calls
-the shared hook file behind the scenes.
+pure OpenCode loads the self-contained `sdd-drift-check-opencode.js` plugin
+artifact. The two artifacts are built from shared source modules, but neither
+runtime requires users to install the other runtime's JS file.
 
 The native OpenCode adapter listens to `chat.message`, `tool.execute.before`,
 `tool.execute.after`, `session.idle`, and OpenCode's `session.status` idle
@@ -50,7 +51,7 @@ best-effort continuation attempt plus final report/log checkpoint. If you prefer
 no OpenCode Stop continuation attempt at all, set
 `SDD_DRIFT_OPENCODE_STOP_MODE=report-only`.
 
-The shared command hook does not use `console.error` or `messages.transform`.
+The Claude command hook does not use `console.error` or `messages.transform`.
 The native OpenCode adapter only uses `session.prompt` as a best-effort Stop
 continuation path after parsing a structured `inject_prompt`; ordinary
 model-visible reminders still go through tool results.
@@ -199,38 +200,16 @@ numeric rotation files such as `sdd-drift-check.log.jsonl.1`.
 
 ### OpenCode Native Plugin
 
-Copy both files: the native adapter goes under `.opencode/plugins/`, while the
-shared command hook stays outside that directory so OpenCode does not try to load
-it as a second plugin.
+Copy the OpenCode artifact under `.opencode/plugins/`:
 
 ```powershell
 New-Item -ItemType Directory -Force .opencode\plugins
-New-Item -ItemType Directory -Force .opencode\hooks\sdd-drift-check
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js .opencode\plugins\sdd-drift-check-opencode.js
-Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js
 ```
 
 OpenCode automatically loads local plugins from `.opencode/plugins/`.
-The adapter finds the shared hook at:
-
-```text
-.opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js
-```
-
-Override the path if needed:
-
-```powershell
-$env:SDD_DRIFT_HOOK_SCRIPT = "E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js"
-opencode
-```
-
-The native adapter runs the shared hook with `node`. If `node` is not on `PATH`,
-set:
-
-```powershell
-$env:SDD_DRIFT_NODE = "C:\Program Files\nodejs\node.exe"
-opencode
-```
+`sdd-drift-check-opencode.js` is self-contained; do not also copy
+`sdd-drift-check-hook.js` into `.opencode/plugins/`.
 
 ### Claude Code Or Claude-Compatible Hook Config
 
@@ -238,7 +217,8 @@ For Claude Code, this minimal Stop-only config captures `UserPromptSubmit`
 context and does not enable `PostToolUse`:
 
 ```powershell
-New-Item -ItemType Directory -Force .claude
+New-Item -ItemType Directory -Force .claude\hooks\sdd-drift-check
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .claude\hooks\sdd-drift-check\sdd-drift-check-hook.js
 ```
 
 `.claude/settings.json`:
@@ -251,7 +231,7 @@ New-Item -ItemType Directory -Force .claude
         "hooks": [
           {
             "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+            "command": "node .claude/hooks/sdd-drift-check/sdd-drift-check-hook.js"
           }
         ]
       }
@@ -262,7 +242,7 @@ New-Item -ItemType Directory -Force .claude
         "hooks": [
           {
             "type": "command",
-            "command": "node .opencode/hooks/sdd-drift-check/sdd-drift-check-hook.js"
+            "command": "node .claude/hooks/sdd-drift-check/sdd-drift-check-hook.js"
           }
         ]
       }

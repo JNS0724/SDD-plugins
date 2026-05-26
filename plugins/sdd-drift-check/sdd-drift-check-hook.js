@@ -4003,18 +4003,23 @@ var isOpenCodeHookInput = (input) => {
   if (OUTPUT_MODE === "claude" || OUTPUT_MODE === "claude-code") return false;
   return input?.hook_source === "opencode-plugin";
 };
+var createRuntimeOutputHelpers = (options = {}) => createOutputHelpers({
+  isOpenCodeHookInput,
+  opencodeStopReportOnly: OPENCODE_STOP_REPORT_ONLY,
+  strictBlock: STRICT_BLOCK,
+  stdout: options.stdout || process.stdout,
+  stderr: options.stderr || process.stderr,
+  exit: options.exit || process.exit
+});
+var defaultOutputHelpers = createRuntimeOutputHelpers();
 var {
   buildClaudeCodeOutput,
   buildPreToolUseDenyOutput,
   buildStopOutput,
   emitEnforcement,
   emitStopEnforcement
-} = createOutputHelpers({
-  isOpenCodeHookInput,
-  opencodeStopReportOnly: OPENCODE_STOP_REPORT_ONLY,
-  strictBlock: STRICT_BLOCK
-});
-var dispatch = async (input) => {
+} = defaultOutputHelpers;
+var dispatch = async (input, options = {}) => {
   const cwd = input.cwd || process.cwd();
   if (!hasSddWorkspace(cwd)) return;
   const sessionID = input.session_id || "default";
@@ -4060,6 +4065,8 @@ var dispatch = async (input) => {
     };
     const transcriptPathForContext = resolveTranscriptPath(input);
     const dtsContextActive = updateDtsContextFromInput(state, input, transcriptPathForContext);
+    const outputHelpers = options.stdout || options.stderr || options.exit ? createRuntimeOutputHelpers(options) : defaultOutputHelpers;
+    const stdout = options.stdout || process.stdout;
     const handlerContext = {
       cwd,
       sessionID,
@@ -4067,7 +4074,7 @@ var dispatch = async (input) => {
       project,
       applySessionToProject,
       applyToolRecord,
-      buildClaudeCodeOutput,
+      buildClaudeCodeOutput: outputHelpers.buildClaudeCodeOutput,
       buildCodeEnforcement,
       buildCodeToolReminder,
       buildAttributionReviewPrompt,
@@ -4090,8 +4097,8 @@ var dispatch = async (input) => {
       collectCombinedCodeGaps,
       collectCombinedPeerGaps,
       drift,
-      emitEnforcement,
-      emitStopEnforcement,
+      emitEnforcement: outputHelpers.emitEnforcement,
+      emitStopEnforcement: outputHelpers.emitStopEnforcement,
       formatCarryOverReminder,
       getToolEventKey,
       getToolFilePath,
@@ -4131,7 +4138,7 @@ var dispatch = async (input) => {
       takeAttributionReviewPrompts,
       transcriptPathForContext,
       writeDiagnosticLog,
-      writeStdout: (message) => process.stdout.write(message)
+      writeStdout: (message) => stdout.write(message)
     };
     writeDiagnosticLog(cwd, {
       event: "hook_start",
@@ -4218,6 +4225,44 @@ var dispatch = async (input) => {
 var main = async () => {
   const input = parseHookInput(await readStdin(STDIN_TIMEOUT_MS));
   await dispatch(input);
+};
+var runHookInput = async (input, options = {}) => {
+  let stdout = "";
+  let stderr = "";
+  let status = 0;
+  const stdoutStream = {
+    write: (chunk) => {
+      stdout += String(chunk || "");
+      return true;
+    }
+  };
+  const stderrStream = {
+    write: (chunk) => {
+      stderr += String(chunk || "");
+      return true;
+    }
+  };
+  const exit = (code = 0) => {
+    status = Number.isFinite(Number(code)) ? Number(code) : 0;
+    const error = new Error(`sdd-drift-check hook requested exit ${status}`);
+    error.__sddDriftHookExit = true;
+    throw error;
+  };
+  try {
+    await dispatch(input, {
+      ...options,
+      stdout: options.stdout || stdoutStream,
+      stderr: options.stderr || stderrStream,
+      exit: options.exit || exit
+    });
+  } catch (error) {
+    if (!error?.__sddDriftHookExit) throw error;
+  }
+  return {
+    status,
+    stdout,
+    stderr
+  };
 };
 if (require.main === module) {
   main().catch((err) => {
@@ -4313,6 +4358,7 @@ if (require.main === module) {
     acceptUnresolvedAttributionReviews,
     resolveReadOnlyAttributionReviews,
     runActions,
+    runHookInput,
     saveProjectState,
     saveState,
     writeDiagnosticLog,

@@ -27,10 +27,7 @@ const makeClient = () => {
   }
 }
 
-const makeRunner = (handler) => async (hookScript, hookInput) => {
-  assert.ok(hookScript.endsWith("sdd-drift-check-hook.js"))
-  return handler(hookInput)
-}
+const makeRunner = (handler) => async (hookInput) => handler(hookInput)
 
 const run = async () => {
   {
@@ -44,7 +41,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         calls.push(hookInput)
         assert.strictEqual(hookInput.hook_event_name, "PostToolUse")
         assert.strictEqual(hookInput.tool_name, "edit")
@@ -98,7 +95,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         assert.strictEqual(hookInput.hook_source, "opencode-plugin")
         assert.strictEqual(hookInput.hook_event_name, "PostToolUse")
         assert.strictEqual(hookInput.session_id, "session-native-peer")
@@ -136,6 +133,39 @@ const run = async () => {
   }
 
   {
+    const cwd = path.join(tmpRoot, "native-integrated")
+    const dir = path.join(cwd, "sdd", "changes", "alpha")
+    write(path.join(dir, "design.md"), "# Design\n")
+    write(path.join(dir, "tasks.md"), "# Tasks\n")
+
+    const hooks = await native.SddDriftCheckOpenCode({
+      directory: cwd,
+      worktree: cwd,
+      client: makeClient(),
+    })
+    const output = {
+      title: "edited",
+      output: "updated design.md",
+      metadata: {},
+    }
+    await hooks["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "session-native-integrated",
+        callID: "call-integrated",
+        args: {
+          filePath: "sdd/changes/alpha/design.md",
+        },
+      },
+      output
+    )
+
+    assert.match(output.output, /updated design\.md/)
+    assert.match(output.output, /tasks\.md/)
+    assert.strictEqual(output.metadata.sddDriftCheck.injected, true)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "native-subagent-checkpoint")
     write(path.join(cwd, "sdd", "changes", "alpha", "design.md"), "# Design\n")
     write(path.join(cwd, "sdd", "changes", "alpha", "tasks.md"), "# Tasks\n")
@@ -145,7 +175,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         calls.push(hookInput)
         assert.strictEqual(hookInput.hook_source, "opencode-plugin")
         assert.strictEqual(hookInput.hook_event_name, "PostToolUse")
@@ -193,7 +223,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         calls.push(hookInput)
         assert.strictEqual(hookInput.hook_event_name, "PreToolUse")
         assert.strictEqual(hookInput.session_id, "session-native-question-before")
@@ -246,7 +276,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         calls.push(hookInput)
         assert.strictEqual(hookInput.hook_source, "opencode-plugin")
         assert.strictEqual(hookInput.hook_event_name, "PostToolUse")
@@ -292,7 +322,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         calls.push(hookInput)
         return {
           status: 0,
@@ -339,7 +369,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async () => {
+      __sddDriftRunHookInput: makeRunner(async () => {
         return {
           status: 0,
           stdout: "",
@@ -379,7 +409,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client,
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         stopCalls += 1
         assert.strictEqual(hookInput.hook_source, "opencode-plugin")
         assert.strictEqual(hookInput.hook_event_name, "Stop")
@@ -430,7 +460,7 @@ const run = async () => {
       directory: cwd,
       worktree: cwd,
       client: makeClient(),
-      __sddDriftRunCommandHook: makeRunner(async (hookInput) => {
+      __sddDriftRunHookInput: makeRunner(async (hookInput) => {
         assert.strictEqual(hookInput.hook_source, "opencode-plugin")
         assert.strictEqual(hookInput.hook_event_name, "Stop")
         assert.strictEqual(hookInput.session_id, "session-native-idle")

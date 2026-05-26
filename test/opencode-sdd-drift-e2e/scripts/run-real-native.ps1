@@ -16,9 +16,7 @@ $opencodeHome = Join-Path $workRoot ".home"
 $opencodeBin = Join-Path $root "node_modules\.bin\opencode.cmd"
 $configTemplate = Join-Path $root ".opencode\opencode.$Provider.jsonc.example"
 $nativeSource = Join-Path $repoRoot "plugins\sdd-drift-check\sdd-drift-check-opencode.js"
-$hookSource = Join-Path $repoRoot "plugins\sdd-drift-check\sdd-drift-check-hook.js"
 $nativeTarget = Join-Path $workRoot ".opencode\plugins\sdd-drift-check-opencode.js"
-$hookTarget = Join-Path $workRoot ".opencode\hooks\sdd-drift-check\sdd-drift-check-hook.js"
 $outLog = Join-Path $workRoot "$Provider-native.out.log"
 $errLog = Join-Path $workRoot "$Provider-native.err.log"
 $report = Join-Path $workRoot ".sdd-drift-report.md"
@@ -93,11 +91,9 @@ if ($Provider -eq "minimax") {
 }
 
 New-Item -ItemType Directory -Force (Split-Path -Parent $nativeTarget) | Out-Null
-New-Item -ItemType Directory -Force (Split-Path -Parent $hookTarget) | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $workRoot "sdd\changes\native-test") | Out-Null
 New-Item -ItemType Directory -Force $opencodeHome | Out-Null
 Copy-Item -LiteralPath $nativeSource -Destination $nativeTarget -Force
-Copy-Item -LiteralPath $hookSource -Destination $hookTarget -Force
 
 Push-Location $workRoot
 try {

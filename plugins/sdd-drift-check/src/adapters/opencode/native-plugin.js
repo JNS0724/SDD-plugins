@@ -1,6 +1,5 @@
-const fs = require("node:fs")
 const path = require("node:path")
-const { spawn } = require("node:child_process")
+const { runHookInput } = require("../claude-code/command-hook")
 const {
   QUESTION_CHECKPOINT_TOOL_NAMES,
   isSupportedOpenCodeToolEvent,
@@ -11,25 +10,9 @@ const {
 const PLUGIN_NAME = "sdd-drift-check-opencode"
 const TOOL_INPUT_CACHE_TTL_MS = 5 * 60 * 1000
 const IDLE_DEDUP_WINDOW_MS = 500
-const DEFAULT_HOOK_RELATIVE_PATH = path.join(
-  ".opencode",
-  "hooks",
-  "sdd-drift-check",
-  "sdd-drift-check-hook.js"
-)
 const isSupportedToolEvent = isSupportedOpenCodeToolEvent
 
-const ownDir = __dirname
-
 // Native OpenCode adapter source. Claude Code keeps using the command-hook adapter.
-
-const fileExists = (fp) => {
-  try {
-    return fs.statSync(fp).isFile()
-  } catch {
-    return false
-  }
-}
 
 const normalizeCwd = (ctx) => path.resolve(ctx?.worktree || ctx?.directory || process.cwd())
 
@@ -44,21 +27,6 @@ const getToolCallID = (input) =>
   input?.tool_use_id ||
   input?.id ||
   null
-
-const resolveHookScript = (ctx) => {
-  const configured = process.env.SDD_DRIFT_HOOK_SCRIPT
-  if (configured) {
-    return path.resolve(normalizeCwd(ctx), configured)
-  }
-
-  const cwd = normalizeCwd(ctx)
-  const candidates = [
-    path.join(cwd, DEFAULT_HOOK_RELATIVE_PATH),
-    path.join(ownDir, "sdd-drift-check-hook.js"),
-    path.join(cwd, ".opencode", "plugins", "sdd-drift-check-hook.js"),
-  ]
-  return candidates.find(fileExists) || candidates[0]
-}
 
 const toolCacheKey = (input) => {
   const callID = getToolCallID(input)
@@ -115,70 +83,18 @@ const logPluginIssue = async (client, level, message, extra = {}) => {
   }
 }
 
-const runCommandHook = (hookScript, hookInput, options = {}) =>
-  new Promise((resolve) => {
-    const node = process.env.SDD_DRIFT_NODE || "node"
-    const env = {
-      ...process.env,
-      SDD_DRIFT_OUTPUT: process.env.SDD_DRIFT_OUTPUT || "opencode",
+const runNativeHook = async (hookInput) => {
+  try {
+    return await runHookInput(hookInput)
+  } catch (error) {
+    return {
+      status: null,
+      stdout: "",
+      stderr: "",
+      error,
     }
-    const child = spawn(node, [hookScript], {
-      cwd: hookInput.cwd,
-      env,
-      windowsHide: true,
-      stdio: ["pipe", "pipe", "pipe"],
-    })
-
-    let stdout = ""
-    let stderr = ""
-    let settled = false
-    const timeoutMs = Number.parseInt(process.env.SDD_DRIFT_NATIVE_TIMEOUT_MS || "10000", 10)
-    const timeout =
-      Number.isFinite(timeoutMs) && timeoutMs > 0
-        ? setTimeout(() => {
-            if (settled) return
-            settled = true
-            try {
-              child.kill()
-            } catch {}
-            resolve({
-              status: null,
-              stdout,
-              stderr,
-              timedOut: true,
-            })
-          }, timeoutMs)
-        : null
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8")
-    })
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8")
-    })
-    child.on("error", (error) => {
-      if (settled) return
-      settled = true
-      if (timeout) clearTimeout(timeout)
-      resolve({
-        status: null,
-        stdout,
-        stderr,
-        error,
-      })
-    })
-    child.on("close", (status) => {
-      if (settled) return
-      settled = true
-      if (timeout) clearTimeout(timeout)
-      resolve({
-        status,
-        stdout,
-        stderr,
-      })
-    })
-    child.stdin.end(JSON.stringify(hookInput))
-  })
+  }
+}
 
 const appendToolOutput = (output, message) => {
   const text = String(message || "").trim()
@@ -349,20 +265,18 @@ const promptSession = async (ctx, sessionID, prompt) => {
 }
 
 exports.SddDriftCheckOpenCode = async (ctx) => {
-  const hookScript = resolveHookScript(ctx)
   const hookRunner =
-    typeof ctx?.__sddDriftRunCommandHook === "function"
-      ? ctx.__sddDriftRunCommandHook
-      : runCommandHook
+    typeof ctx?.__sddDriftRunHookInput === "function"
+      ? ctx.__sddDriftRunHookInput
+      : runNativeHook
   const toolInputCache = new Map()
   const recentIdleBySession = new Map()
 
   return {
     "chat.message": async (input, output) => {
-      const result = await hookRunner(hookScript, buildChatMessageInput(ctx, input, output))
+      const result = await hookRunner(buildChatMessageInput(ctx, input, output))
       if (result.error || result.timedOut) {
         await logPluginIssue(ctx.client, "warn", "chat message context capture did not complete", {
-          hookScript,
           sessionID: input?.sessionID,
           timedOut: Boolean(result.timedOut),
           error: compactText(result.error?.message || ""),
@@ -378,10 +292,9 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
 
       if (!QUESTION_CHECKPOINT_TOOL_NAMES.has(tool)) return
 
-      const result = await hookRunner(hookScript, buildPreToolUseInput(ctx, input, args))
+      const result = await hookRunner(buildPreToolUseInput(ctx, input, args))
       if (result.error || result.timedOut) {
         await logPluginIssue(ctx.client, "warn", "question checkpoint did not complete", {
-          hookScript,
           tool,
           sessionID: getSessionID(input),
           timedOut: Boolean(result.timedOut),
@@ -407,10 +320,9 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       const args = takeCachedToolInput(toolInputCache, input) || normalizeToolArgs(input.args || {})
       if (!isSupportedToolEvent(tool, args || {})) return
 
-      const result = await hookRunner(hookScript, buildPostToolUseInput(ctx, input, output, args))
+      const result = await hookRunner(buildPostToolUseInput(ctx, input, output, args))
       if (result.error || result.timedOut) {
         await logPluginIssue(ctx.client, "warn", "command hook did not complete", {
-          hookScript,
           timedOut: Boolean(result.timedOut),
           error: compactText(result.error?.message || ""),
           stderr: compactText(result.stderr),
@@ -436,10 +348,9 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       const sessionID = idle.sessionID
       if (!shouldHandleIdle(recentIdleBySession, sessionID)) return
 
-      const result = await hookRunner(hookScript, buildStopInput(ctx, sessionID))
+      const result = await hookRunner(buildStopInput(ctx, sessionID))
       if (result.error || result.timedOut) {
         await logPluginIssue(ctx.client, "warn", "idle check did not complete", {
-          hookScript,
           sessionID,
           rawType: idle.rawType,
           timedOut: Boolean(result.timedOut),
@@ -455,14 +366,12 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       try {
         const injected = await promptSession(ctx, sessionID, injectPrompt)
         await logPluginIssue(ctx.client, injected ? "info" : "warn", "processed Stop continuation", {
-          hookScript,
           sessionID,
           rawType: idle.rawType,
           injected,
         })
       } catch (error) {
         await logPluginIssue(ctx.client, "warn", "Stop continuation prompt failed", {
-          hookScript,
           sessionID,
           rawType: idle.rawType,
           error: compactText(error?.message || String(error)),
@@ -486,8 +395,7 @@ exports._private = {
   normalizeIdleEvent,
   partText,
   promptSession,
+  runNativeHook,
   shouldHandleIdle,
   takeCachedToolInput,
-  resolveHookScript,
-  runCommandHook,
 }

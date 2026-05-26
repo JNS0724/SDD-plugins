@@ -844,19 +844,25 @@ const isOpenCodeHookInput = (input) => {
   return input?.hook_source === "opencode-plugin"
 }
 
+const createRuntimeOutputHelpers = (options = {}) => createOutputHelpers({
+  isOpenCodeHookInput,
+  opencodeStopReportOnly: OPENCODE_STOP_REPORT_ONLY,
+  strictBlock: STRICT_BLOCK,
+  stdout: options.stdout || process.stdout,
+  stderr: options.stderr || process.stderr,
+  exit: options.exit || process.exit,
+})
+
+const defaultOutputHelpers = createRuntimeOutputHelpers()
 const {
   buildClaudeCodeOutput,
   buildPreToolUseDenyOutput,
   buildStopOutput,
   emitEnforcement,
   emitStopEnforcement,
-} = createOutputHelpers({
-  isOpenCodeHookInput,
-  opencodeStopReportOnly: OPENCODE_STOP_REPORT_ONLY,
-  strictBlock: STRICT_BLOCK,
-})
+} = defaultOutputHelpers
 
-const dispatch = async (input) => {
+const dispatch = async (input, options = {}) => {
   const cwd = input.cwd || process.cwd()
   if (!hasSddWorkspace(cwd)) return
 
@@ -906,6 +912,11 @@ const dispatch = async (input) => {
   }
   const transcriptPathForContext = resolveTranscriptPath(input)
   const dtsContextActive = updateDtsContextFromInput(state, input, transcriptPathForContext)
+  const outputHelpers =
+    options.stdout || options.stderr || options.exit
+      ? createRuntimeOutputHelpers(options)
+      : defaultOutputHelpers
+  const stdout = options.stdout || process.stdout
   const handlerContext = {
     cwd,
     sessionID,
@@ -913,7 +924,7 @@ const dispatch = async (input) => {
     project,
     applySessionToProject,
     applyToolRecord,
-    buildClaudeCodeOutput,
+    buildClaudeCodeOutput: outputHelpers.buildClaudeCodeOutput,
     buildCodeEnforcement,
     buildCodeToolReminder,
     buildAttributionReviewPrompt,
@@ -936,8 +947,8 @@ const dispatch = async (input) => {
     collectCombinedCodeGaps,
     collectCombinedPeerGaps,
     drift,
-    emitEnforcement,
-    emitStopEnforcement,
+    emitEnforcement: outputHelpers.emitEnforcement,
+    emitStopEnforcement: outputHelpers.emitStopEnforcement,
     formatCarryOverReminder,
     getToolEventKey,
     getToolFilePath,
@@ -977,7 +988,7 @@ const dispatch = async (input) => {
     takeAttributionReviewPrompts,
     transcriptPathForContext,
     writeDiagnosticLog,
-    writeStdout: (message) => process.stdout.write(message),
+    writeStdout: (message) => stdout.write(message),
   }
   writeDiagnosticLog(cwd, {
     event: "hook_start",
@@ -1076,6 +1087,47 @@ const main = async () => {
   await dispatch(input)
 }
 
+const runHookInput = async (input, options = {}) => {
+  let stdout = ""
+  let stderr = ""
+  let status = 0
+  const stdoutStream = {
+    write: (chunk) => {
+      stdout += String(chunk || "")
+      return true
+    },
+  }
+  const stderrStream = {
+    write: (chunk) => {
+      stderr += String(chunk || "")
+      return true
+    },
+  }
+  const exit = (code = 0) => {
+    status = Number.isFinite(Number(code)) ? Number(code) : 0
+    const error = new Error(`sdd-drift-check hook requested exit ${status}`)
+    error.__sddDriftHookExit = true
+    throw error
+  }
+
+  try {
+    await dispatch(input, {
+      ...options,
+      stdout: options.stdout || stdoutStream,
+      stderr: options.stderr || stderrStream,
+      exit: options.exit || exit,
+    })
+  } catch (error) {
+    if (!error?.__sddDriftHookExit) throw error
+  }
+
+  return {
+    status,
+    stdout,
+    stderr,
+  }
+}
+
 if (require.main === module) {
   main().catch((err) => {
     writeDiagnosticLog(process.cwd(), {
@@ -1169,6 +1221,7 @@ if (require.main === module) {
     acceptUnresolvedAttributionReviews,
     resolveReadOnlyAttributionReviews,
     runActions,
+    runHookInput,
     saveProjectState,
     saveState,
     writeDiagnosticLog,

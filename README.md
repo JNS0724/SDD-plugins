@@ -68,12 +68,11 @@ The two runtime faces are peers in source:
 - `src/adapters/opencode/native-plugin.js` builds the native OpenCode plugin
   artifact `sdd-drift-check-opencode.js`.
 
-The OpenCode adapter still invokes the shared command hook artifact for the core
-drift rules in this phase; the source layout now separates the runtime adapter
-boundary so a later core extraction can happen without changing user-facing
-install paths. Shared logic that is already runtime-neutral lives under
-`src/core/`, including tool event classification, runtime config parsing, output
-protocol helpers, and SDD rule text/constants.
+Both artifacts are self-contained at runtime. OpenCode users install only
+`sdd-drift-check-opencode.js`; Claude Code users install only
+`sdd-drift-check-hook.js`. Shared logic lives under `src/core/`, including tool
+event classification, runtime config parsing, output protocol helpers, and SDD
+rule text/constants.
 
 It supports:
 
