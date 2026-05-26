@@ -729,6 +729,14 @@ try {
       hook.isDtsContextText("Please fix this issue ticket by changing code only."),
       true
     )
+    assert.strictEqual(
+      hook.isDtsContextText("获取dts2026051301这个问题单详情"),
+      true
+    )
+    assert.strictEqual(
+      hook.isDtsContextText("获取 DTS2026051301 这个问题单详情"),
+      true
+    )
   }
 
   {

@@ -399,6 +399,59 @@ const run = async () => {
   }
 
   {
+    const cwd = path.join(tmpRoot, "native-dts-id-context")
+    write(path.join(cwd, "sdd", "changes", "ticket", "design.md"), "# Design\n")
+    write(path.join(cwd, "sdd", "changes", "ticket", "tasks.md"), "# Tasks\n")
+    write(path.join(cwd, "src", "ticket.ts"), "export const ticket = 1\n")
+
+    const hooks = await native.SddDriftCheckOpenCode({
+      directory: cwd,
+      worktree: cwd,
+      client: makeClient(),
+    })
+
+    await hooks["chat.message"](
+      {
+        sessionID: "session-native-dts-id",
+        messageID: "message-dts-id",
+        agent: "build",
+      },
+      {
+        message: {
+          role: "user",
+          content: "获取dts2026051301这个问题单详情",
+        },
+        parts: [
+          {
+            type: "text",
+            text: "获取dts2026051301这个问题单详情",
+          },
+        ],
+      }
+    )
+
+    const output = {
+      title: "src/ticket.ts",
+      output: "updated ticket fix",
+      metadata: {},
+    }
+    await hooks["tool.execute.after"](
+      {
+        tool: "write",
+        sessionID: "session-native-dts-id",
+        callID: "call-dts-id-code",
+        args: {
+          filePath: "src/ticket.ts",
+        },
+      },
+      output
+    )
+
+    assert.strictEqual(output.output, "updated ticket fix")
+    assert.strictEqual(output.metadata.sddDriftCheck, undefined)
+  }
+
+  {
     const cwd = path.join(tmpRoot, "native-status-idle")
     write(path.join(cwd, "sdd", "changes", "beta", "design.md"), "# Design\n")
     write(path.join(cwd, "sdd", "changes", "beta", "tasks.md"), "# Tasks\n")

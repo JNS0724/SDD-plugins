@@ -3430,6 +3430,7 @@ var {
   STRICT_BLOCK
 } = require_runtime_config();
 var DTS_CONTEXT_PATTERNS = [
+  /\bDTS[-_\s]?\d{4,}\b/i,
   /\bDTS-\d+\b/,
   /\bDTS\b/,
   /dts\s*(问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,

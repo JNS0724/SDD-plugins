@@ -144,6 +144,7 @@ const DIAGNOSTIC_SUMMARY_EVENTS = new Set([
   "circuit_open_skip",
 ])
 const DTS_CONTEXT_PATTERNS = [
+  /\bDTS[-_\s]?\d{4,}\b/i,
   /\bDTS-\d+\b/,
   /\bDTS\b/,
   /dts\s*(问题单|工单|缺陷单|缺陷|bug|issue|ticket)/i,
