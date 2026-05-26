@@ -14,6 +14,7 @@ const rules = require(path.join(
 ))
 
 assert.strictEqual(rules.PROPOSAL_FILE, "proposal.md")
+assert.strictEqual(rules.PROMPT_RULES_FILE, "sdd-drift-check-rules.md")
 assert.strictEqual(rules.DESIGN_FILE, "design.md")
 assert.strictEqual(rules.TASKS_FILE, "tasks.md")
 assert.deepStrictEqual(rules.PEER_FILES, ["design.md", "tasks.md"])
@@ -23,29 +24,57 @@ assert.deepStrictEqual(rules.CHANGE_DOC_REQUIREMENTS["design.md"], ["tasks.md"])
 assert.deepStrictEqual(rules.CHANGE_DOC_REQUIREMENTS["tasks.md"], ["design.md"])
 assert.ok(rules.ARCHIVED_CHANGE_DIR_NAMES.has("archive"))
 assert.ok(rules.ARCHIVED_CHANGE_DIR_NAMES.has("已归档"))
-assert.ok(rules.DOCUMENT_SYNC_RULES.some((rule) => rule.includes("preserve its existing Markdown template")))
-assert.ok(rules.DOCUMENT_SYNC_RULES.includes("Do not add new sections."))
-assert.ok(rules.DOCUMENT_SYNC_RULES.includes("Do not rewrite the document template."))
+assert.ok(rules.DOCUMENT_SYNC_RULES.some((rule) => rule.includes("保留它已有的 Markdown 模板")))
+assert.ok(rules.DOCUMENT_SYNC_RULES.includes("不要新增章节。"))
+assert.ok(rules.DOCUMENT_SYNC_RULES.includes("不要重写文档模板。"))
 assert.ok(
-  rules.DOCUMENT_SYNC_RULES.includes("Find the existing section that should change and edit that section only.")
+  rules.DOCUMENT_SYNC_RULES.includes("找到最应该变更的已有章节，只修改该位置。")
 )
-assert.ok(rules.ACTIVE_SDD_ALIGNMENT_RULES.some((rule) => rule.includes("live planning records")))
-assert.ok(rules.ATTRIBUTION_REVIEW_RULES.some((rule) => rule.includes("Purely mechanical changes")))
-assert.match(rules.SUBAGENT_REVIEW_RULE, /read-only review subagent/)
+assert.ok(rules.ACTIVE_SDD_ALIGNMENT_RULES.some((rule) => rule.includes("实时计划记录")))
+assert.ok(rules.ATTRIBUTION_REVIEW_RULES.some((rule) => rule.includes("纯机械改动")))
+assert.match(rules.SUBAGENT_REVIEW_RULE, /只读评审 subagent/)
 assert.ok(
   rules.RESUME_ORIGINAL_TASK_RULES.includes(
-    "SDD review is a checkpoint inside the current task, not the final task."
+    "SDD 评审是当前任务中的检查点，不是最终任务本身。"
   )
 )
 assert.ok(
   rules.RESUME_ORIGINAL_TASK_RULES.includes(
-    "After the SDD review or synchronization is complete, return to the original user task."
+    "SDD 评审或同步完成后，回到原始用户任务。"
   )
 )
 
 const formatted = rules.formatAttributionReviewRules()
-assert.match(formatted[0], /apply these attribution review rules/)
-assert.match(formatted[1], /^1\. Purely mechanical changes/)
+assert.match(formatted[0], /归属评审规则/)
+assert.match(formatted[1], /^1\. 纯机械改动/)
+const parsedPromptRules = rules.parsePromptRulesMarkdown([
+  "## SDD EDIT RULES",
+  "- Custom edit",
+  "## Active SDD Alignment Rules",
+  "1. Custom alignment",
+  "## Subagent Review Rule",
+  "Custom subagent",
+].join("\n"))
+assert.deepStrictEqual(parsedPromptRules.DOCUMENT_SYNC_RULES, ["Custom edit"])
+assert.deepStrictEqual(parsedPromptRules.ACTIVE_SDD_ALIGNMENT_RULES, ["Custom alignment"])
+assert.deepStrictEqual(parsedPromptRules.SUBAGENT_REVIEW_RULE, ["Custom subagent"])
+const parsedChinesePromptRules = rules.parsePromptRulesMarkdown([
+  "## SDD 编辑规则",
+  "- 中文编辑规则",
+  "## 活跃 SDD 对齐规则",
+  "- 中文对齐规则",
+  "## 归属评审规则",
+  "- 中文归属规则",
+  "## 子代理评审规则",
+  "- 中文子代理规则",
+  "## 退出标准",
+  "- 中文退出标准",
+].join("\n"))
+assert.deepStrictEqual(parsedChinesePromptRules.DOCUMENT_SYNC_RULES, ["中文编辑规则"])
+assert.deepStrictEqual(parsedChinesePromptRules.ACTIVE_SDD_ALIGNMENT_RULES, ["中文对齐规则"])
+assert.deepStrictEqual(parsedChinesePromptRules.ATTRIBUTION_REVIEW_RULES, ["中文归属规则"])
+assert.deepStrictEqual(parsedChinesePromptRules.SUBAGENT_REVIEW_RULE, ["中文子代理规则"])
+assert.deepStrictEqual(parsedChinesePromptRules.RESUME_ORIGINAL_TASK_RULES, ["中文退出标准"])
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sdd-rules-"))
 const sddRoot = path.join(tmp, "sdd")

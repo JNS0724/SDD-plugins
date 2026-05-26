@@ -2,11 +2,8 @@ const { collectCombinedCodeGaps, collectCombinedPeerGaps } = require("./drift-en
 const { rel } = require("./paths")
 const { collectCarryOverDrift } = require("./project-state")
 const {
-  ACTIVE_SDD_ALIGNMENT_RULES,
-  DOCUMENT_SYNC_RULES,
-  RESUME_ORIGINAL_TASK_RULES,
-  SUBAGENT_REVIEW_RULE,
   formatAttributionReviewRules,
+  getPromptRules,
 } = require("./sdd-rules")
 const { hash } = require("./state-storage")
 
@@ -28,6 +25,14 @@ const stripSystemReminderWrapper = (message) =>
     .replace(/^<system-reminder>\s*/i, "")
     .replace(/\s*<\/system-reminder>\s*$/i, "")
     .trim()
+
+const promptRules = () => getPromptRules()
+const documentSyncRules = () => promptRules().DOCUMENT_SYNC_RULES
+const activeSddAlignmentRules = () => promptRules().ACTIVE_SDD_ALIGNMENT_RULES
+const resumeOriginalTaskRules = () => promptRules().RESUME_ORIGINAL_TASK_RULES
+const subagentReviewRule = () => promptRules().SUBAGENT_REVIEW_RULE
+const attributionReviewRules = () =>
+  formatAttributionReviewRules(promptRules().ATTRIBUTION_REVIEW_RULES)
 
 const buildAttributionReviewPrompt = (cwd, { codeFiles = [], candidates = [] } = {}) => {
   const codeLines = codeFiles.length
@@ -64,9 +69,9 @@ const buildAttributionReviewPrompt = (cwd, { codeFiles = [], candidates = [] } =
     ]),
     ...section("SDD EDIT RULES", [
       "Preserve existing SDD templates and headings when editing.",
-      ...DOCUMENT_SYNC_RULES,
+      ...documentSyncRules(),
     ]),
-    ...section("ATTRIBUTION RULES", formatAttributionReviewRules()),
+    ...section("ATTRIBUTION RULES", attributionReviewRules()),
   ])
 }
 
@@ -118,7 +123,7 @@ const buildToolEnforcement = (gaps, options = {}) => {
       ...section("REQUIRED ACTION", [
         "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
       ]),
-      ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+      ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
     ])
   }
 
@@ -132,9 +137,9 @@ const buildToolEnforcement = (gaps, options = {}) => {
       "This assistant turn is incomplete until the required peer document(s) are synchronized.",
       "Before any final answer, read each listed required peer file, then use edit or write to synchronize it with the edited SDD change document(s). If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage.",
     ]),
-    ...section("SDD EDIT RULES", DOCUMENT_SYNC_RULES),
+    ...section("SDD EDIT RULES", documentSyncRules()),
     ...section("EXIT CRITERIA", [
-      ...RESUME_ORIGINAL_TASK_RULES,
+      ...resumeOriginalTaskRules(),
       "Do not stop or summarize completion until the required peer document(s) are updated.",
     ]),
   ])
@@ -166,19 +171,19 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
       ...section("REQUIRED ACTION", [
         "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
         "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
-        SUBAGENT_REVIEW_RULE,
+        subagentReviewRule(),
       ]),
       ...section("SDD EDIT RULES", [
         "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
-        ...DOCUMENT_SYNC_RULES,
+        ...documentSyncRules(),
       ]),
       ...section("ALIGNMENT RULES", [
-        ...ACTIVE_SDD_ALIGNMENT_RULES,
-        ...formatAttributionReviewRules(),
+        ...activeSddAlignmentRules(),
+        ...attributionReviewRules(),
       ]),
       ...section("EXIT CRITERIA", [
         "After both documents have been reviewed, resume the original user task if anything remains; finish only if the original task is already complete.",
-        ...RESUME_ORIGINAL_TASK_RULES,
+        ...resumeOriginalTaskRules(),
       ]),
     ])
   }
@@ -196,18 +201,18 @@ const buildCodeEnforcement = (cwd, gaps, options = {}) => {
       "After review, update active SDD document(s) whenever they no longer match the implemented code. Optimization and refactor work can still require SDD updates.",
       "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
       "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
-      SUBAGENT_REVIEW_RULE,
+      subagentReviewRule(),
     ]),
     ...section("SDD EDIT RULES", [
-      ...DOCUMENT_SYNC_RULES,
+      ...documentSyncRules(),
       "Do not create a no-op edit or add a new section just to satisfy this hook.",
     ]),
     ...section("ALIGNMENT RULES", [
-      ...ACTIVE_SDD_ALIGNMENT_RULES,
-      ...formatAttributionReviewRules(),
+      ...activeSddAlignmentRules(),
+      ...attributionReviewRules(),
     ]),
     ...section("EXIT CRITERIA", [
-      ...RESUME_ORIGINAL_TASK_RULES,
+      ...resumeOriginalTaskRules(),
       "Do not give the final answer while this code-change batch still has unreviewed SDD documents.",
     ]),
   ])
@@ -232,9 +237,9 @@ const buildCodeToolReminder = (cwd, gaps) => {
       "Do not stop coding just because this reminder appeared. If more implementation, verification, cleanup, or requested edits remain, continue the original task now.",
       "When the implementation batch is complete, and before final answer or before asking the user what to do next, read/review the listed active design.md and tasks.md files.",
       "Update only the SDD documents that are stale; if no document needs changes, leave them unchanged and say which files you reviewed.",
-      SUBAGENT_REVIEW_RULE,
+      subagentReviewRule(),
     ]),
-    ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+    ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
   ])
 }
 
@@ -299,7 +304,7 @@ const buildQuestionCheckpointMessage = (message) =>
       "Continue the current turn now and handle the pending SDD work first.",
       "After the pending SDD work is resolved, return to the original user task from where you paused; do not treat this checkpoint itself as task completion.",
     ]),
-    ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+    ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
     ...section("PENDING SDD REMINDER", [stripSystemReminderWrapper(message)]),
   ])
 
@@ -384,7 +389,7 @@ const formatCarryOverReminder = (project, options = {}) => {
     ]),
     ...section("REQUIRED ACTION", [
       "Before final answer, review these active SDD change directories and synchronize design.md/tasks.md with the implementation if needed.",
-      SUBAGENT_REVIEW_RULE,
+      subagentReviewRule(),
     ]),
   ])
 }
@@ -418,7 +423,7 @@ const buildPreCompactSummary = (cwdOrProject, stateOrNull = null, projectOrNull 
       ...section("REQUIRED ACTION", [
         "After compaction resumes, handle this SDD work first, then return to the original user task from where it was interrupted.",
       ]),
-      ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+      ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
       ...section("PENDING SDD REMINDER", [stripSystemReminderWrapper(pending.message)]),
     ])
   }
@@ -431,7 +436,7 @@ const buildPreCompactSummary = (cwdOrProject, stateOrNull = null, projectOrNull 
     ...section("REQUIRED ACTION", [
       "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed.",
     ]),
-    ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+    ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
   ])
 }
 

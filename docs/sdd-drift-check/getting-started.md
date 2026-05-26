@@ -12,8 +12,8 @@
 
 | 运行环境 | 使用文件 | 推荐场景 |
 | --- | --- | --- |
-| OpenCode | `sdd-drift-check-opencode.js` | OpenCode 原生插件方式，推荐给 OpenCode 用户 |
-| Claude Code | `sdd-drift-check-hook.js` | Claude Code command hook |
+| OpenCode | `sdd-drift-check-opencode.js` + `sdd-drift-check-rules.md` | OpenCode 原生插件方式，推荐给 OpenCode 用户 |
+| Claude Code | `sdd-drift-check-hook.js` + `sdd-drift-check-rules.md` | Claude Code command hook |
 
 OpenCode 用户请使用原生插件入口；Claude Code 用户请使用 command hook 入口。
 
@@ -43,15 +43,29 @@ sdd/changes/<change-id>/
 
 ## OpenCode 安装
 
-在你的项目根目录执行：
+如果只想给当前项目启用，在项目根目录执行：
 
 ```powershell
 New-Item -ItemType Directory -Force .opencode\plugins
 
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js .opencode\plugins\sdd-drift-check-opencode.js
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-rules.md .opencode\plugins\sdd-drift-check-rules.md
 ```
 
-OpenCode 会自动加载 `.opencode/plugins/` 下的本地插件。`sdd-drift-check-opencode.js` 是自包含发布件，不需要再复制 Claude hook，也不需要设置 `SDD_DRIFT_HOOK_SCRIPT`。
+如果希望所有 OpenCode 项目默认启用，可以安装到全局 OpenCode 插件目录：
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
+
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js "$env:USERPROFILE\.config\opencode\plugins\sdd-drift-check-opencode.js" -Force
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-rules.md "$env:USERPROFILE\.config\opencode\plugins\sdd-drift-check-rules.md" -Force
+```
+
+OpenCode 会自动加载 `.opencode/plugins/` 和 `~/.config/opencode/plugins/` 下的本地插件。Windows 上 `~/.config/opencode/plugins/` 通常就是 `C:\Users\<用户名>\.config\opencode\plugins\`。
+
+`sdd-drift-check-opencode.js` 是自包含发布件，不需要再复制 Claude hook，也不需要设置 `SDD_DRIFT_HOOK_SCRIPT`。
+
+`sdd-drift-check-rules.md` 是可选但推荐复制的提示词规则文件。请把它和 `sdd-drift-check-opencode.js` 放在同一个目录。插件每次生成提醒时都会从自身所在目录动态读取这个文件。
 
 ## Claude Code 安装
 
@@ -60,6 +74,7 @@ OpenCode 会自动加载 `.opencode/plugins/` 下的本地插件。`sdd-drift-ch
 ```powershell
 New-Item -ItemType Directory -Force .claude\hooks\sdd-drift-check
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .claude\hooks\sdd-drift-check\sdd-drift-check-hook.js
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-rules.md .claude\hooks\sdd-drift-check\sdd-drift-check-rules.md
 ```
 
 创建或更新 `.claude/settings.json`：
@@ -305,6 +320,19 @@ $env:SDD_DRIFT_DTS_SKIP = "0"
 $env:SDD_DRIFT_CODE_REVIEW_TOOL_MAX_REMINDERS = "1"
 $env:SDD_DRIFT_CODE_REVIEW_TOOL_SESSION_MAX_REMINDERS = "1"
 ```
+
+## FAQ
+
+### 修改 `sdd-drift-check-rules.md` 后需要重启 OpenCode 吗？
+
+不需要。
+
+规则文件是热加载的。插件每次生成 SDD 提醒提示词时，都会重新读取同目录下的 `sdd-drift-check-rules.md`。你可以在 OpenCode 会话运行中直接编辑规则文件，下一次触发 SDD 检查就会使用新规则。
+
+需要注意两个边界：
+
+- 已经注入给模型的旧提示词不会被撤回；新规则从下一次 hook 提醒开始生效。
+- 如果改的是 `sdd-drift-check-opencode.js` 插件脚本本身，需要重启 OpenCode，因为插件代码在 OpenCode 启动时加载。
 
 ## 归档规则
 

@@ -34,6 +34,7 @@ plugins/
     package.json
     sdd-drift-check-hook.js
     sdd-drift-check-opencode.js
+    sdd-drift-check-rules.md
 docs/
   sdd-drift-check/
     sdd-drift-check.md
@@ -68,11 +69,14 @@ The two runtime faces are peers in source:
 - `src/adapters/opencode/native-plugin.js` builds the native OpenCode plugin
   artifact `sdd-drift-check-opencode.js`.
 
-Both artifacts are self-contained at runtime. OpenCode users install only
-`sdd-drift-check-opencode.js`; Claude Code users install only
-`sdd-drift-check-hook.js`. Shared logic lives under `src/core/`, including tool
-event classification, runtime config parsing, output protocol helpers, and SDD
-rule text/constants.
+Both JavaScript artifacts are self-contained at runtime. OpenCode users install
+`sdd-drift-check-opencode.js` under project `.opencode/plugins/` or global
+`~/.config/opencode/plugins/`; Claude Code users install
+`sdd-drift-check-hook.js`. Users may also place `sdd-drift-check-rules.md` in
+the same directory as the installed JS file to customize SDD review principles
+without rebuilding or restarting for wording-only changes. Shared logic lives under `src/core/`, including tool event
+classification, runtime config parsing, output protocol helpers, and SDD rule
+text/constants.
 
 It supports:
 
@@ -112,6 +116,7 @@ The committed distributable files are:
 ```text
 plugins/sdd-drift-check/sdd-drift-check-hook.js
 plugins/sdd-drift-check/sdd-drift-check-opencode.js
+plugins/sdd-drift-check/sdd-drift-check-rules.md
 ```
 
 After changing files under `plugins/sdd-drift-check/src/`, rebuild the
@@ -124,15 +129,20 @@ npm run build
 npm run build:check
 ```
 
-`npm run build` updates both distributable files:
+`npm run build` updates both JS distributable files:
 
 - `sdd-drift-check-hook.js`
 - `sdd-drift-check-opencode.js`
 
-`npm run build:check` generates temporary artifacts and compares them with the
-committed files; a non-zero exit means a package artifact is stale. Prompt-only
-changes still need this check because the generated hook artifact embeds
-`src/core/prompts.js`.
+`sdd-drift-check-rules.md` is a user-editable runtime rules file. The plugin
+loads it dynamically from the same directory as the installed JS artifact, or
+from `SDD_DRIFT_RULES_FILE` when that environment variable is set.
+
+`npm run build:check` generates temporary JS artifacts and compares them with
+the committed JS files; a non-zero exit means a package artifact is stale.
+Prompt-code changes still need this check because the generated hook artifact
+embeds `src/core/prompts.js`. Runtime edits to `sdd-drift-check-rules.md` do not
+require rebuilding.
 
 ## Testing
 

@@ -1,5 +1,5 @@
 {"contains":["SDD proposal stage reminder","sdd/changes/j1/design.md"],"notContains":["create or edit tasks.md directly from proposal.md directly"]}
-{"contains":["This assistant turn is incomplete","sdd/changes/j1/tasks.md","preserve its existing Markdown template"]}
+{"contains":["This assistant turn is incomplete","sdd/changes/j1/tasks.md","保留它已有的 Markdown 模板"]}
 {"empty":true}
 {"contains":["SDD drift code review noted","sdd/changes/j1/design.md","sdd/changes/j1/tasks.md","src/j1.ts","continue the original task now"]}
 {"empty":true}

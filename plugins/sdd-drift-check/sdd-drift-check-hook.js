@@ -780,6 +780,7 @@ var require_sdd_rules = __commonJS({
     var path2 = require("path");
     var { toPosix: toPosix2 } = require_paths();
     var STATE_DIR = ".sdd-drift-hook-state";
+    var PROMPT_RULES_FILE = "sdd-drift-check-rules.md";
     var PEER_FILES = ["design.md", "tasks.md"];
     var PROPOSAL_FILE2 = "proposal.md";
     var DESIGN_FILE2 = "design.md";
@@ -794,49 +795,153 @@ var require_sdd_rules = __commonJS({
       [TASKS_FILE2]: [DESIGN_FILE2]
     };
     var DOCUMENT_SYNC_RULES = [
-      "Before editing any SDD document, read the current file and preserve its existing Markdown template.",
-      "Keep every existing heading line exactly as-is, including the top-level title such as # Design or # Tasks, and keep the original heading order.",
-      "Do not replace the whole document with a summary, marker, or single-line result.",
-      "Do not add new sections.",
-      "Do not rewrite the document template.",
-      "Find the existing section that should change and edit that section only.",
-      "Do not add a new section or rewrite the template just to satisfy this enforcement.",
-      "Do not remove unrelated existing paragraphs, checklist items, examples, requirements, or notes while synchronizing drift.",
-      "For existing SDD documents, prefer Edit or MultiEdit. If Write is necessary, copy the original file content first and write the full document including all existing headings, template text, paragraphs, and checklist items.",
-      "Do not edit design.md and tasks.md in the same parallel tool batch; update one SDD document, wait for its tool result and hook feedback, then update the required peer.",
-      "Find the most appropriate existing heading, paragraph, list item, or task item, and make the smallest needed update there.",
-      "For tasks.md, preserve the task-list format and update the relevant existing checklist item when possible."
+      "\u7F16\u8F91\u4EFB\u4F55 SDD \u6587\u6863\u524D\uFF0C\u5148\u8BFB\u53D6\u5F53\u524D\u6587\u4EF6\uFF0C\u5E76\u4FDD\u7559\u5B83\u5DF2\u6709\u7684 Markdown \u6A21\u677F\u3002",
+      "\u4FDD\u6301\u6240\u6709\u5DF2\u6709\u6807\u9898\u884C\u4E0D\u53D8\uFF0C\u5305\u62EC # Design\u3001# Tasks \u8FD9\u7C7B\u9876\u5C42\u6807\u9898\uFF0C\u5E76\u4FDD\u6301\u539F\u6709\u6807\u9898\u987A\u5E8F\u3002",
+      "\u4E0D\u8981\u628A\u6574\u7BC7\u6587\u6863\u66FF\u6362\u6210\u6458\u8981\u3001\u6807\u8BB0\u6216\u5355\u884C\u7ED3\u679C\u3002",
+      "\u4E0D\u8981\u65B0\u589E\u7AE0\u8282\u3002",
+      "\u4E0D\u8981\u91CD\u5199\u6587\u6863\u6A21\u677F\u3002",
+      "\u627E\u5230\u6700\u5E94\u8BE5\u53D8\u66F4\u7684\u5DF2\u6709\u7AE0\u8282\uFF0C\u53EA\u4FEE\u6539\u8BE5\u4F4D\u7F6E\u3002",
+      "\u4E0D\u8981\u4E3A\u4E86\u6EE1\u8DB3\u63D2\u4EF6\u63D0\u9192\u800C\u65B0\u589E\u7AE0\u8282\u6216\u91CD\u5199\u6A21\u677F\u3002",
+      "\u540C\u6B65 drift \u65F6\uFF0C\u4E0D\u8981\u5220\u9664\u65E0\u5173\u7684\u5DF2\u6709\u6BB5\u843D\u3001\u6E05\u5355\u9879\u3001\u793A\u4F8B\u3001\u9700\u6C42\u6216\u5907\u6CE8\u3002",
+      "\u5BF9\u5DF2\u6709 SDD \u6587\u6863\uFF0C\u4F18\u5148\u4F7F\u7528 Edit \u6216 MultiEdit\u3002\u5982\u679C\u5FC5\u987B\u4F7F\u7528 Write\uFF0C\u5148\u590D\u5236\u539F\u6587\u4EF6\u5185\u5BB9\uFF0C\u518D\u5199\u56DE\u5305\u542B\u5168\u90E8\u5DF2\u6709\u6807\u9898\u3001\u6A21\u677F\u6587\u672C\u3001\u6BB5\u843D\u548C\u6E05\u5355\u9879\u7684\u5B8C\u6574\u6587\u6863\u3002",
+      "\u4E0D\u8981\u5728\u540C\u4E00\u6279\u5E76\u884C\u5DE5\u5177\u8C03\u7528\u91CC\u540C\u65F6\u7F16\u8F91 design.md \u548C tasks.md\uFF1B\u5148\u66F4\u65B0\u4E00\u4E2A SDD \u6587\u6863\uFF0C\u7B49\u5F85\u5DE5\u5177\u7ED3\u679C\u548C hook \u53CD\u9988\uFF0C\u518D\u66F4\u65B0\u9700\u8981\u540C\u6B65\u7684 peer \u6587\u6863\u3002",
+      "\u627E\u5230\u6700\u5408\u9002\u7684\u5DF2\u6709\u6807\u9898\u3001\u6BB5\u843D\u3001\u5217\u8868\u9879\u6216\u4EFB\u52A1\u9879\uFF0C\u5728\u90A3\u91CC\u505A\u6700\u5C0F\u5FC5\u8981\u4FEE\u6539\u3002",
+      "\u5BF9 tasks.md\uFF0C\u4FDD\u7559\u4EFB\u52A1\u6E05\u5355\u683C\u5F0F\uFF1B\u80FD\u66F4\u65B0\u76F8\u5173\u5DF2\u6709\u6E05\u5355\u9879\u65F6\uFF0C\u4F18\u5148\u66F4\u65B0\u5DF2\u6709\u9879\u3002"
     ];
     var ACTIVE_SDD_ALIGNMENT_RULES = [
-      "Active SDD documents are live planning records until their change directory is archived; before the final answer, keep active design.md and tasks.md aligned with the implemented code.",
-      "Do not treat an optimization or refactor as documentation-free if it changes behavior, API or contracts, algorithms, state or data flow, data structures, performance strategy, error handling, security boundaries, user-visible results, or implementation constraints; update design.md when any of those code facts changed.",
-      "Do not satisfy SDD alignment by only adding a marker, completion note, or generic summary; replace the specific stale sentence, paragraph, or checklist item so the document states the actual implemented behavior, API, error handling, performance strategy, or task status.",
-      "When a changed code file adds or changes exported names, public function signatures, literal return values, config defaults, user-visible strings, or acceptance-relevant constants, carry those concrete facts into the appropriate existing design.md/tasks.md wording instead of summarizing them vaguely.",
-      "After editing design.md, re-read the changed sentence mentally and ensure no old wording still contradicts the code you just wrote.",
-      "Update tasks.md when the code completes, changes, cancels, splits, or invalidates an implementation task, checklist item, planned step, or acceptance condition.",
-      "The no-document-change path is only valid for purely mechanical edits with no design or task impact, such as formatting-only changes, comment-only edits, test-only scaffolding, or dependency/config churn that does not change the active SDD plan.",
-      "If you choose no SDD edit, explicitly state which active design.md/tasks.md files you reviewed and why the code change has no design or task impact.",
-      "Modify only content relevant to the current code batch; do not invent future requirements or broaden the scope."
+      "\u53D8\u66F4\u76EE\u5F55\u5F52\u6863\u524D\uFF0C\u6D3B\u8DC3 SDD \u6587\u6863\u90FD\u662F\u5B9E\u65F6\u8BA1\u5212\u8BB0\u5F55\uFF1B\u6700\u7EC8\u56DE\u590D\u524D\uFF0C\u8981\u8BA9\u6D3B\u8DC3\u7684 design.md \u548C tasks.md \u4E0E\u5DF2\u5B9E\u73B0\u4EE3\u7801\u4FDD\u6301\u4E00\u81F4\u3002",
+      "\u5982\u679C\u4F18\u5316\u6216\u91CD\u6784\u6539\u53D8\u4E86\u884C\u4E3A\u3001API \u6216\u5951\u7EA6\u3001\u7B97\u6CD5\u3001\u72B6\u6001\u6216\u6570\u636E\u6D41\u3001\u6570\u636E\u7ED3\u6784\u3001\u6027\u80FD\u7B56\u7565\u3001\u9519\u8BEF\u5904\u7406\u3001\u5B89\u5168\u8FB9\u754C\u3001\u7528\u6237\u53EF\u89C1\u7ED3\u679C\u6216\u5B9E\u73B0\u7EA6\u675F\uFF0C\u4E0D\u8981\u628A\u5B83\u5F53\u6210\u201C\u65E0\u9700\u66F4\u65B0\u6587\u6863\u201D\uFF1B\u8FD9\u4E9B\u4EE3\u7801\u4E8B\u5B9E\u53D8\u5316\u901A\u5E38\u9700\u8981\u66F4\u65B0 design.md\u3002",
+      "\u4E0D\u8981\u53EA\u6DFB\u52A0\u6807\u8BB0\u3001\u5B8C\u6210\u8BF4\u660E\u6216\u6CDB\u6CDB\u6458\u8981\u6765\u6EE1\u8DB3 SDD \u5BF9\u9F50\uFF1B\u5E94\u66FF\u6362\u5177\u4F53\u8FC7\u671F\u7684\u53E5\u5B50\u3001\u6BB5\u843D\u6216\u6E05\u5355\u9879\uFF0C\u8BA9\u6587\u6863\u63CF\u8FF0\u771F\u5B9E\u5B9E\u73B0\u7684\u884C\u4E3A\u3001API\u3001\u9519\u8BEF\u5904\u7406\u3001\u6027\u80FD\u7B56\u7565\u6216\u4EFB\u52A1\u72B6\u6001\u3002",
+      "\u5F53\u4EE3\u7801\u65B0\u589E\u6216\u4FEE\u6539\u5BFC\u51FA\u540D\u79F0\u3001\u516C\u5171\u51FD\u6570\u7B7E\u540D\u3001\u5B57\u9762\u91CF\u8FD4\u56DE\u503C\u3001\u914D\u7F6E\u9ED8\u8BA4\u503C\u3001\u7528\u6237\u53EF\u89C1\u6587\u6848\u6216\u9A8C\u6536\u76F8\u5173\u5E38\u91CF\u65F6\uFF0C\u628A\u8FD9\u4E9B\u5177\u4F53\u4E8B\u5B9E\u540C\u6B65\u5230\u5408\u9002\u7684 design.md/tasks.md \u73B0\u6709\u6587\u5B57\u91CC\uFF0C\u4E0D\u8981\u53EA\u505A\u6A21\u7CCA\u603B\u7ED3\u3002",
+      "\u7F16\u8F91 design.md \u540E\uFF0C\u91CD\u65B0\u68C0\u67E5\u521A\u6539\u8FC7\u7684\u53E5\u5B50\uFF0C\u786E\u4FDD\u6CA1\u6709\u65E7\u8868\u8FF0\u4ECD\u7136\u4E0E\u5F53\u524D\u4EE3\u7801\u77DB\u76FE\u3002",
+      "\u5F53\u4EE3\u7801\u5B8C\u6210\u3001\u53D8\u66F4\u3001\u53D6\u6D88\u3001\u62C6\u5206\u6216\u4F7F\u67D0\u4E2A\u5B9E\u73B0\u4EFB\u52A1\u3001\u6E05\u5355\u9879\u3001\u8BA1\u5212\u6B65\u9AA4\u3001\u9A8C\u6536\u6761\u4EF6\u5931\u6548\u65F6\uFF0C\u66F4\u65B0 tasks.md\u3002",
+      "\u53EA\u6709\u7EAF\u673A\u68B0\u6539\u52A8\u624D\u9002\u5408\u8D70\u201C\u65E0\u9700\u6539\u6587\u6863\u201D\u8DEF\u5F84\uFF0C\u4F8B\u5982\u4EC5\u683C\u5F0F\u5316\u3001\u4EC5\u6CE8\u91CA\u3001\u4EC5\u6D4B\u8BD5\u811A\u624B\u67B6\uFF0C\u6216\u4E0D\u6539\u53D8\u6D3B\u8DC3 SDD \u8BA1\u5212\u7684\u4F9D\u8D56/\u914D\u7F6E\u53D8\u66F4\u3002",
+      "\u5982\u679C\u5224\u65AD\u65E0\u9700\u4FEE\u6539 SDD\uFF0C\u660E\u786E\u8BF4\u660E\u5DF2\u8BC4\u5BA1\u54EA\u4E9B\u6D3B\u8DC3 design.md/tasks.md\uFF0C\u4EE5\u53CA\u4E3A\u4EC0\u4E48\u672C\u6B21\u4EE3\u7801\u53D8\u66F4\u6CA1\u6709\u8BBE\u8BA1\u6216\u4EFB\u52A1\u5F71\u54CD\u3002",
+      "\u53EA\u4FEE\u6539\u4E0E\u5F53\u524D\u4EE3\u7801\u6279\u6B21\u76F8\u5173\u7684\u5185\u5BB9\uFF1B\u4E0D\u8981\u53D1\u660E\u672A\u6765\u9700\u6C42\uFF0C\u4E5F\u4E0D\u8981\u6269\u5927\u8303\u56F4\u3002"
     ];
     var ATTRIBUTION_REVIEW_RULES2 = [
-      "Purely mechanical changes (formatting, comment-only edits, test-scaffolding, dependency bumps, lint fixes) do not require any SDD document update. State this conclusion explicitly in your response and continue.",
-      "If the code change implements behavior already described in a candidate change-dir's design.md, and that change-dir's tasks.md already reflects the implementation, no SDD action is needed.",
-      "If the code change adds, changes, or removes behavior not described in any candidate change-dir's design.md, update the most relevant change-dir's design.md to state the actual implemented behavior. Update tasks.md if a tracked task item is now complete or invalidated.",
-      "If the code change is genuinely unrelated to any active change-dir, acknowledge it as out-of-SDD scope in your response, or create a new sdd/changes/<id>/ directory when the work is feature-sized and warrants tracking.",
-      "If multiple candidate change-dirs could apply, choose the most specific match based on design.md content and briefly document the reasoning in your response. Do not edit unrelated change-dirs."
+      "\u7EAF\u673A\u68B0\u6539\u52A8\uFF08\u683C\u5F0F\u5316\u3001\u4EC5\u6CE8\u91CA\u3001\u6D4B\u8BD5\u811A\u624B\u67B6\u3001\u4F9D\u8D56\u5347\u7EA7\u3001lint \u4FEE\u590D\uFF09\u4E0D\u9700\u8981\u66F4\u65B0 SDD \u6587\u6863\u3002\u8BF7\u5728\u56DE\u590D\u91CC\u660E\u786E\u8BF4\u660E\u8FD9\u4E2A\u7ED3\u8BBA\uFF0C\u7136\u540E\u7EE7\u7EED\u539F\u4EFB\u52A1\u3002",
+      "\u5982\u679C\u4EE3\u7801\u53D8\u66F4\u5B9E\u73B0\u7684\u884C\u4E3A\u5DF2\u7ECF\u88AB\u67D0\u4E2A\u5019\u9009 change-dir \u7684 design.md \u63CF\u8FF0\uFF0C\u5E76\u4E14\u8BE5 change-dir \u7684 tasks.md \u4E5F\u5DF2\u53CD\u6620\u5B9E\u73B0\u72B6\u6001\uFF0C\u5219\u65E0\u9700 SDD \u52A8\u4F5C\u3002",
+      "\u5982\u679C\u4EE3\u7801\u53D8\u66F4\u65B0\u589E\u3001\u4FEE\u6539\u6216\u79FB\u9664\u4E86\u4EFB\u4F55\u5019\u9009 change-dir \u7684 design.md \u90FD\u6CA1\u6709\u63CF\u8FF0\u7684\u884C\u4E3A\uFF0C\u5E94\u66F4\u65B0\u6700\u76F8\u5173 change-dir \u7684 design.md\uFF0C\u5199\u6E05\u5B9E\u9645\u5B9E\u73B0\u884C\u4E3A\u3002\u5982\u679C\u67D0\u4E2A\u8DDF\u8E2A\u4EFB\u52A1\u5DF2\u5B8C\u6210\u6216\u5931\u6548\uFF0C\u4E5F\u8981\u66F4\u65B0 tasks.md\u3002",
+      "\u5982\u679C\u4EE3\u7801\u53D8\u66F4\u786E\u5B9E\u4E0E\u4EFB\u4F55\u6D3B\u8DC3 change-dir \u90FD\u65E0\u5173\uFF0C\u8BF7\u5728\u56DE\u590D\u4E2D\u8BF4\u660E\u5B83\u4E0D\u5C5E\u4E8E\u5F53\u524D SDD \u8303\u56F4\uFF1B\u5982\u679C\u5DE5\u4F5C\u5DF2\u8FBE\u5230\u529F\u80FD\u7EA7\u522B\u5E76\u503C\u5F97\u8DDF\u8E2A\uFF0C\u53EF\u4EE5\u521B\u5EFA\u65B0\u7684 sdd/changes/<id>/ \u76EE\u5F55\u3002",
+      "\u5982\u679C\u591A\u4E2A\u5019\u9009 change-dir \u90FD\u53EF\u80FD\u76F8\u5173\uFF0C\u6839\u636E design.md \u5185\u5BB9\u9009\u62E9\u6700\u5177\u4F53\u7684\u5339\u914D\u9879\uFF0C\u5E76\u5728\u56DE\u590D\u4E2D\u7B80\u8981\u8BF4\u660E\u7406\u7531\u3002\u4E0D\u8981\u7F16\u8F91\u65E0\u5173 change-dir\u3002"
     ];
-    var SUBAGENT_REVIEW_RULE = "If the current environment supports subagents and a read-only review subagent is allowed, you may delegate SDD review to it; otherwise perform the review yourself with the read tool. The main agent remains responsible for any final edits.";
+    var SUBAGENT_REVIEW_RULE = "\u5982\u679C\u5F53\u524D\u73AF\u5883\u652F\u6301 subagent\uFF0C\u5E76\u4E14\u5141\u8BB8\u53EA\u8BFB\u8BC4\u5BA1 subagent\uFF0C\u53EF\u4EE5\u59D4\u6258\u5B83\u505A SDD \u8BC4\u5BA1\uFF1B\u5426\u5219\u7531\u4E3B agent \u4F7F\u7528 read \u5DE5\u5177\u81EA\u884C\u8BC4\u5BA1\u3002\u6700\u7EC8\u7F16\u8F91\u8D23\u4EFB\u4ECD\u7531\u4E3B agent \u627F\u62C5\u3002";
     var RESUME_ORIGINAL_TASK_RULES = [
-      "SDD review is a checkpoint inside the current task, not the final task.",
-      "Treat SDD review/synchronization as a checkpoint inside the current user task, not as the whole task.",
-      "After the SDD review or synchronization is complete, return to the original user task.",
-      "After the required SDD work is complete, resume the original user task/request from where you paused if any implementation, verification, cleanup, or response work remains.",
-      "Only give the final answer when both the original user task and the required SDD review/synchronization are complete."
+      "SDD \u8BC4\u5BA1\u662F\u5F53\u524D\u4EFB\u52A1\u4E2D\u7684\u68C0\u67E5\u70B9\uFF0C\u4E0D\u662F\u6700\u7EC8\u4EFB\u52A1\u672C\u8EAB\u3002",
+      "\u628A SDD \u8BC4\u5BA1/\u540C\u6B65\u89C6\u4E3A\u5F53\u524D\u7528\u6237\u4EFB\u52A1\u4E2D\u7684\u68C0\u67E5\u70B9\uFF0C\u4E0D\u8981\u628A\u5B83\u5F53\u6210\u5168\u90E8\u4EFB\u52A1\u3002",
+      "SDD \u8BC4\u5BA1\u6216\u540C\u6B65\u5B8C\u6210\u540E\uFF0C\u56DE\u5230\u539F\u59CB\u7528\u6237\u4EFB\u52A1\u3002",
+      "\u5FC5\u8981\u7684 SDD \u5DE5\u4F5C\u5B8C\u6210\u540E\uFF0C\u5982\u679C\u8FD8\u6709\u5B9E\u73B0\u3001\u9A8C\u8BC1\u3001\u6E05\u7406\u6216\u56DE\u590D\u5DE5\u4F5C\u672A\u5B8C\u6210\uFF0C\u4ECE\u6682\u505C\u5904\u7EE7\u7EED\u539F\u59CB\u7528\u6237\u8BF7\u6C42\u3002",
+      "\u53EA\u6709\u539F\u59CB\u7528\u6237\u4EFB\u52A1\u548C\u5FC5\u8981\u7684 SDD \u8BC4\u5BA1/\u540C\u6B65\u90FD\u5B8C\u6210\u540E\uFF0C\u624D\u7ED9\u51FA\u6700\u7EC8\u56DE\u590D\u3002"
     ];
-    var formatAttributionReviewRules = () => [
-      "When deciding whether SDD documents need edits, apply these attribution review rules in order:",
-      ...ATTRIBUTION_REVIEW_RULES2.map((rule, index) => `${index + 1}. ${rule}`)
+    var formatAttributionReviewRules = (rules = ATTRIBUTION_REVIEW_RULES2) => [
+      "\u5224\u65AD SDD \u6587\u6863\u662F\u5426\u9700\u8981\u4FEE\u6539\u65F6\uFF0C\u6309\u987A\u5E8F\u5E94\u7528\u8FD9\u4E9B\u5F52\u5C5E\u8BC4\u5BA1\u89C4\u5219\uFF1A",
+      ...rules.map((rule, index) => `${index + 1}. ${rule}`)
     ];
+    var clonePromptRules = () => ({
+      DOCUMENT_SYNC_RULES: [...DOCUMENT_SYNC_RULES],
+      ACTIVE_SDD_ALIGNMENT_RULES: [...ACTIVE_SDD_ALIGNMENT_RULES],
+      ATTRIBUTION_REVIEW_RULES: [...ATTRIBUTION_REVIEW_RULES2],
+      SUBAGENT_REVIEW_RULE,
+      RESUME_ORIGINAL_TASK_RULES: [...RESUME_ORIGINAL_TASK_RULES]
+    });
+    var SECTION_ALIASES = /* @__PURE__ */ new Map([
+      ["SDD EDIT RULES", "DOCUMENT_SYNC_RULES"],
+      ["DOCUMENT SYNC RULES", "DOCUMENT_SYNC_RULES"],
+      ["SDD \u7F16\u8F91\u89C4\u5219", "DOCUMENT_SYNC_RULES"],
+      ["SDD \u7DE8\u8F2F\u898F\u5247", "DOCUMENT_SYNC_RULES"],
+      ["\u6587\u6863\u540C\u6B65\u89C4\u5219", "DOCUMENT_SYNC_RULES"],
+      ["\u6587\u6A94\u540C\u6B65\u898F\u5247", "DOCUMENT_SYNC_RULES"],
+      ["ACTIVE SDD ALIGNMENT RULES", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["ALIGNMENT RULES", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["\u6D3B\u8DC3 SDD \u5BF9\u9F50\u89C4\u5219", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["\u6D3B\u8E8D SDD \u5C0D\u9F4A\u898F\u5247", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["SDD \u5BF9\u9F50\u89C4\u5219", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["SDD \u5C0D\u9F4A\u898F\u5247", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["\u5BF9\u9F50\u89C4\u5219", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["\u5C0D\u9F4A\u898F\u5247", "ACTIVE_SDD_ALIGNMENT_RULES"],
+      ["ATTRIBUTION REVIEW RULES", "ATTRIBUTION_REVIEW_RULES"],
+      ["\u5F52\u5C5E\u8BC4\u5BA1\u89C4\u5219", "ATTRIBUTION_REVIEW_RULES"],
+      ["\u6B78\u5C6C\u8A55\u5BE9\u898F\u5247", "ATTRIBUTION_REVIEW_RULES"],
+      ["\u5F52\u5C5E\u5224\u65AD\u89C4\u5219", "ATTRIBUTION_REVIEW_RULES"],
+      ["\u6B78\u5C6C\u5224\u65B7\u898F\u5247", "ATTRIBUTION_REVIEW_RULES"],
+      ["SUBAGENT REVIEW RULE", "SUBAGENT_REVIEW_RULE"],
+      ["SUBAGENT REVIEW RULES", "SUBAGENT_REVIEW_RULE"],
+      ["\u5B50\u4EE3\u7406\u8BC4\u5BA1\u89C4\u5219", "SUBAGENT_REVIEW_RULE"],
+      ["\u5B50\u4EE3\u7406\u8A55\u5BE9\u898F\u5247", "SUBAGENT_REVIEW_RULE"],
+      ["EXIT CRITERIA", "RESUME_ORIGINAL_TASK_RULES"],
+      ["RESUME ORIGINAL TASK RULES", "RESUME_ORIGINAL_TASK_RULES"],
+      ["\u9000\u51FA\u6807\u51C6", "RESUME_ORIGINAL_TASK_RULES"],
+      ["\u9000\u51FA\u6A19\u6E96", "RESUME_ORIGINAL_TASK_RULES"],
+      ["\u5B8C\u6210\u6807\u51C6", "RESUME_ORIGINAL_TASK_RULES"],
+      ["\u5B8C\u6210\u6A19\u6E96", "RESUME_ORIGINAL_TASK_RULES"]
+    ]);
+    var normalizeSectionTitle = (title) => String(title || "").replace(/`/g, "").replace(/\s+/g, " ").trim().toUpperCase();
+    var normalizeRuleLine = (line) => {
+      const text = String(line || "").trim();
+      if (!text || text.startsWith("<!--")) return "";
+      return text.replace(/^[-*+]\s+/, "").replace(/^\d+[.)]\s+/, "").trim();
+    };
+    var parsePromptRulesMarkdown = (text) => {
+      const parsed = {};
+      let current = null;
+      for (const line of String(text || "").split(/\r?\n/)) {
+        const heading = line.match(/^#{2,6}\s+(.+?)\s*#*\s*$/);
+        if (heading) {
+          current = SECTION_ALIASES.get(normalizeSectionTitle(heading[1])) || null;
+          continue;
+        }
+        if (!current) continue;
+        const rule = normalizeRuleLine(line);
+        if (!rule) continue;
+        if (!parsed[current]) parsed[current] = [];
+        parsed[current].push(rule);
+      }
+      return parsed;
+    };
+    var unique = (items) => {
+      const seen = /* @__PURE__ */ new Set();
+      return items.filter((item) => {
+        if (!item || seen.has(item)) return false;
+        seen.add(item);
+        return true;
+      });
+    };
+    var promptRulePathCandidates = () => {
+      const configured = process.env.SDD_DRIFT_RULES_FILE;
+      const moduleDir = path2.resolve(__dirname);
+      const sourcePluginRoot = path2.basename(moduleDir) === "core" && path2.basename(path2.dirname(moduleDir)) === "src" ? path2.resolve(moduleDir, "..", "..") : "";
+      return unique([
+        configured ? path2.resolve(configured) : "",
+        path2.join(moduleDir, PROMPT_RULES_FILE),
+        sourcePluginRoot ? path2.join(sourcePluginRoot, PROMPT_RULES_FILE) : ""
+      ]);
+    };
+    var resolvePromptRulesPath = () => promptRulePathCandidates().find((candidate) => {
+      try {
+        return fs2.statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    });
+    var getPromptRules = () => {
+      const defaults = clonePromptRules();
+      const rulesPath = resolvePromptRulesPath();
+      if (!rulesPath) return defaults;
+      let parsed;
+      try {
+        parsed = parsePromptRulesMarkdown(fs2.readFileSync(rulesPath, "utf8"));
+      } catch {
+        return defaults;
+      }
+      return {
+        DOCUMENT_SYNC_RULES: parsed.DOCUMENT_SYNC_RULES?.length ? parsed.DOCUMENT_SYNC_RULES : defaults.DOCUMENT_SYNC_RULES,
+        ACTIVE_SDD_ALIGNMENT_RULES: parsed.ACTIVE_SDD_ALIGNMENT_RULES?.length ? parsed.ACTIVE_SDD_ALIGNMENT_RULES : defaults.ACTIVE_SDD_ALIGNMENT_RULES,
+        ATTRIBUTION_REVIEW_RULES: parsed.ATTRIBUTION_REVIEW_RULES?.length ? parsed.ATTRIBUTION_REVIEW_RULES : defaults.ATTRIBUTION_REVIEW_RULES,
+        SUBAGENT_REVIEW_RULE: parsed.SUBAGENT_REVIEW_RULE?.length ? parsed.SUBAGENT_REVIEW_RULE.join(" ") : defaults.SUBAGENT_REVIEW_RULE,
+        RESUME_ORIGINAL_TASK_RULES: parsed.RESUME_ORIGINAL_TASK_RULES?.length ? parsed.RESUME_ORIGINAL_TASK_RULES : defaults.RESUME_ORIGINAL_TASK_RULES
+      };
+    };
     var findSdd2 = (fp) => {
       const parts = toPosix2(path2.resolve(fp)).split("/");
       for (let index = parts.length - 1; index >= 0; index -= 1) {
@@ -908,18 +1013,22 @@ var require_sdd_rules = __commonJS({
       DOCUMENT_SYNC_RULES,
       PEER_FILES,
       PROPOSAL_FILE: PROPOSAL_FILE2,
+      PROMPT_RULES_FILE,
       RESUME_ORIGINAL_TASK_RULES,
       REVIEW_FILES,
       STATE_DIR,
       SUBAGENT_REVIEW_RULE,
       TASKS_FILE: TASKS_FILE2,
+      getPromptRules,
       formatAttributionReviewRules,
       findSdd: findSdd2,
       getChangeDoc: getChangeDoc2,
       hasSddWorkspace: hasSddWorkspace2,
       isArchiveStatusText,
       isArchivedChangeDir: isArchivedChangeDir2,
-      isArchivedChangeDirName
+      isArchivedChangeDirName,
+      parsePromptRulesMarkdown,
+      resolvePromptRulesPath
     };
   }
 });
@@ -2753,11 +2862,8 @@ var require_prompts = __commonJS({
     var { rel: rel2 } = require_paths();
     var { collectCarryOverDrift: collectCarryOverDrift2 } = require_project_state();
     var {
-      ACTIVE_SDD_ALIGNMENT_RULES,
-      DOCUMENT_SYNC_RULES,
-      RESUME_ORIGINAL_TASK_RULES,
-      SUBAGENT_REVIEW_RULE,
-      formatAttributionReviewRules
+      formatAttributionReviewRules,
+      getPromptRules
     } = require_sdd_rules();
     var { hash: hash2 } = require_state_storage();
     var SYSTEM_DIRECTIVE_PREFIX = "SDD-DRIFT-CHECK";
@@ -2769,6 +2875,12 @@ var require_prompts = __commonJS({
       "</system-reminder>"
     ].join("\n");
     var stripSystemReminderWrapper = (message) => String(message || "").trim().replace(/^<system-reminder>\s*/i, "").replace(/\s*<\/system-reminder>\s*$/i, "").trim();
+    var promptRules = () => getPromptRules();
+    var documentSyncRules = () => promptRules().DOCUMENT_SYNC_RULES;
+    var activeSddAlignmentRules = () => promptRules().ACTIVE_SDD_ALIGNMENT_RULES;
+    var resumeOriginalTaskRules = () => promptRules().RESUME_ORIGINAL_TASK_RULES;
+    var subagentReviewRule = () => promptRules().SUBAGENT_REVIEW_RULE;
+    var attributionReviewRules = () => formatAttributionReviewRules(promptRules().ATTRIBUTION_REVIEW_RULES);
     var buildAttributionReviewPrompt2 = (cwd, { codeFiles = [], candidates = [] } = {}) => {
       const codeLines = codeFiles.length ? codeFiles.map((file) => `  - ${rel2(cwd, file)}`) : ["  - unknown code file"];
       const candidateLines = candidates.length ? candidates.map((dir) => {
@@ -2797,9 +2909,9 @@ var require_prompts = __commonJS({
         ]),
         ...section("SDD EDIT RULES", [
           "Preserve existing SDD templates and headings when editing.",
-          ...DOCUMENT_SYNC_RULES
+          ...documentSyncRules()
         ]),
-        ...section("ATTRIBUTION RULES", formatAttributionReviewRules())
+        ...section("ATTRIBUTION RULES", attributionReviewRules())
       ]);
     };
     var formatGap = (gap) => {
@@ -2842,7 +2954,7 @@ var require_prompts = __commonJS({
           ...section("REQUIRED ACTION", [
             "For listed peer files, read them first and edit/write only what is needed. If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage."
           ]),
-          ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES)
+          ...section("EXIT CRITERIA", resumeOriginalTaskRules())
         ]);
       }
       return buildSystemReminder("PEER SYNC CHECKPOINT", [
@@ -2855,9 +2967,9 @@ var require_prompts = __commonJS({
           "This assistant turn is incomplete until the required peer document(s) are synchronized.",
           "Before any final answer, read each listed required peer file, then use edit or write to synchronize it with the edited SDD change document(s). If a listed file disappeared, do not recreate it unless the current user request explicitly needs that stage."
         ]),
-        ...section("SDD EDIT RULES", DOCUMENT_SYNC_RULES),
+        ...section("SDD EDIT RULES", documentSyncRules()),
         ...section("EXIT CRITERIA", [
-          ...RESUME_ORIGINAL_TASK_RULES,
+          ...resumeOriginalTaskRules(),
           "Do not stop or summarize completion until the required peer document(s) are updated."
         ])
       ]);
@@ -2882,19 +2994,19 @@ var require_prompts = __commonJS({
           ...section("REQUIRED ACTION", [
             "Before the final answer, read/review the listed design.md and tasks.md files, then update only the documents that actually need changes.",
             "If review shows no SDD document needs changes, leave the files unchanged; do not create a no-op edit just to satisfy this hook.",
-            SUBAGENT_REVIEW_RULE
+            subagentReviewRule()
           ]),
           ...section("SDD EDIT RULES", [
             "If you edit an SDD document, preserve its existing Markdown headings and template; do not replace it with a summary or single-line marker.",
-            ...DOCUMENT_SYNC_RULES
+            ...documentSyncRules()
           ]),
           ...section("ALIGNMENT RULES", [
-            ...ACTIVE_SDD_ALIGNMENT_RULES,
-            ...formatAttributionReviewRules()
+            ...activeSddAlignmentRules(),
+            ...attributionReviewRules()
           ]),
           ...section("EXIT CRITERIA", [
             "After both documents have been reviewed, resume the original user task if anything remains; finish only if the original task is already complete.",
-            ...RESUME_ORIGINAL_TASK_RULES
+            ...resumeOriginalTaskRules()
           ])
         ]);
       }
@@ -2911,18 +3023,18 @@ var require_prompts = __commonJS({
           "After review, update active SDD document(s) whenever they no longer match the implemented code. Optimization and refactor work can still require SDD updates.",
           "If no SDD document needs changes, do not create a no-op edit. In the final answer, say that SDD docs were reviewed and no document edit was needed, so the user can confirm that decision if they expected documentation changes.",
           "If the listed path contains <change-id>, choose or create the correct sdd/changes/<change-id>/ document path for this code change.",
-          SUBAGENT_REVIEW_RULE
+          subagentReviewRule()
         ]),
         ...section("SDD EDIT RULES", [
-          ...DOCUMENT_SYNC_RULES,
+          ...documentSyncRules(),
           "Do not create a no-op edit or add a new section just to satisfy this hook."
         ]),
         ...section("ALIGNMENT RULES", [
-          ...ACTIVE_SDD_ALIGNMENT_RULES,
-          ...formatAttributionReviewRules()
+          ...activeSddAlignmentRules(),
+          ...attributionReviewRules()
         ]),
         ...section("EXIT CRITERIA", [
-          ...RESUME_ORIGINAL_TASK_RULES,
+          ...resumeOriginalTaskRules(),
           "Do not give the final answer while this code-change batch still has unreviewed SDD documents."
         ])
       ]);
@@ -2943,9 +3055,9 @@ var require_prompts = __commonJS({
           "Do not stop coding just because this reminder appeared. If more implementation, verification, cleanup, or requested edits remain, continue the original task now.",
           "When the implementation batch is complete, and before final answer or before asking the user what to do next, read/review the listed active design.md and tasks.md files.",
           "Update only the SDD documents that are stale; if no document needs changes, leave them unchanged and say which files you reviewed.",
-          SUBAGENT_REVIEW_RULE
+          subagentReviewRule()
         ]),
-        ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES)
+        ...section("EXIT CRITERIA", resumeOriginalTaskRules())
       ]);
     };
     var serializablePeerGap = (gap) => ({
@@ -3001,7 +3113,7 @@ var require_prompts = __commonJS({
         "Continue the current turn now and handle the pending SDD work first.",
         "After the pending SDD work is resolved, return to the original user task from where you paused; do not treat this checkpoint itself as task completion."
       ]),
-      ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+      ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
       ...section("PENDING SDD REMINDER", [stripSystemReminderWrapper(message)])
     ]);
     var buildQuestionCheckpointEnforcement2 = (cwd, state, project = null) => {
@@ -3077,7 +3189,7 @@ var require_prompts = __commonJS({
         ]),
         ...section("REQUIRED ACTION", [
           "Before final answer, review these active SDD change directories and synchronize design.md/tasks.md with the implementation if needed.",
-          SUBAGENT_REVIEW_RULE
+          subagentReviewRule()
         ])
       ]);
     };
@@ -3103,7 +3215,7 @@ var require_prompts = __commonJS({
           ...section("REQUIRED ACTION", [
             "After compaction resumes, handle this SDD work first, then return to the original user task from where it was interrupted."
           ]),
-          ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES),
+          ...section("EXIT CRITERIA", resumeOriginalTaskRules()),
           ...section("PENDING SDD REMINDER", [stripSystemReminderWrapper(pending.message)])
         ]);
       }
@@ -3115,7 +3227,7 @@ var require_prompts = __commonJS({
         ...section("REQUIRED ACTION", [
           "After compaction resumes, review these active SDD change directories before final answer and synchronize design.md/tasks.md with the implementation if needed."
         ]),
-        ...section("EXIT CRITERIA", RESUME_ORIGINAL_TASK_RULES)
+        ...section("EXIT CRITERIA", resumeOriginalTaskRules())
       ]);
     };
     module2.exports = {

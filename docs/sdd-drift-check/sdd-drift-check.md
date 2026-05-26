@@ -18,6 +18,9 @@ This package has two entrypoints:
   Claude Code hook configuration.
 - `sdd-drift-check-opencode.js`: native OpenCode plugin adapter. Use this when
   you want OpenCode to load the plugin directly from `.opencode/plugins/`.
+- `sdd-drift-check-rules.md`: optional runtime prompt-rules file. Put it in the
+  same directory as the installed JS artifact when users need to customize SDD
+  review principles.
 
 Both entrypoints share the same drift rules, state files, reports, and
 diagnostic logs. The native OpenCode adapter is intentionally separate from the
@@ -98,6 +101,29 @@ The section layout is part of the tested prompt contract. In particular, SDD
 edits must preserve existing headings/templates, modify the closest stale
 paragraph or task item, avoid adding new sections merely to satisfy the hook,
 and return to the original user task after the SDD checkpoint is handled.
+
+## Custom Prompt Rules
+
+The review principles are loaded dynamically from `sdd-drift-check-rules.md`.
+The lookup order is:
+
+1. `SDD_DRIFT_RULES_FILE`, when set.
+2. `sdd-drift-check-rules.md` in the same directory as the running JS artifact.
+3. Built-in defaults if no rules file is found, or if a section is empty.
+
+The supported section headings are:
+
+- `## SDD 编辑规则` (`## SDD EDIT RULES`)
+- `## 活跃 SDD 对齐规则` (`## Active SDD Alignment Rules`)
+- `## 归属评审规则` (`## Attribution Review Rules`)
+- `## 子代理评审规则` (`## Subagent Review Rule`)
+- `## 退出标准` (`## Exit Criteria`)
+
+Edit bullet lines under those headings to change the principles injected into
+future reminders. The file is read each time the plugin builds a prompt, so
+users do not need to rebuild the plugin or restart a long-running OpenCode
+process just to adjust wording. If a section is missing, that section keeps the
+built-in defaults.
 
 ## Behavior
 
@@ -200,16 +226,29 @@ numeric rotation files such as `sdd-drift-check.log.jsonl.1`.
 
 ### OpenCode Native Plugin
 
-Copy the OpenCode artifact under `.opencode/plugins/`:
+Copy the OpenCode artifact under `.opencode/plugins/` for one project:
 
 ```powershell
 New-Item -ItemType Directory -Force .opencode\plugins
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js .opencode\plugins\sdd-drift-check-opencode.js
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-rules.md .opencode\plugins\sdd-drift-check-rules.md
 ```
 
-OpenCode automatically loads local plugins from `.opencode/plugins/`.
+Or install it globally for all OpenCode projects:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.config\opencode\plugins"
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-opencode.js "$env:USERPROFILE\.config\opencode\plugins\sdd-drift-check-opencode.js" -Force
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-rules.md "$env:USERPROFILE\.config\opencode\plugins\sdd-drift-check-rules.md" -Force
+```
+
+OpenCode automatically loads local plugins from `.opencode/plugins/` and
+`~/.config/opencode/plugins/`. On Windows the global path is usually
+`C:\Users\<user>\.config\opencode\plugins\`.
 `sdd-drift-check-opencode.js` is self-contained; do not also copy
 `sdd-drift-check-hook.js` into `.opencode/plugins/`.
+Keep `sdd-drift-check-rules.md` in the same directory as the installed JS file;
+the plugin reloads it whenever it builds a reminder prompt.
 
 ### Claude Code Or Claude-Compatible Hook Config
 
@@ -219,6 +258,7 @@ context and does not enable `PostToolUse`:
 ```powershell
 New-Item -ItemType Directory -Force .claude\hooks\sdd-drift-check
 Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-hook.js .claude\hooks\sdd-drift-check\sdd-drift-check-hook.js
+Copy-Item E:\tool\MySkills\MySkills\plugins\sdd-drift-check\sdd-drift-check-rules.md .claude\hooks\sdd-drift-check\sdd-drift-check-rules.md
 ```
 
 `.claude/settings.json`:
@@ -413,6 +453,7 @@ The committed runtime artifacts are:
 ```text
 plugins/sdd-drift-check/sdd-drift-check-hook.js
 plugins/sdd-drift-check/sdd-drift-check-opencode.js
+plugins/sdd-drift-check/sdd-drift-check-rules.md
 ```
 
 The adapter sources live under:
@@ -446,9 +487,10 @@ Then verify the committed artifact is in sync:
 npm run build:check
 ```
 
-`build:check` creates temporary artifacts and byte-compares them with both
-committed runtime files. If it fails, run `npm run build` and commit the updated
-artifact(s) together with the source change.
+`build:check` creates temporary JS artifacts and byte-compares them with both
+committed JS runtime files. If it fails, run `npm run build` and commit the
+updated artifact(s) together with the source change. `sdd-drift-check-rules.md`
+is not bundled; it is read dynamically at runtime.
 
 ## Tests
 
