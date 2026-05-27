@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "stableIdleMs": 5000,
+  "payloadRetentionDays": 3,
+  "agentOutput": {
+    "mode": "preview",
+    "maxChars": 2000
+  },
+  "callbacks": []
+}

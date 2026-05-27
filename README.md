@@ -12,11 +12,16 @@ test harnesses under `test/`.
 | Plugin | Status | Purpose |
 | --- | --- | --- |
 | `plugins/sdd-drift-check` | Active | OpenCode native plugin and Claude Code compatible hook that detects SDD drift and asks the model to reconcile related `proposal.md`, `design.md`, and `tasks.md` files. |
+| `plugins/opencode-turn-checkpoint` | Active | OpenCode native plugin that observes stable session idle checkpoints and calls external CLI callbacks with a JSON payload. |
 
 ## Repository Layout
 
 ```text
 plugins/
+  opencode-turn-checkpoint/
+    opencode-turn-checkpoint.js
+    opencode-turn-checkpoint.json
+    README.md
   sdd-drift-check/
     src/
       adapters/
@@ -53,59 +58,20 @@ test/
 ## SDD Drift Check
 
 `sdd-drift-check` helps keep SDD change documents synchronized while an agent is
-editing code or SDD documents.
-
-### Runtime Environment
-
-Use this plugin in one of these hook-capable runtimes:
-
-- Claude Code with its native hook configuration.
-- OpenCode with the native OpenCode plugin entrypoint.
-
-The two runtime faces are peers in source:
-
-- `src/adapters/claude-code/command-hook.js` builds the Claude Code command
-  hook artifact `sdd-drift-check-hook.js`.
-- `src/adapters/opencode/native-plugin.js` builds the native OpenCode plugin
-  artifact `sdd-drift-check-opencode.js`.
-
-Both JavaScript artifacts are self-contained at runtime. OpenCode users install
-`sdd-drift-check-opencode.js` under project `.opencode/plugins/` or global
-`~/.config/opencode/plugins/`; Claude Code users install
-`sdd-drift-check-hook.js`. Users may also place `sdd-drift-check-rules.md` in
-the same directory as the installed JS file to customize SDD review principles
-without rebuilding or restarting for wording-only changes. Shared logic lives under `src/core/`, including tool event
-classification, runtime config parsing, output protocol helpers, and SDD rule
-text/constants.
-
-It supports:
-
-- OpenCode native plugin hooks through `tool.execute.after` and `session.idle`.
-- Claude Code compatible hook settings.
-- `UserPromptSubmit` context capture for Claude Code issue-ticket detection.
-- `PostToolUse` model-visible reminders for reliable OpenCode cascades.
-- Question/tool handoff checkpoints before commit-or-continue prompts.
-- `Stop` hook checks for Claude-compatible final review behavior.
-- Session-level batching for code changes before SDD reconciliation.
-- Project-level `project.json` state for cross-session active change-dir drift,
-  review timestamps, linked code, and aligned baselines.
-- Issue-ticket/DTS context suppression for code-ahead-of-doc reminders.
-- Bounded code-review reminders to avoid repeated tool-result injection loops.
-- Diagnostic JSONL logs with default 3-day retention.
-- Structured model-visible reminders wrapped as `<system-reminder>` with a
-  `[SYSTEM DIRECTIVE: SDD-DRIFT-CHECK - ...]` header, so Claude Code and
-  OpenCode receive the same high-priority SDD review language.
-
-See the plugin documentation for installation and behavior details:
+editing code or SDD documents. It supports OpenCode and Claude Code.
 
 ```text
 docs/sdd-drift-check/sdd-drift-check.md
+docs/sdd-drift-check/getting-started.md
 ```
 
-For a quick installation and first-use guide:
+## OpenCode Turn Checkpoint
+
+`opencode-turn-checkpoint` is an OpenCode-only companion plugin for turn-end
+notifications and integrations. It is independent from `sdd-drift-check`.
 
 ```text
-docs/sdd-drift-check/getting-started.md
+plugins/opencode-turn-checkpoint/README.md
 ```
 
 ## Build And Package
