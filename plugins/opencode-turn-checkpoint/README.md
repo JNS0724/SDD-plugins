@@ -16,6 +16,11 @@ Copy-Item E:\tool\MySkills\MySkills\plugins\opencode-turn-checkpoint\opencode-tu
 Copy-Item E:\tool\MySkills\MySkills\plugins\opencode-turn-checkpoint\opencode-turn-checkpoint.json .opencode\plugins\opencode-turn-checkpoint.json -Force
 ```
 
+Only install `opencode-turn-checkpoint.js` and
+`opencode-turn-checkpoint.json` into OpenCode's plugin directory. Do not copy
+the whole source directory or the `examples/` directory into `.opencode/plugins/`;
+example files are callback scripts, not plugin entry files.
+
 Global install:
 
 ```powershell
@@ -45,7 +50,7 @@ Example:
 ```json
 {
   "version": 1,
-  "stableIdleMs": 5000,
+  "stableIdleMs": 2000,
   "payloadRetentionDays": 3,
   "agentOutput": {
     "mode": "preview",
@@ -87,7 +92,7 @@ It can be used directly with Node.js:
 ```json
 {
   "version": 1,
-  "stableIdleMs": 5000,
+  "stableIdleMs": 2000,
   "payloadRetentionDays": 3,
   "agentOutput": {
     "mode": "preview",
@@ -123,6 +128,13 @@ The plugin removes old payload JSON files from that directory when a new
 payload is written. `payloadRetentionDays` defaults to `3`; set it to `0` to
 remove existing payloads on the next callback run.
 
+For long-running OpenCode UI sessions, the default `stableIdleMs` is `2000`.
+That is usually enough for short background activity to settle without making
+callbacks feel sluggish. For one-shot `opencode run` automation, set
+`stableIdleMs` to `0`; the CLI process can exit immediately after publishing
+`session.idle`, so delayed callbacks may not have time to finish. If your
+environment has noisy background task activity, raise it to `3000` or `5000`.
+
 ## Payload
 
 The callback receives a payload similar to:
@@ -136,7 +148,7 @@ The callback receives a payload similar to:
   "cwd": "E:\\project",
   "sessionId": "session-id",
   "idleRawType": "session.idle",
-  "stableIdleMs": 5000,
+  "stableIdleMs": 2000,
   "agentOutput": {
     "source": "message-cache",
     "messageId": "message-id",

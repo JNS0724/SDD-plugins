@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "stableIdleMs": 5000,
+  "stableIdleMs": 2000,
   "payloadRetentionDays": 3,
   "agentOutput": {
     "mode": "preview",

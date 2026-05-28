@@ -6,6 +6,7 @@ const path = require("path")
 
 const repoRoot = path.resolve(__dirname, "..", "..", "..")
 const pluginPath = path.join(repoRoot, "plugins", "opencode-turn-checkpoint", "opencode-turn-checkpoint.js")
+const examplePath = path.join(repoRoot, "plugins", "opencode-turn-checkpoint", "examples", "notify-console.js")
 const checkpoint = require(pluginPath)
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-turn-checkpoint-test-"))
@@ -16,6 +17,21 @@ const write = (fp, content) => {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const captureConsole = (fn) => {
+  const previousLog = console.log
+  const previousError = console.error
+  const logs = []
+  const errors = []
+  console.log = (...args) => logs.push(args.join(" "))
+  console.error = (...args) => errors.push(args.join(" "))
+  try {
+    return { result: fn(), logs, errors }
+  } finally {
+    console.log = previousLog
+    console.error = previousError
+  }
+}
 
 const withEnv = async (updates, fn) => {
   const previous = {}
@@ -127,9 +143,44 @@ const makeCtx = (cwd) => ({
 
 const run = async () => {
   assert.strictEqual(typeof checkpoint.OpenCodeTurnCheckpoint, "function")
+  assert.strictEqual(typeof checkpoint._private, "function")
   assert.strictEqual(typeof checkpoint._private.normalizeConfig, "function")
 
   {
+    delete require.cache[require.resolve(examplePath)]
+    const loaded = captureConsole(() => require(examplePath))
+    assert.deepStrictEqual(loaded.logs, [])
+    assert.deepStrictEqual(loaded.errors, [])
+    assert.strictEqual(typeof loaded.result.OpenCodeTurnCheckpointNotifyConsoleExample, "function")
+    assert.strictEqual(typeof loaded.result._private, "function")
+    assert.strictEqual(typeof loaded.result._private.main, "function")
+
+    const missingPayload = captureConsole(() => loaded.result._private.main(["node", "notify-console.js"]))
+    assert.strictEqual(missingPayload.result, 2)
+    assert.ok(missingPayload.errors.some((line) => line.includes("Missing -Payload")))
+
+    const payloadFile = path.join(tmpRoot, "example-payload.json")
+    write(
+      payloadFile,
+      JSON.stringify({
+        cwd: path.join(tmpRoot, "project"),
+        sessionId: "s-example",
+        event: "stable-idle",
+        timestamp: "2026-05-27T00:00:00.000Z",
+        agentOutput: { source: "message-cache", preview: "done", truncated: false },
+        recentActivity: { lastTool: "edit", lastToolAt: "2026-05-27T00:00:00.000Z" },
+      })
+    )
+    const withPayload = captureConsole(() =>
+      loaded.result._private.main(["node", "notify-console.js", "-Payload", payloadFile])
+    )
+    assert.strictEqual(withPayload.result, 0)
+    assert.ok(withPayload.logs.join("\n").includes("OpenCode turn checkpoint"))
+    assert.ok(withPayload.logs.join("\n").includes("Session: s-example"))
+  }
+
+  {
+    assert.strictEqual(checkpoint._private.normalizeConfig({}).stableIdleMs, 2000)
     const normalized = checkpoint._private.normalizeConfig({
       stableIdleMs: -1,
       payloadRetentionDays: -1,
@@ -142,6 +193,92 @@ const run = async () => {
     assert.strictEqual(normalized.agentOutput.maxChars, 0)
     assert.strictEqual(normalized.callbacks.length, 1)
     assert.deepStrictEqual(normalized.callbacks[0].args, ["1"])
+  }
+
+  {
+    const sessions = new Map()
+    const config = checkpoint._private.normalizeConfig({
+      agentOutput: { mode: "preview", maxChars: 50 },
+    })
+    checkpoint._private.handleMessageActivity(
+      sessions,
+      "s-sdk-updated",
+      {
+        properties: {
+          info: {
+            id: "m-sdk-updated",
+            sessionID: "s-sdk-updated",
+            role: "assistant",
+          },
+        },
+      },
+      null,
+      "message.updated"
+    )
+    checkpoint._private.handleMessageActivity(
+      sessions,
+      "s-sdk-updated",
+      {
+        properties: {
+          part: {
+            id: "p-sdk-updated",
+            sessionID: "s-sdk-updated",
+            messageID: "m-sdk-updated",
+            type: "text",
+            text: "assistant text from OpenCode SDK part update",
+          },
+        },
+      },
+      null,
+      "message.part.updated"
+    )
+    const payload = checkpoint._private.buildPayload({
+      ctx: makeCtx(tmpRoot),
+      sessionID: "s-sdk-updated",
+      session: sessions.get("s-sdk-updated"),
+      stableIdleMs: 10,
+      rawType: "session.idle",
+      config,
+    })
+    assert.strictEqual(payload.agentOutput.source, "message.part.updated")
+    assert.strictEqual(payload.agentOutput.messageId, "m-sdk-updated")
+    assert.strictEqual(payload.agentOutput.preview, "assistant text from OpenCode SDK part update")
+  }
+
+  {
+    const sessions = new Map()
+    const config = checkpoint._private.normalizeConfig({
+      agentOutput: { mode: "preview", maxChars: 50 },
+    })
+    checkpoint._private.handleMessagePartDelta(sessions, "s-delta", {
+      properties: {
+        sessionID: "s-delta",
+        messageID: "m-delta",
+        partID: "p-delta",
+        field: "text",
+        delta: "assistant ",
+      },
+    })
+    checkpoint._private.handleMessagePartDelta(sessions, "s-delta", {
+      properties: {
+        sessionID: "s-delta",
+        messageID: "m-delta",
+        partID: "p-delta",
+        field: "text",
+        delta: "delta text",
+      },
+    })
+    const payload = checkpoint._private.buildPayload({
+      ctx: makeCtx(tmpRoot),
+      sessionID: "s-delta",
+      session: sessions.get("s-delta"),
+      stableIdleMs: 10,
+      rawType: "session.idle",
+      config,
+    })
+    assert.strictEqual(payload.agentOutput.source, "message.part.delta")
+    assert.strictEqual(payload.agentOutput.messageId, "m-delta")
+    assert.strictEqual(payload.agentOutput.preview, "assistant delta text")
   }
 
   {
@@ -206,6 +343,37 @@ const run = async () => {
         assert.strictEqual(payload.agentOutput.preview, "abc")
         assert.strictEqual(payload.agentOutput.truncated, true)
         assert.strictEqual(payload.agentOutput.messageId, "m-callback")
+      }
+    )
+  }
+
+  {
+    const dir = path.join(tmpRoot, "immediate-idle")
+    const config = writeConfig({ dir, stableIdleMs: 0 })
+    const log = path.join(dir, "checkpoint.log.jsonl")
+    await withEnv(
+      {
+        OPENCODE_TURN_CHECKPOINT_CONFIG: config,
+        OPENCODE_TURN_CHECKPOINT_LOG: log,
+      },
+      async () => {
+        const hooks = await checkpoint.OpenCodeTurnCheckpoint(makeCtx(dir))
+        await hooks.event({
+          event: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: "s-immediate",
+              messageID: "m-immediate",
+              partID: "p-immediate",
+              field: "text",
+              delta: "immediate idle payload",
+            },
+          },
+        })
+        await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s-immediate" } } })
+        const rows = readJsonl(log).filter((row) => row.message === "stable idle checkpoint observed with no callbacks")
+        assert.strictEqual(rows.length, 1)
+        assert.strictEqual(rows[0].extra.sessionID, "s-immediate")
       }
     )
   }

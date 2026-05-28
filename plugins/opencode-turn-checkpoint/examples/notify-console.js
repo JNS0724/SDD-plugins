@@ -3,46 +3,64 @@
 const fs = require("node:fs")
 const path = require("node:path")
 
-const argValue = (name) => {
-  const index = process.argv.indexOf(name)
-  return index >= 0 ? process.argv[index + 1] : null
+const argValue = (argv, name) => {
+  const index = argv.indexOf(name)
+  return index >= 0 ? argv[index + 1] : null
 }
 
-const payloadFile = argValue("-Payload") || argValue("--payload")
+const readPayload = (payloadFile) => JSON.parse(fs.readFileSync(payloadFile, "utf8").replace(/^\uFEFF/, ""))
 
-if (!payloadFile) {
-  console.error("Missing -Payload <payload.json>")
-  process.exit(2)
+const formatPayload = (payload) => {
+  const agentOutput = payload.agentOutput || {}
+  const recentActivity = payload.recentActivity || {}
+  const projectName = payload.cwd ? path.basename(payload.cwd) : "unknown-project"
+  const preview = String(agentOutput.preview || "").trim()
+
+  return [
+    "OpenCode turn checkpoint",
+    `Project: ${projectName}`,
+    `Directory: ${payload.cwd || ""}`,
+    `Session: ${payload.sessionId || ""}`,
+    `Event: ${payload.event || ""}`,
+    `Timestamp: ${payload.timestamp || ""}`,
+    `Last tool: ${recentActivity.lastTool || "none"}`,
+    `Last tool at: ${recentActivity.lastToolAt || "none"}`,
+    `Last message at: ${recentActivity.lastMessageAt || "none"}`,
+    `Agent output source: ${agentOutput.source || "none"}`,
+    `Agent output truncated: ${Boolean(agentOutput.truncated)}`,
+    "",
+    "Agent output preview:",
+    preview || "(empty)",
+  ].join("\n")
 }
 
-let payload
-try {
-  payload = JSON.parse(fs.readFileSync(payloadFile, "utf8").replace(/^\uFEFF/, ""))
-} catch (error) {
-  console.error(`Failed to read payload: ${error.message}`)
-  process.exit(2)
+const main = (argv = process.argv) => {
+  const payloadFile = argValue(argv, "-Payload") || argValue(argv, "--payload")
+
+  if (!payloadFile) {
+    console.error("Missing -Payload <payload.json>")
+    return 2
+  }
+
+  try {
+    console.log(formatPayload(readPayload(payloadFile)))
+    return 0
+  } catch (error) {
+    console.error(`Failed to read payload: ${error.message}`)
+    return 2
+  }
 }
 
-const agentOutput = payload.agentOutput || {}
-const recentActivity = payload.recentActivity || {}
-const projectName = payload.cwd ? path.basename(payload.cwd) : "unknown-project"
-const preview = String(agentOutput.preview || "").trim()
+const OpenCodeTurnCheckpointNotifyConsoleExample = async () => ({})
 
-const lines = [
-  "OpenCode turn checkpoint",
-  `Project: ${projectName}`,
-  `Directory: ${payload.cwd || ""}`,
-  `Session: ${payload.sessionId || ""}`,
-  `Event: ${payload.event || ""}`,
-  `Timestamp: ${payload.timestamp || ""}`,
-  `Last tool: ${recentActivity.lastTool || "none"}`,
-  `Last tool at: ${recentActivity.lastToolAt || "none"}`,
-  `Last message at: ${recentActivity.lastMessageAt || "none"}`,
-  `Agent output source: ${agentOutput.source || "none"}`,
-  `Agent output truncated: ${Boolean(agentOutput.truncated)}`,
-  "",
-  "Agent output preview:",
-  preview || "(empty)",
-]
+exports.OpenCodeTurnCheckpointNotifyConsoleExample = OpenCodeTurnCheckpointNotifyConsoleExample
+exports._private = Object.assign(async () => ({}), {
+  argValue,
+  formatPayload,
+  main,
+  readPayload,
+})
 
-console.log(lines.join("\n"))
+if (require.main === module) {
+  process.exitCode = main(process.argv)
+}

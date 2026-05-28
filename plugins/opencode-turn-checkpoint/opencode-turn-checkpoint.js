@@ -5,7 +5,7 @@ const path = require("node:path")
 const { spawn } = require("node:child_process")
 
 const PLUGIN_NAME = "opencode-turn-checkpoint"
-const DEFAULT_STABLE_IDLE_MS = 5000
+const DEFAULT_STABLE_IDLE_MS = 2000
 const DEFAULT_CALLBACK_TIMEOUT_MS = 3000
 const DEFAULT_AGENT_OUTPUT_MODE = "preview"
 const DEFAULT_AGENT_OUTPUT_MAX_CHARS = 2000
@@ -127,10 +127,17 @@ const statusValue = (event) => {
   return typeof status === "string" ? status : status?.type
 }
 
+const textValue = (value) => {
+  if (typeof value === "string") return value
+  if (value && typeof value.value === "string") return value.value
+  return ""
+}
+
 const textFromPart = (part) => {
   if (!part) return ""
   if (typeof part === "string") return part
-  return part.text || part.content || part.value || part.delta || ""
+  if (part.type && part.type !== "text") return ""
+  return textValue(part.text) || textValue(part.content) || textValue(part.value) || textValue(part.delta)
 }
 
 const textFromParts = (parts) =>
@@ -140,7 +147,7 @@ const textFromParts = (parts) =>
 
 const messageFields = (eventOrInput = {}, output = null) => {
   const props = eventOrInput.properties || {}
-  const message = output?.message || props.message || eventOrInput.message || {}
+  const message = output?.message || props.message || props.info || eventOrInput.message || {}
   const parts =
     output?.parts ||
     props.parts ||
@@ -164,6 +171,7 @@ const messageFields = (eventOrInput = {}, output = null) => {
     message.text ||
     message.content ||
     ""
+  const part = props.part || eventOrInput.part || null
   const messageId =
     eventOrInput.messageID ||
     eventOrInput.messageId ||
@@ -171,9 +179,18 @@ const messageFields = (eventOrInput = {}, output = null) => {
     props.messageID ||
     props.messageId ||
     props.message_id ||
+    part?.messageID ||
+    part?.messageId ||
+    part?.message_id ||
     message.id ||
     null
-  return { role, text: String(text || ""), messageId }
+  const partId =
+    props.partID ||
+    props.partId ||
+    props.part_id ||
+    part?.id ||
+    null
+  return { role, text: String(text || ""), messageId, partId }
 }
 
 const shouldCacheAssistantMessage = ({ role, text }) => {
@@ -192,6 +209,7 @@ const createInitialSessionState = () => ({
   lastMessageAt: null,
   lastTodoAt: null,
   lastAssistant: null,
+  partTexts: new Map(),
 })
 
 const getSessionState = (sessions, sessionID) => {
@@ -384,43 +402,57 @@ const runCallbacks = async ({ ctx, sessionID, session, stableIdleMs, rawType, co
   return results
 }
 
-const scheduleStableIdle = ({ ctx, sessions, sessionID, rawType, config, setTimeoutFn = setTimeout }) => {
+const completeStableIdle = async ({ ctx, sessions, sessionID, seq, rawType, config }) => {
+  const current = getSessionState(sessions, sessionID)
+  current.pendingTimer = null
+  current.pendingTimerSeq = null
+  if (current.activitySeq !== seq || current.lastTriggeredSeq === seq) return false
+  current.lastTriggeredSeq = seq
+  try {
+    await runCallbacks({
+      ctx,
+      sessionID,
+      session: current,
+      stableIdleMs: config.stableIdleMs,
+      rawType,
+      config,
+    })
+  } catch (error) {
+    await logPluginIssue(ctx.client, "warn", "stable idle checkpoint failed", {
+      sessionID,
+      error: compact(error?.stack || error),
+    })
+  }
+  return true
+}
+
+const scheduleStableIdle = async ({ ctx, sessions, sessionID, rawType, config, setTimeoutFn = setTimeout }) => {
   const session = getSessionState(sessions, sessionID)
   const seq = session.activitySeq
   if (session.lastTriggeredSeq === seq || session.pendingTimerSeq === seq) return false
   cancelPendingIdle(session)
+
+  if (config.stableIdleMs <= 0) {
+    session.pendingTimerSeq = seq
+    return completeStableIdle({ ctx, sessions, sessionID, seq, rawType, config })
+  }
+
   session.pendingTimerSeq = seq
   session.pendingTimer = setTimeoutFn(async () => {
-    const current = getSessionState(sessions, sessionID)
-    current.pendingTimer = null
-    current.pendingTimerSeq = null
-    if (current.activitySeq !== seq || current.lastTriggeredSeq === seq) return
-    current.lastTriggeredSeq = seq
-    try {
-      await runCallbacks({
-        ctx,
-        sessionID,
-        session: current,
-        stableIdleMs: config.stableIdleMs,
-        rawType,
-        config,
-      })
-    } catch (error) {
-      await logPluginIssue(ctx.client, "warn", "stable idle checkpoint failed", {
-        sessionID,
-        error: compact(error?.stack || error),
-      })
-    }
+    await completeStableIdle({ ctx, sessions, sessionID, seq, rawType, config })
   }, config.stableIdleMs)
   return true
 }
 
 const handleMessageActivity = (sessions, sessionID, eventOrInput, output = null, source = "message-cache") => {
   const fields = messageFields(eventOrInput, output)
+  const session = getSessionState(sessions, sessionID)
+  if (fields.partId && fields.text) session.partTexts.set(fields.partId, fields.text)
   const assistant = shouldCacheAssistantMessage(fields)
     ? {
         source,
         messageId: fields.messageId,
+        partId: fields.partId || null,
         text: fields.text,
         updatedAt: nowIso(),
       }
@@ -428,7 +460,32 @@ const handleMessageActivity = (sessions, sessionID, eventOrInput, output = null,
   return markActivity(sessions, sessionID, "message", { assistant })
 }
 
-exports.OpenCodeTurnCheckpoint = async (ctx) => {
+const handleMessagePartDelta = (sessions, sessionID, event = {}) => {
+  const props = event.properties || {}
+  if (props.field && props.field !== "text") {
+    return markActivity(sessions, sessionID, "message")
+  }
+  const partId = props.partID || props.partId || props.part_id || null
+  const messageId = props.messageID || props.messageId || props.message_id || null
+  const delta = textValue(props.delta)
+  if (!delta) return markActivity(sessions, sessionID, "message")
+
+  const session = getSessionState(sessions, sessionID)
+  const key = partId || messageId || "default"
+  const text = `${session.partTexts.get(key) || ""}${delta}`
+  session.partTexts.set(key, text)
+  return markActivity(sessions, sessionID, "message", {
+    assistant: {
+      source: "message.part.delta",
+      messageId,
+      partId,
+      text,
+      updatedAt: nowIso(),
+    },
+  })
+}
+
+const OpenCodeTurnCheckpoint = async (ctx) => {
   const sessions = new Map()
   let loaded = loadConfig()
   if (loaded.error) {
@@ -472,7 +529,7 @@ exports.OpenCodeTurnCheckpoint = async (ctx) => {
 
       if (type === "session.idle" || (type === "session.status" && statusValue(event) === "idle")) {
         const config = await reloadConfig()
-        scheduleStableIdle({ ctx, sessions, sessionID, rawType: type, config })
+        await scheduleStableIdle({ ctx, sessions, sessionID, rawType: type, config })
         return
       }
 
@@ -486,6 +543,11 @@ exports.OpenCodeTurnCheckpoint = async (ctx) => {
         return
       }
 
+      if (type === "message.part.delta") {
+        handleMessagePartDelta(sessions, sessionID, event)
+        return
+      }
+
       if (type === "todo.updated") {
         markActivity(sessions, sessionID, "todo")
       }
@@ -493,13 +555,15 @@ exports.OpenCodeTurnCheckpoint = async (ctx) => {
   }
 }
 
-exports._private = {
+const privateApi = Object.assign(async () => ({}), {
   buildAgentOutput,
   buildPayload,
+  completeStableIdle,
   cleanupOldPayloads,
   configPath,
   eventType,
   getSessionID,
+  handleMessagePartDelta,
   handleMessageActivity,
   loadConfig,
   markActivity,
@@ -511,4 +575,7 @@ exports._private = {
   scheduleStableIdle,
   shouldCacheAssistantMessage,
   statusValue,
-}
+})
+
+exports.OpenCodeTurnCheckpoint = OpenCodeTurnCheckpoint
+exports._private = privateApi
