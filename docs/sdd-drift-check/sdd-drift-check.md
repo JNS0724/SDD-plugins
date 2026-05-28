@@ -222,6 +222,237 @@ Logs are retained for the latest 3 days by default. Cleanup runs before each
 diagnostic append and prunes old JSONL records from the active log plus same-name
 numeric rotation files such as `sdd-drift-check.log.jsonl.1`.
 
+## Project State And State Machine
+
+`project.json` is the long-lived, cross-session state file. It is written next
+to the session state files:
+
+```text
+<nearest .git>/sdd-drift-hook-state/project.json
+```
+
+If the Git state directory cannot be used, it follows the same fallback order as
+other hook state: `<cwd>/.sdd-drift-hook-state/project.json`, then
+`%TEMP%/sdd-drift-check/<repo-hash>/project.json`.
+
+The file is implementation-owned. It is useful for diagnosis and review, but
+users normally should not edit it by hand. Timestamp fields are internal
+comparison clocks, not a public API. In particular, document/code edit clocks
+are stored as monotonic numeric values derived from file mtime and hook event
+time, while `activeUntilMs` is a normal epoch millisecond TTL deadline.
+
+### Top-Level Fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `version` | number | Project state schema version. Current value is `1`. |
+| `lastUpdatedAt` | string | ISO timestamp written when the project state is recomputed/saved. |
+| `changeDirs` | object | Map from relative change directory, such as `sdd/changes/demo`, to a `ChangeDir` record. |
+| `activeChangeDir` | string or null | Best current attribution target for later code edits. It is updated when a session edits an SDD doc or when code attribution resolves to one change directory. |
+| `activeUntilMs` | number | Expiry time for `activeChangeDir`, in epoch milliseconds. Default TTL is controlled by `SDD_DRIFT_ACTIVE_TTL_MS` and is 7 days. |
+| `activeLastEditedSession` | string or null | Session id that most recently refreshed `activeChangeDir`. |
+
+`changeDirs` is automatically discovered from root-level `sdd/changes/*` and
+`.sdd/changes/*`. Archived directories are still represented if seen before, but
+their computed state becomes `ARCHIVED` and they are skipped by drift checks.
+
+### `ChangeDir` Fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `relDir` | string | Change directory path relative to project root. |
+| `archived` | boolean | Whether this change directory is archived by directory name, marker file, or status file. Archived dirs do not produce drift reminders. |
+| `docs` | object | Per-document records for `proposal`, `design`, and `tasks`. |
+| `linkedCode` | array | Code files attributed to this change directory. This drives project-level code-ahead-of-doc review across sessions. |
+| `docSyncs` | object | Cross-session evidence that one SDD document was updated to synchronize with another. It prevents `design.md -> tasks.md -> design.md` ping-pong. |
+| `alignedAt` | string or null | ISO timestamp for the latest completed implementation-flow baseline. |
+| `alignedAtMs` | number | Internal numeric baseline. A later linked code edit must be greater than this value before project-level code drift can exist. |
+| `state` | string | Derived state for this change directory. It is recomputed on load/save; see the state table below. |
+| `conditions` | object | Derived booleans used to compute `state`. It is diagnostic data, not independent source of truth. |
+
+Old project files that contain `peerSyncs` are read and migrated into
+`docSyncs`; new saves do not persist `peerSyncs`.
+
+### `docs` Records
+
+Each `docs.<proposal|design|tasks>` entry uses this shape:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `exists` | boolean | Whether the document currently exists on disk. |
+| `lastEditedMs` | number | Internal clock of the latest observed Edit/Write/MultiEdit for this document. |
+| `lastReviewedMs` | number | Internal clock of the latest observed Read or Edit/Write/MultiEdit. Edits also count as review. |
+| `lastEditedSession` | string | Session id that last edited the document. |
+| `lastReviewedSession` | string | Session id that last read or edited the document. |
+
+`proposal.md` is a stage marker. It can produce a soft next-stage reminder only
+when `design.md` already exists. It does not by itself require `tasks.md`.
+
+### `linkedCode` Records
+
+Each item in `linkedCode` describes one code file currently attributed to the
+change directory:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `path` | string | Code path relative to project root. |
+| `lastEditedMs` | number | Internal clock of the latest observed edit for this code file. |
+| `lastEditedSession` | string | Session id that last edited the code file. |
+| `linkedAt` | number | Internal clock when this file was first linked to this change directory. |
+
+Existing entries are updated in place. New entries are sorted by latest edit and
+capped by `SDD_DRIFT_PROJECT_LINKED_CODE_CAP`, default `200`.
+
+### `docSyncs` Records
+
+`docSyncs` is keyed by the target document key, currently `design` or `tasks`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `sourceFile` | string | Source SDD file that caused the sync, either `design.md` or `tasks.md`. |
+| `sourceEditedMs` | number | Internal clock of the source edit that needed synchronization. |
+| `targetEditedMs` | number | Internal clock of the target edit that satisfied the synchronization. |
+
+Example:
+
+```json
+{
+  "docSyncs": {
+    "tasks": {
+      "sourceFile": "design.md",
+      "sourceEditedMs": 2000,
+      "targetEditedMs": 3000
+    }
+  }
+}
+```
+
+This means `tasks.md` was observed as a response to a `design.md` edit. A later
+`tasks.md` edit should not immediately force a reverse `design.md` sync unless
+there is a new independent source edit.
+
+### Derived `conditions`
+
+| Field | Meaning |
+| --- | --- |
+| `proposalOnly` | `proposal.md` exists, while `design.md` and `tasks.md` do not exist. |
+| `designAheadOfTasks` | Both `design.md` and `tasks.md` exist; `design.md` has a known session edit newer than `tasks.md`; and `design.md` was not itself just a sync response from `tasks.md`. |
+| `tasksAheadOfDesign` | Both `tasks.md` and `design.md` exist; `tasks.md` has a known session edit newer than `design.md`; and `tasks.md` was not itself just a sync response from `design.md`. |
+| `codeAheadOfDocs` | The latest attributed code edit is newer than `alignedAtMs`, and at least one existing review target has not been reviewed after that code edit. |
+| `codePendingDocs` | List of existing document files, currently `design.md` and/or `tasks.md`, that still need review for the latest linked code edit. |
+
+### ChangeDir States
+
+`state` is computed from `archived` and `conditions` in this priority order:
+
+| State | Computed when | Expected behavior |
+| --- | --- | --- |
+| `ARCHIVED` | `archived` is true | Skip this change directory completely. |
+| `PROPOSAL_STAGE` | `proposalOnly` is true | Allow proposal/design brainstorming without forcing task sync. Not treated as carry-over drift. |
+| `ALIGNED` | No drift condition is true | No project-level SDD work is pending. |
+| `MULTI_DRIFT` | More than one hard drift condition is true | Carry-over/checkpoint reminders summarize the directory; the model must resolve all listed causes. |
+| `DESIGN_PENDING_TASKS` | Only `designAheadOfTasks` is true | `tasks.md` should be reviewed/updated to match `design.md`. |
+| `TASKS_PENDING_DESIGN` | Only `tasksAheadOfDesign` is true | `design.md` should be reviewed/updated to match `tasks.md`. |
+| `CODE_PENDING_REVIEW` | Only `codeAheadOfDocs` is true | Existing active `design.md`/`tasks.md` should be reviewed and updated only if code changed their facts. |
+
+`collectCarryOverDrift()` treats every non-archived state except `ALIGNED` and
+`PROPOSAL_STAGE` as cross-session drift. That is why a later session can receive
+a `CARRY-OVER DRIFT` reminder even if the original session ended.
+
+### State Machine Flow
+
+The state machine is recomputed from observed file events rather than from model
+claims. The important transitions are:
+
+1. **Load/discover**
+   - On each hook event, the plugin loads session state and `project.json`.
+   - It discovers `sdd/changes/*` and `.sdd/changes/*` directories and creates
+     missing `ChangeDir` records from the filesystem.
+   - Existing `proposal.md`, `design.md`, and `tasks.md` files initialize
+     `docs.*.exists`, `lastEditedMs`, and `lastReviewedMs` from file metadata
+     if the project state had no value yet.
+
+2. **SDD document read**
+   - A `Read` of `proposal.md`, `design.md`, or `tasks.md` updates
+     `docs.<doc>.lastReviewedMs` and `lastReviewedSession`.
+   - Reading can clear code-review pending state because the document has now
+     been reviewed after the code edit.
+   - Reading does not update `lastEditedMs` and does not create a peer-sync
+     response.
+
+3. **SDD document edit**
+   - An `Edit`/`Write`/`MultiEdit` updates `lastEditedMs`,
+     `lastEditedSession`, `lastReviewedMs`, and `lastReviewedSession`.
+   - Editing `design.md` can create `DESIGN_PENDING_TASKS` if `tasks.md` exists
+     and is older.
+   - Editing `tasks.md` can create `TASKS_PENDING_DESIGN` if `design.md` exists
+     and is older.
+   - If the target document was edited to satisfy a pending peer requirement,
+     `docSyncs` records the source/target relationship and prevents immediate
+     reverse ping-pong.
+   - The edited change directory becomes `activeChangeDir` and refreshes
+     `activeUntilMs`.
+
+4. **Code edit attribution**
+   - Code edits are ignored when the project has no `sdd/` or `.sdd/`, or when
+     DTS/issue-ticket context is active.
+   - Otherwise, the plugin attributes the code file to an active change
+     directory using session evidence, `activeChangeDir` TTL/path similarity,
+     unique candidate fallback, or attribution-review prompts.
+   - Attributed files are written into `linkedCode`.
+   - Once linked code is newer than `alignedAtMs`, any existing `design.md` or
+     `tasks.md` not reviewed after that code edit enters `codePendingDocs`, and
+     the directory becomes `CODE_PENDING_REVIEW` unless another hard drift also
+     exists.
+
+5. **Implementation-flow baseline**
+   - If the same session first edits the relevant SDD docs and then edits code,
+     and all existing review targets were edited before the latest code edit,
+     `refreshAlignedBaseline()` advances `alignedAtMs`/`alignedAt`.
+   - This is the normal "plan first, implement after" path. It prevents the
+     just-finished implementation from becoming carry-over drift immediately.
+
+6. **No-edit review confirmation**
+   - If code changed and all existing active review targets were read/reviewed
+     after the latest code edit, but the model decides no SDD edit is needed,
+     the session records a review-confirmation marker.
+   - Project state also sees the new `lastReviewedMs` values, so
+     `codePendingDocs` can clear for future sessions.
+   - The report may still ask the human to confirm that no document edit was
+     needed.
+
+7. **Question / handoff checkpoint**
+   - Before an agent asks the user a question or hands control back, the
+     question checkpoint checks unresolved peer/code drift.
+   - If unresolved work exists, it emits a model-visible checkpoint before the
+     question is allowed to complete.
+
+8. **PreCompact checkpoint**
+   - Before context compression, pending question/checkpoint state and
+     carry-over drift are summarized so the resumed model can continue the SDD
+     review instead of forgetting the interrupted checkpoint.
+
+9. **Stop / idle checkpoint**
+   - On Claude-compatible Stop, unresolved peer/code drift can block or request
+     continuation up to configured limits.
+   - On native OpenCode idle, Stop continuation is best effort. Reports and logs
+     are still refreshed, but reliable OpenCode continuation relies on
+     `tool.execute.after` and question checkpoints.
+   - If there is no pending work, Stop clears transient session peer-sync state,
+     refreshes baselines when appropriate, and writes `stop_allow_no_pending`.
+
+10. **Archive**
+    - If a change directory is recognized as archived by name, marker file, or
+      status file, `archived` becomes true and `state` becomes `ARCHIVED`.
+    - If the archived directory was active, `activeChangeDir` and
+      `activeUntilMs` are cleared.
+
+In short: `project.json` remembers what the project looked like across sessions;
+session state remembers what happened in the current turn; every hook event
+merges the session into the project, recomputes `conditions`, derives `state`,
+then decides whether to emit a model-visible checkpoint, stay silent, or write a
+human-readable report.
+
 ## Install In A Project
 
 ### OpenCode Native Plugin
