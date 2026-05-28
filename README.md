@@ -43,6 +43,7 @@ plugins/
 docs/
   sdd-drift-check/
     sdd-drift-check.md
+    sdd-drift-check.zh.md
     getting-started.md
     sdd-drift-check-core-refactor-plan.zh.md
     sdd-drift-check-hook.prd.zh.md
@@ -62,6 +63,7 @@ editing code or SDD documents. It supports OpenCode and Claude Code.
 
 ```text
 docs/sdd-drift-check/sdd-drift-check.md
+docs/sdd-drift-check/sdd-drift-check.zh.md
 docs/sdd-drift-check/getting-started.md
 ```
 
