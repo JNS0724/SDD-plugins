@@ -742,6 +742,7 @@ const markImplementationFlowConfirmation = (cwd, state, pending, project = null)
 const clearCodeDriftNoticeIfResolved = (state, codeGaps) => {
   if (codeGaps.length) return
   state.codeDriftNotice = null
+  state.codeDriftToolNotice = null
 }
 
 const clearPeerDriftNoticeIfResolved = (state, peerGaps) => {

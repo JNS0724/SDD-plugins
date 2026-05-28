@@ -36,5 +36,28 @@ assert.strictEqual(claude.isSubagentCheckpointTool, core.isSubagentCheckpointToo
 assert.strictEqual(opencode._private.normalizeToolName, core.normalizeToolName)
 assert.strictEqual(opencode._private.normalizeToolArgs, core.normalizeToolArgs)
 assert.strictEqual(opencode._private.isSupportedToolEvent, core.isSupportedOpenCodeToolEvent)
+assert.deepStrictEqual(opencode._private.extractToolArgs({ parameters: { file: "src/params.ts" } }), {
+  file: "src/params.ts",
+  file_path: "src/params.ts",
+})
+assert.deepStrictEqual(opencode._private.extractToolArgs({ input: { filePath: "src/input.ts" } }), {
+  filePath: "src/input.ts",
+  file_path: "src/input.ts",
+})
+assert.deepStrictEqual(
+  opencode._private.extractToolArgs(
+    { tool: "edit", sessionID: "s1", callID: "c1" },
+    { parameters: { path: "src/from-output.ts" } }
+  ),
+  {
+    path: "src/from-output.ts",
+    file_path: "src/from-output.ts",
+  }
+)
+const stopPromptCache = new Map()
+assert.strictEqual(opencode._private.shouldInjectStopPrompt(stopPromptCache, "s1", "review sdd", 1000), true)
+assert.strictEqual(opencode._private.shouldInjectStopPrompt(stopPromptCache, "s1", "review sdd", 2000), false)
+assert.strictEqual(opencode._private.shouldInjectStopPrompt(stopPromptCache, "s1", "review another", 3000), true)
+assert.strictEqual(opencode._private.shouldInjectStopPrompt(stopPromptCache, "s1", "review sdd", 31000), true)
 
 console.log("sdd-drift core tool-event tests passed")

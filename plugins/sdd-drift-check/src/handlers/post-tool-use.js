@@ -72,15 +72,17 @@ const handlePostToolUse = (input, ctx) => {
     codeGaps.some((gap) => !gap.reviewReady) &&
     !codeToolReminderEnabled
   const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0
-  const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : []
-  const peerSignature = emitPeerGaps.length ? ctx.peerDriftSignature(emitPeerGaps) : null
+  const candidatePeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : []
+  const peerSignature = candidatePeerGaps.length ? ctx.peerDriftSignature(candidatePeerGaps) : null
   const compactPeerGap =
-    emitPeerGaps.length > 0 &&
+    candidatePeerGaps.length > 0 &&
     Boolean(state.peerDriftNotice?.active) &&
     state.peerDriftNotice.signature === peerSignature
+  const suppressRepeatedPeerRead = compactPeerGap && !isEdit
+  const emitPeerGaps = suppressRepeatedPeerRead ? [] : candidatePeerGaps
   const compactCodeGap = emitCodeGap && Boolean(state.codeDriftNotice?.active)
   const carryOverFallback =
-    !emitPeerGaps.length &&
+    !candidatePeerGaps.length &&
     !emitCodeGap &&
     state.noEditSession &&
     !ctx.isDtsContextActive(state) &&
@@ -162,6 +164,8 @@ const handlePostToolUse = (input, ctx) => {
         ? "posttooluse_code_review_no_edit_confirmed"
         : deferredCodeGap
           ? "posttooluse_code_review_deferred_to_checkpoint"
+          : suppressRepeatedPeerRead
+          ? "posttooluse_peer_reminder_suppressed"
           : suppressCodeGap
           ? "posttooluse_code_review_reminder_suppressed"
           : "posttooluse_no_output",
@@ -173,6 +177,11 @@ const handlePostToolUse = (input, ctx) => {
         ? {
             codeReviewToolReminderCount: ctx.codeDriftNoticeEmissionCount(state),
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders(),
+          }
+        : {}),
+      ...(suppressRepeatedPeerRead
+        ? {
+            peerSignature,
           }
         : {}),
       ...(deferredCodeGap

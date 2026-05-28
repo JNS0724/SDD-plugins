@@ -125,6 +125,154 @@ try {
   }
 
   {
+    const cwd = path.join(tmpRoot, "peer-read-repeat-suppressed")
+    const dir = path.join(cwd, "sdd", "changes", "gamma-read")
+    write(path.join(dir, "design.md"), "# Design\n")
+    write(path.join(dir, "tasks.md"), "# Tasks\n")
+
+    const firstOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "peer-read-session",
+        hook_event_name: "PostToolUse",
+        tool_name: "Edit",
+        tool_use_id: "design-edit",
+        tool_input: { file_path: "sdd/changes/gamma-read/design.md" },
+      })
+    )
+    assert.match(firstOutput, /PEER SYNC CHECKPOINT/)
+    assert.match(firstOutput, /sdd\/changes\/gamma-read\/tasks\.md/)
+
+    const readOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "peer-read-session",
+        hook_event_name: "PostToolUse",
+        tool_name: "Read",
+        tool_use_id: "tasks-read",
+        tool_input: { file_path: "sdd/changes/gamma-read/tasks.md" },
+      })
+    )
+    assert.strictEqual(
+      readOutput,
+      "",
+      "reading the pending peer should not repeat the same PostToolUse reminder"
+    )
+  }
+
+  {
+    const cwd = path.join(tmpRoot, "cross-session-design-sync-then-code")
+    const dir = path.join(cwd, "sdd", "changes", "cross")
+    const design = path.join(dir, "design.md")
+    const tasks = path.join(dir, "tasks.md")
+    const code = path.join(cwd, "src", "app.ts")
+    write(design, "# Design\nInitial design.\n")
+    write(code, "export const value = 1\n")
+
+    await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "previous-session",
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_use_id: "previous-design",
+        tool_input: { file_path: "sdd/changes/cross/design.md" },
+      })
+    )
+    write(tasks, "# Tasks\n- [ ] Initial task.\n")
+    await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "previous-session",
+        hook_event_name: "PostToolUse",
+        tool_name: "Write",
+        tool_use_id: "previous-tasks",
+        tool_input: { file_path: "sdd/changes/cross/tasks.md" },
+      })
+    )
+
+    fs.writeFileSync(design, "# Design\nUpdated design in a new session.\n")
+    const designOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "new-design-session",
+        hook_source: "opencode-plugin",
+        hook_event_name: "PostToolUse",
+        tool_name: "Edit",
+        tool_use_id: "new-design-edit",
+        tool_input: { file_path: "sdd/changes/cross/design.md" },
+      })
+    )
+    assert.match(designOutput, /PEER SYNC CHECKPOINT/)
+    assert.match(designOutput, /sdd\/changes\/cross\/tasks\.md/)
+
+    const peerReadOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "new-design-session",
+        hook_source: "opencode-plugin",
+        hook_event_name: "PostToolUse",
+        tool_name: "Read",
+        tool_use_id: "new-tasks-read",
+        tool_input: { file_path: "sdd/changes/cross/tasks.md" },
+      })
+    )
+    assert.strictEqual(peerReadOutput, "")
+
+    fs.writeFileSync(tasks, "# Tasks\n- [ ] Initial task.\n- [ ] Follow updated design.\n")
+    const tasksOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "new-design-session",
+        hook_source: "opencode-plugin",
+        hook_event_name: "PostToolUse",
+        tool_name: "Edit",
+        tool_use_id: "new-tasks-edit",
+        tool_input: { file_path: "sdd/changes/cross/tasks.md" },
+      })
+    )
+    assert.strictEqual(tasksOutput, "")
+
+    let state = hook.loadState(cwd, "new-design-session")
+    let project = hook.loadProjectState(cwd)
+    assert.strictEqual(
+      hook.collectCombinedPeerGaps(cwd, state, project, { includeStageOnly: false }).length,
+      0
+    )
+    assert.strictEqual(project.changeDirs["sdd/changes/cross"].state, "ALIGNED")
+
+    const stopOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "new-design-session",
+        hook_source: "opencode-plugin",
+        hook_event_name: "Stop",
+      })
+    )
+    assert.strictEqual(stopOutput, "")
+
+    fs.writeFileSync(code, "export const value = 2\n")
+    const codeOutput = await captureStdout(() =>
+      hook.dispatch({
+        cwd,
+        session_id: "new-design-session",
+        hook_source: "opencode-plugin",
+        hook_event_name: "PostToolUse",
+        tool_name: "Edit",
+        tool_use_id: "new-code-edit",
+        tool_input: { file_path: "src/app.ts" },
+      })
+    )
+    assert.match(codeOutput, /CODE REVIEW NOTICE/)
+    assert.match(codeOutput, /sdd\/changes\/cross\/design\.md/)
+    assert.match(codeOutput, /sdd\/changes\/cross\/tasks\.md/)
+
+    state = hook.loadState(cwd, "new-design-session")
+    project = hook.loadProjectState(cwd)
+    assert.strictEqual(hook.buildPendingEnforcement(cwd, state, { includeStageOnly: false, project }).type, "code")
+  }
+
+  {
     const state = hook.emptyState()
     const first = {
       session_id: "session",
@@ -1271,10 +1419,15 @@ try {
     hook.clearCodeDriftNoticeIfResolved(state, codeGaps)
     assert.strictEqual(codeGaps.length, 0)
     assert.strictEqual(state.codeDriftNotice, null)
+    assert.strictEqual(state.codeDriftToolNotice, null)
 
     hook.recordFile(state, thirdCode, true)
     codeGaps = hook.collectCodeGaps(cwd, state)
-    assert.strictEqual(hook.shouldEmitCodeDriftNotice(state, codeGaps), false)
+    assert.strictEqual(
+      hook.shouldEmitCodeDriftNotice(state, codeGaps),
+      true,
+      "a new code batch after resolved SDD review should get a fresh tool reminder"
+    )
   }
 
   {

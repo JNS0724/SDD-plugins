@@ -2,6 +2,7 @@ const path = require("node:path")
 const { runHookInput } = require("../claude-code/command-hook")
 const {
   QUESTION_CHECKPOINT_TOOL_NAMES,
+  getToolFilePath,
   isSupportedOpenCodeToolEvent,
   normalizeToolArgs,
   normalizeToolName,
@@ -10,7 +11,22 @@ const {
 const PLUGIN_NAME = "sdd-drift-check-opencode"
 const TOOL_INPUT_CACHE_TTL_MS = 5 * 60 * 1000
 const IDLE_DEDUP_WINDOW_MS = 500
+const STOP_INJECT_DEDUP_WINDOW_MS = Number.parseInt(
+  process.env.SDD_DRIFT_OPENCODE_STOP_INJECT_DEDUP_MS || String(30 * 1000),
+  10
+)
 const isSupportedToolEvent = isSupportedOpenCodeToolEvent
+const TOOL_ARG_KEYS = ["args", "arguments", "parameters", "params", "input", "tool_input", "toolInput"]
+const ARG_LIKE_KEYS = [
+  "file_path",
+  "filePath",
+  "path",
+  "file",
+  "prompt",
+  "question",
+  "task_id",
+  "taskId",
+]
 
 // Native OpenCode adapter source. Claude Code keeps using the command-hook adapter.
 
@@ -51,6 +67,22 @@ const cacheToolInput = (cache, input, args, now = Date.now()) => {
     updatedAtMs: now,
   })
   return true
+}
+
+const hasToolArgs = (value) =>
+  value &&
+  typeof value === "object" &&
+  (Boolean(getToolFilePath(value)) || ARG_LIKE_KEYS.some((key) => key in value))
+
+const extractToolArgs = (...sources) => {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue
+    for (const key of TOOL_ARG_KEYS) {
+      if (hasToolArgs(source[key])) return normalizeToolArgs(source[key])
+    }
+    if (hasToolArgs(source)) return normalizeToolArgs(source)
+  }
+  return {}
 }
 
 const takeCachedToolInput = (cache, input, now = Date.now()) => {
@@ -142,6 +174,32 @@ const getStopInjectPrompt = (result) => {
   return String(parsed.inject_prompt || "").trim() || null
 }
 
+const stopPromptSignature = (prompt) => {
+  const text = String(prompt || "")
+  return `${text.length}:${text.slice(0, 256)}:${text.slice(-256)}`
+}
+
+const shouldInjectStopPrompt = (cache, sessionID, prompt, now = Date.now()) => {
+  const windowMs = Number.isFinite(STOP_INJECT_DEDUP_WINDOW_MS)
+    ? Math.max(0, STOP_INJECT_DEDUP_WINDOW_MS)
+    : 30 * 1000
+  if (windowMs === 0) return true
+
+  const id = sessionID || "default"
+  const signature = stopPromptSignature(prompt)
+  for (const [key, item] of cache.entries()) {
+    if (now - item.updatedAtMs > windowMs * 10) cache.delete(key)
+  }
+
+  const existing = cache.get(id)
+  if (existing?.signature === signature && now - existing.updatedAtMs < windowMs) {
+    return false
+  }
+
+  cache.set(id, { signature, updatedAtMs: now })
+  return true
+}
+
 const buildToolOutputSummary = (output = {}) => ({
   title: compactText(output?.title || "", 1000),
   output: compactText(output?.output || "", 64 * 1024),
@@ -163,7 +221,7 @@ const buildPostToolUseInput = (ctx, input, output, argsOverride = null) => ({
   session_id: getSessionID(input),
   tool_use_id: getToolCallID(input),
   tool_name: normalizeToolName(input.tool),
-  tool_input: normalizeToolArgs(argsOverride || input.args || {}),
+  tool_input: normalizeToolArgs(argsOverride || extractToolArgs(input, output)),
   tool_output: buildToolOutputSummary(output),
   cwd: normalizeCwd(ctx),
 })
@@ -271,6 +329,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       : runNativeHook
   const toolInputCache = new Map()
   const recentIdleBySession = new Map()
+  const recentStopPromptBySession = new Map()
 
   return {
     "chat.message": async (input, output) => {
@@ -287,7 +346,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
 
     "tool.execute.before": async (input, output = {}) => {
       const tool = normalizeToolName(input.tool)
-      const args = normalizeToolArgs(output?.args || input.args || {})
+      const args = extractToolArgs(output, input)
       cacheToolInput(toolInputCache, input, args)
 
       if (!QUESTION_CHECKPOINT_TOOL_NAMES.has(tool)) return
@@ -317,7 +376,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
 
     "tool.execute.after": async (input, output) => {
       const tool = normalizeToolName(input.tool)
-      const args = takeCachedToolInput(toolInputCache, input) || normalizeToolArgs(input.args || {})
+      const args = takeCachedToolInput(toolInputCache, input) || extractToolArgs(input, output)
       if (!isSupportedToolEvent(tool, args || {})) return
 
       const result = await hookRunner(buildPostToolUseInput(ctx, input, output, args))
@@ -362,6 +421,13 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
 
       const injectPrompt = getStopInjectPrompt(result)
       if (!injectPrompt) return
+      if (!shouldInjectStopPrompt(recentStopPromptBySession, sessionID, injectPrompt)) {
+        await logPluginIssue(ctx.client, "info", "suppressed duplicate Stop continuation", {
+          sessionID,
+          rawType: idle.rawType,
+        })
+        return
+      }
 
       try {
         const injected = await promptSession(ctx, sessionID, injectPrompt)
@@ -387,6 +453,7 @@ exports._private = {
   buildPostToolUseInput,
   buildStopInput,
   cacheToolInput,
+  extractToolArgs,
   getPreToolUseDenyReason,
   getStopInjectPrompt,
   isSupportedToolEvent,
@@ -397,5 +464,6 @@ exports._private = {
   promptSession,
   runNativeHook,
   shouldHandleIdle,
+  shouldInjectStopPrompt,
   takeCachedToolInput,
 }

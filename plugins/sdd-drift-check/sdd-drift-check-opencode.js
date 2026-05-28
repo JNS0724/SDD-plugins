@@ -269,11 +269,13 @@ var require_post_tool_use = __commonJS({
       const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && ctx.isCodeDriftNoticeSuppressed(state, codeGaps);
       const deferredCodeGap = !hardPeerGaps.length && !emitCodeGap && codeGaps.some((gap) => !gap.reviewReady) && !codeToolReminderEnabled;
       const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0;
-      const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : [];
-      const peerSignature = emitPeerGaps.length ? ctx.peerDriftSignature(emitPeerGaps) : null;
-      const compactPeerGap = emitPeerGaps.length > 0 && Boolean(state.peerDriftNotice?.active) && state.peerDriftNotice.signature === peerSignature;
+      const candidatePeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : [];
+      const peerSignature = candidatePeerGaps.length ? ctx.peerDriftSignature(candidatePeerGaps) : null;
+      const compactPeerGap = candidatePeerGaps.length > 0 && Boolean(state.peerDriftNotice?.active) && state.peerDriftNotice.signature === peerSignature;
+      const suppressRepeatedPeerRead = compactPeerGap && !isEdit;
+      const emitPeerGaps = suppressRepeatedPeerRead ? [] : candidatePeerGaps;
       const compactCodeGap = emitCodeGap && Boolean(state.codeDriftNotice?.active);
-      const carryOverFallback = !emitPeerGaps.length && !emitCodeGap && state.noEditSession && !ctx.isDtsContextActive(state) && ctx.shouldEmitCarryOverNotice(state, project) ? ctx.formatCarryOverReminder(project, { prefix: "[Carry-over] " }) : "";
+      const carryOverFallback = !candidatePeerGaps.length && !emitCodeGap && state.noEditSession && !ctx.isDtsContextActive(state) && ctx.shouldEmitCarryOverNotice(state, project) ? ctx.formatCarryOverReminder(project, { prefix: "[Carry-over] " }) : "";
       if (emitPeerGaps.length) {
         ctx.markPeerDriftNoticeEmitted(state, emitPeerGaps);
       }
@@ -335,7 +337,7 @@ var require_post_tool_use = __commonJS({
         ctx.emitEnforcement(input, carryOverFallback);
       } else {
         ctx.writeDiagnosticLog(cwd, {
-          event: codeReviewNoEditConfirmed ? "posttooluse_code_review_no_edit_confirmed" : deferredCodeGap ? "posttooluse_code_review_deferred_to_checkpoint" : suppressCodeGap ? "posttooluse_code_review_reminder_suppressed" : "posttooluse_no_output",
+          event: codeReviewNoEditConfirmed ? "posttooluse_code_review_no_edit_confirmed" : deferredCodeGap ? "posttooluse_code_review_deferred_to_checkpoint" : suppressRepeatedPeerRead ? "posttooluse_peer_reminder_suppressed" : suppressCodeGap ? "posttooluse_code_review_reminder_suppressed" : "posttooluse_no_output",
           input: ctx.summarizeInput(input),
           file: ctx.rel(cwd, abs),
           tool,
@@ -343,6 +345,9 @@ var require_post_tool_use = __commonJS({
           ...suppressCodeGap ? {
             codeReviewToolReminderCount: ctx.codeDriftNoticeEmissionCount(state),
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders()
+          } : {},
+          ...suppressRepeatedPeerRead ? {
+            peerSignature
           } : {},
           ...deferredCodeGap ? {
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders()
@@ -597,7 +602,7 @@ var require_tool_events = __commonJS({
       "confirmation",
       "question"
     ]);
-    var getToolFilePath = (args) => args?.file_path || args?.filePath || args?.path || args?.file;
+    var getToolFilePath2 = (args) => args?.file_path || args?.filePath || args?.path || args?.file;
     var normalizeToolName2 = (tool) => {
       const name = String(tool || "").trim().toLowerCase().replace(/[-\s.]+/g, "_");
       if (name === "multi_edit" || name === "multi-edit") return "multiedit";
@@ -611,14 +616,14 @@ var require_tool_events = __commonJS({
     var isQuestionCheckpointTool = (tool) => QUESTION_CHECKPOINT_TOOL_NAMES2.has(normalizeToolName2(tool));
     var isSupportedOpenCodeToolEvent2 = (tool, args) => {
       const normalized = normalizeToolName2(tool);
-      if (FILE_TOOL_NAMES.has(normalized) && getToolFilePath(args || {})) return true;
+      if (FILE_TOOL_NAMES.has(normalized) && getToolFilePath2(args || {})) return true;
       if (normalized === "background_task") return false;
       if (isQuestionCheckpointTool(normalized)) return true;
       return isSubagentCheckpointTool(normalized);
     };
     var normalizeToolArgs2 = (args) => {
       const copy = { ...args || {} };
-      const fp = getToolFilePath(copy);
+      const fp = getToolFilePath2(copy);
       if (fp && !copy.file_path) copy.file_path = fp;
       return copy;
     };
@@ -626,7 +631,7 @@ var require_tool_events = __commonJS({
       FILE_TOOL_NAMES,
       SUBAGENT_CHECKPOINT_TOOL_NAMES,
       QUESTION_CHECKPOINT_TOOL_NAMES: QUESTION_CHECKPOINT_TOOL_NAMES2,
-      getToolFilePath,
+      getToolFilePath: getToolFilePath2,
       isQuestionCheckpointTool,
       isSubagentCheckpointTool,
       isSupportedOpenCodeToolEvent: isSupportedOpenCodeToolEvent2,
@@ -1165,7 +1170,7 @@ var require_session_state = __commonJS({
   "src/core/session-state.js"(exports2, module2) {
     var fs = require("fs");
     var path2 = require("path");
-    var { getToolFilePath } = require_tool_events();
+    var { getToolFilePath: getToolFilePath2 } = require_tool_events();
     var { isCodePath, isSddChangePath } = require_file_classifier();
     var { normalizeKey, resolveFile, samePath } = require_paths();
     var {
@@ -1479,7 +1484,7 @@ var require_session_state = __commonJS({
       cleanupRequirementBucket(state, dir);
     };
     var applyToolRecord = (cwd, state, toolName, toolInput) => {
-      const fp = getToolFilePath(toolInput || {});
+      const fp = getToolFilePath2(toolInput || {});
       if (!fp || typeof fp !== "string") return false;
       const tool = String(toolName || "").toLowerCase();
       const isEdit = tool === "edit" || tool === "write" || tool === "multiedit";
@@ -3417,7 +3422,7 @@ var require_command_hook = __commonJS({
     var { handleUserPromptSubmit } = require_user_prompt_submit();
     var { readStdin } = require_stdin();
     var {
-      getToolFilePath,
+      getToolFilePath: getToolFilePath2,
       isQuestionCheckpointTool,
       isSubagentCheckpointTool,
       normalizeToolName: normalizeCheckpointToolName
@@ -4038,6 +4043,7 @@ var require_command_hook = __commonJS({
     var clearCodeDriftNoticeIfResolved = (state, codeGaps) => {
       if (codeGaps.length) return;
       state.codeDriftNotice = null;
+      state.codeDriftToolNotice = null;
     };
     var clearPeerDriftNoticeIfResolved = (state, peerGaps) => {
       if (peerGaps.length) return;
@@ -4216,7 +4222,7 @@ var require_command_hook = __commonJS({
           emitStopEnforcement: outputHelpers.emitStopEnforcement,
           formatCarryOverReminder,
           getToolEventKey,
-          getToolFilePath,
+          getToolFilePath: getToolFilePath2,
           isDtsContextActive,
           isOpenCodeHookInput,
           isQuestionCheckpointTool,
@@ -4498,6 +4504,7 @@ var path = require("node:path");
 var { runHookInput } = require_command_hook();
 var {
   QUESTION_CHECKPOINT_TOOL_NAMES,
+  getToolFilePath,
   isSupportedOpenCodeToolEvent,
   normalizeToolArgs,
   normalizeToolName
@@ -4505,7 +4512,22 @@ var {
 var PLUGIN_NAME = "sdd-drift-check-opencode";
 var TOOL_INPUT_CACHE_TTL_MS = 5 * 60 * 1e3;
 var IDLE_DEDUP_WINDOW_MS = 500;
+var STOP_INJECT_DEDUP_WINDOW_MS = Number.parseInt(
+  process.env.SDD_DRIFT_OPENCODE_STOP_INJECT_DEDUP_MS || String(30 * 1e3),
+  10
+);
 var isSupportedToolEvent = isSupportedOpenCodeToolEvent;
+var TOOL_ARG_KEYS = ["args", "arguments", "parameters", "params", "input", "tool_input", "toolInput"];
+var ARG_LIKE_KEYS = [
+  "file_path",
+  "filePath",
+  "path",
+  "file",
+  "prompt",
+  "question",
+  "task_id",
+  "taskId"
+];
 var normalizeCwd = (ctx) => path.resolve(ctx?.worktree || ctx?.directory || process.cwd());
 var getSessionID = (input) => input?.sessionID || input?.sessionId || input?.session_id || "default";
 var getToolCallID = (input) => input?.callID || input?.callId || input?.toolCallID || input?.toolCallId || input?.tool_use_id || input?.id || null;
@@ -4530,6 +4552,17 @@ var cacheToolInput = (cache, input, args, now = Date.now()) => {
     updatedAtMs: now
   });
   return true;
+};
+var hasToolArgs = (value) => value && typeof value === "object" && (Boolean(getToolFilePath(value)) || ARG_LIKE_KEYS.some((key) => key in value));
+var extractToolArgs = (...sources) => {
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    for (const key of TOOL_ARG_KEYS) {
+      if (hasToolArgs(source[key])) return normalizeToolArgs(source[key]);
+    }
+    if (hasToolArgs(source)) return normalizeToolArgs(source);
+  }
+  return {};
 };
 var takeCachedToolInput = (cache, input, now = Date.now()) => {
   const key = toolCacheKey(input);
@@ -4612,6 +4645,25 @@ var getStopInjectPrompt = (result) => {
   if (!parsed || parsed.decision !== "block") return null;
   return String(parsed.inject_prompt || "").trim() || null;
 };
+var stopPromptSignature = (prompt) => {
+  const text = String(prompt || "");
+  return `${text.length}:${text.slice(0, 256)}:${text.slice(-256)}`;
+};
+var shouldInjectStopPrompt = (cache, sessionID, prompt, now = Date.now()) => {
+  const windowMs = Number.isFinite(STOP_INJECT_DEDUP_WINDOW_MS) ? Math.max(0, STOP_INJECT_DEDUP_WINDOW_MS) : 30 * 1e3;
+  if (windowMs === 0) return true;
+  const id = sessionID || "default";
+  const signature = stopPromptSignature(prompt);
+  for (const [key, item] of cache.entries()) {
+    if (now - item.updatedAtMs > windowMs * 10) cache.delete(key);
+  }
+  const existing = cache.get(id);
+  if (existing?.signature === signature && now - existing.updatedAtMs < windowMs) {
+    return false;
+  }
+  cache.set(id, { signature, updatedAtMs: now });
+  return true;
+};
 var buildToolOutputSummary = (output = {}) => ({
   title: compactText(output?.title || "", 1e3),
   output: compactText(output?.output || "", 64 * 1024)
@@ -4631,7 +4683,7 @@ var buildPostToolUseInput = (ctx, input, output, argsOverride = null) => ({
   session_id: getSessionID(input),
   tool_use_id: getToolCallID(input),
   tool_name: normalizeToolName(input.tool),
-  tool_input: normalizeToolArgs(argsOverride || input.args || {}),
+  tool_input: normalizeToolArgs(argsOverride || extractToolArgs(input, output)),
   tool_output: buildToolOutputSummary(output),
   cwd: normalizeCwd(ctx)
 });
@@ -4711,6 +4763,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
   const hookRunner = typeof ctx?.__sddDriftRunHookInput === "function" ? ctx.__sddDriftRunHookInput : runNativeHook;
   const toolInputCache = /* @__PURE__ */ new Map();
   const recentIdleBySession = /* @__PURE__ */ new Map();
+  const recentStopPromptBySession = /* @__PURE__ */ new Map();
   return {
     "chat.message": async (input, output) => {
       const result = await hookRunner(buildChatMessageInput(ctx, input, output));
@@ -4725,7 +4778,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
     },
     "tool.execute.before": async (input, output = {}) => {
       const tool = normalizeToolName(input.tool);
-      const args = normalizeToolArgs(output?.args || input.args || {});
+      const args = extractToolArgs(output, input);
       cacheToolInput(toolInputCache, input, args);
       if (!QUESTION_CHECKPOINT_TOOL_NAMES.has(tool)) return;
       const result = await hookRunner(buildPreToolUseInput(ctx, input, args));
@@ -4750,7 +4803,7 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
     },
     "tool.execute.after": async (input, output) => {
       const tool = normalizeToolName(input.tool);
-      const args = takeCachedToolInput(toolInputCache, input) || normalizeToolArgs(input.args || {});
+      const args = takeCachedToolInput(toolInputCache, input) || extractToolArgs(input, output);
       if (!isSupportedToolEvent(tool, args || {})) return;
       const result = await hookRunner(buildPostToolUseInput(ctx, input, output, args));
       if (result.error || result.timedOut) {
@@ -4788,6 +4841,13 @@ exports.SddDriftCheckOpenCode = async (ctx) => {
       }
       const injectPrompt = getStopInjectPrompt(result);
       if (!injectPrompt) return;
+      if (!shouldInjectStopPrompt(recentStopPromptBySession, sessionID, injectPrompt)) {
+        await logPluginIssue(ctx.client, "info", "suppressed duplicate Stop continuation", {
+          sessionID,
+          rawType: idle.rawType
+        });
+        return;
+      }
       try {
         const injected = await promptSession(ctx, sessionID, injectPrompt);
         await logPluginIssue(ctx.client, injected ? "info" : "warn", "processed Stop continuation", {
@@ -4811,6 +4871,7 @@ exports._private = {
   buildPostToolUseInput,
   buildStopInput,
   cacheToolInput,
+  extractToolArgs,
   getPreToolUseDenyReason,
   getStopInjectPrompt,
   isSupportedToolEvent,
@@ -4821,5 +4882,6 @@ exports._private = {
   promptSession,
   runNativeHook,
   shouldHandleIdle,
+  shouldInjectStopPrompt,
   takeCachedToolInput
 };

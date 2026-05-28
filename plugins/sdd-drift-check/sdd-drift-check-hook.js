@@ -269,11 +269,13 @@ var require_post_tool_use = __commonJS({
       const suppressCodeGap = !hardPeerGaps.length && !emitCodeGap && ctx.isCodeDriftNoticeSuppressed(state, codeGaps);
       const deferredCodeGap = !hardPeerGaps.length && !emitCodeGap && codeGaps.some((gap) => !gap.reviewReady) && !codeToolReminderEnabled;
       const emitStagePeerGap = !hardPeerGaps.length && !emitCodeGap && stagePeerGaps.length > 0;
-      const emitPeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : [];
-      const peerSignature = emitPeerGaps.length ? ctx.peerDriftSignature(emitPeerGaps) : null;
-      const compactPeerGap = emitPeerGaps.length > 0 && Boolean(state.peerDriftNotice?.active) && state.peerDriftNotice.signature === peerSignature;
+      const candidatePeerGaps = hardPeerGaps.length ? hardPeerGaps : emitStagePeerGap ? stagePeerGaps : [];
+      const peerSignature = candidatePeerGaps.length ? ctx.peerDriftSignature(candidatePeerGaps) : null;
+      const compactPeerGap = candidatePeerGaps.length > 0 && Boolean(state.peerDriftNotice?.active) && state.peerDriftNotice.signature === peerSignature;
+      const suppressRepeatedPeerRead = compactPeerGap && !isEdit;
+      const emitPeerGaps = suppressRepeatedPeerRead ? [] : candidatePeerGaps;
       const compactCodeGap = emitCodeGap && Boolean(state.codeDriftNotice?.active);
-      const carryOverFallback = !emitPeerGaps.length && !emitCodeGap && state.noEditSession && !ctx.isDtsContextActive(state) && ctx.shouldEmitCarryOverNotice(state, project) ? ctx.formatCarryOverReminder(project, { prefix: "[Carry-over] " }) : "";
+      const carryOverFallback = !candidatePeerGaps.length && !emitCodeGap && state.noEditSession && !ctx.isDtsContextActive(state) && ctx.shouldEmitCarryOverNotice(state, project) ? ctx.formatCarryOverReminder(project, { prefix: "[Carry-over] " }) : "";
       if (emitPeerGaps.length) {
         ctx.markPeerDriftNoticeEmitted(state, emitPeerGaps);
       }
@@ -335,7 +337,7 @@ var require_post_tool_use = __commonJS({
         ctx.emitEnforcement(input, carryOverFallback);
       } else {
         ctx.writeDiagnosticLog(cwd, {
-          event: codeReviewNoEditConfirmed ? "posttooluse_code_review_no_edit_confirmed" : deferredCodeGap ? "posttooluse_code_review_deferred_to_checkpoint" : suppressCodeGap ? "posttooluse_code_review_reminder_suppressed" : "posttooluse_no_output",
+          event: codeReviewNoEditConfirmed ? "posttooluse_code_review_no_edit_confirmed" : deferredCodeGap ? "posttooluse_code_review_deferred_to_checkpoint" : suppressRepeatedPeerRead ? "posttooluse_peer_reminder_suppressed" : suppressCodeGap ? "posttooluse_code_review_reminder_suppressed" : "posttooluse_no_output",
           input: ctx.summarizeInput(input),
           file: ctx.rel(cwd, abs),
           tool,
@@ -343,6 +345,9 @@ var require_post_tool_use = __commonJS({
           ...suppressCodeGap ? {
             codeReviewToolReminderCount: ctx.codeDriftNoticeEmissionCount(state),
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders()
+          } : {},
+          ...suppressRepeatedPeerRead ? {
+            peerSignature
           } : {},
           ...deferredCodeGap ? {
             codeReviewToolMaxReminders: ctx.codeReviewToolMaxReminders()
@@ -4036,6 +4041,7 @@ var markImplementationFlowConfirmation = (cwd, state, pending, project = null) =
 var clearCodeDriftNoticeIfResolved = (state, codeGaps) => {
   if (codeGaps.length) return;
   state.codeDriftNotice = null;
+  state.codeDriftToolNotice = null;
 };
 var clearPeerDriftNoticeIfResolved = (state, peerGaps) => {
   if (peerGaps.length) return;
