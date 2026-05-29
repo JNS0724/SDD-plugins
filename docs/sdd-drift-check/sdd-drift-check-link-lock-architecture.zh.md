@@ -818,3 +818,90 @@ Codex §17.2 实际**回答了** §6.5 留的 A/B 开放问题——不是二选
 ### 18.5 结论
 
 v0.4 已把两轮评审全部吸收。**方向确定、协议级语义锁定、机械细节交原型实证。** 下一步是 §14 的 ~250 行原型，而非完整重构。
+
+---
+
+## 十九、第三轮复审意见（2026-05-29，多代理对抗评审）
+
+本节只追加，不修改前文（与 §15 / §17 同体例）。评审方法：5 个独立视角（产品策略 / 数据模型正确性 / 需求覆盖回归 / "不误报"核心承诺 / 评审回音壁元批判）各自产出 finding，逐条经对抗性验证者核对原文（含 §13 / §15–§18）后定级——已被前两轮处理的点不再重列。共产出 36 条，33 条通过验证，3 条被证伪剔除。
+
+### 19.1 总体判断
+
+方向有真实价值，但**核心赌注尚未成立**。整个架构压在 §3 / §14 的一句话上——"漂移真相 = (工作树 + 事件日志) 的纯函数"。经核对，这个纯函数性在三处被方案自己的规则破坏（§19.3）；在补上之前，"自愈""稳定重算""权威下沉"都还是未兑现的承诺，§14 的 250 行原型也会因只跑单进程 happy-path 而给出"纯函数当然是纯函数"的虚假信心。
+
+### 19.2 元发现：两轮评审的三个盲区（回音壁效应）
+
+§15 / §17 两轮把**数据模型的语义自洽**打磨得很好，但系统性地漏掉了三个维度，且每轮都在"判断 vs 事实"这条线上加机制、未回头质疑前提：
+
+1. **运行时现实**：没人问"这套捕获在 OpenCode 上能不能 100% 成立"。
+2. **产品定位**：没人问"权威下沉到 `sdd check` 后，它还是不是用户当初要的那个'实时纠偏 agent'的工具"。
+3. **误报率**：需求内核第一句是"不误报"，但全文无任何误报率目标、无净误报对账，§14 验收也不含误报维度。
+
+### 19.3 P0：核心赌注（纯函数性）实际不成立 —— 三处独立破裂（全部 confirmed）
+
+#### 19.3.1 `deriveLock` 跨会话塌缩无确定性规则（§6.2 ↔ §8 / §17.4 自相矛盾）
+
+§6.2 的 J11/J13 塌缩靠"较早的 unresolved code-edit"与"较晚的 doc-edit"关联建链；但 §4.1/§8/§17.4 三处都声明"跨 path 关联**只由决策事件**建立""ts 非因果权威"，而一条普通 doc-edit 是**事实事件**。
+
+> 逼问：当日志里只有两条事实事件（unresolved code-edit + doc-edit），`deriveLock` 凭哪个字段确定性地认定这条 doc-edit "解决了"那条 code-edit？
+
+唯一可用线索是时间先后，而 §17.4 恰恰否定它。更尖锐：session B 同轮整理了两个候选 dir（`{greeting, refund}` 都被编辑），无任何确定性 tiebreak。而且 §6.2 的塌缩在**可执行规范里根本不存在**——§6.1 `resolveDeterministic` 只按 code-edit 自身字段建链，不含"后来的 doc-edit 命中候选→建跨 path 链"这条规则，§6.2 只是叙述性文字。**修法**：把 J11/J13 塌缩升级为显式 `resolve-attribution` 决策事件（携带 code path、target dir、relatedHashes）。
+
+#### 19.3.2 两分支各 align 同一 link → 合并后结果歧义（§8.1 只处理去重，未处理冲突决策）
+
+标准 git 协作：分支 X 与 Y 各对同一 link append align，因两边代码已分叉，`alignedReviewed.code` 不同 → 两个 align 事件 id 不同 → **去重不合并**。union 后日志里并存两个同 target 的 align，§8 回放规则是"**置** aligned:true + alignedReviewed"（覆盖语义），谁赢取决于回放顺序，而顺序由非权威 ts 决定。后果：(a) `deriveLock` 不再是纯函数，打穿 §3 核心不变量；(b) 可产生静默 false-clean（一侧 reviewer 的声称被套用到另一侧未验证代码），违反 §1"不漏报"与 §18.1 元原则。**修法**：定义 per-`(kind,target)` 的冲突决策归并规则（并集/交集/`supersedes` 显式偏序），绝不落到 ts 兜底；补一条 J17 走查。
+
+#### 19.3.3 "捕获 100% 确定性"对 OpenCode 不成立，且漏一次永久丢归属
+
+§五标题"100%"与 §5.1"不依赖平台投递"是地基，但对方案承诺支持的 OpenCode：OpenCode **无原生 PostToolUse**（用 `tool.execute.after` 转换、依赖平台投递）；实现文档 L582"shell 重定向写文件对 hook 不一定可见"；子代理 hook 未注册其编辑不产生事件——§5.2 自己已承认捕获非 100%。致命点：`sdd check` 事后重算工作树哈希能恢复"内容有没有变"，**但永远无法恢复 `coEditedSddThisSession`**（只能在捕获当下记录）。于是 OpenCode 上一旦漏捕获，§6.1 第一条建链失效 → 永久落 `unresolved` → **J1/J2/J4 这些"应无提醒"的 happy path 退化成 UNRESOLVED 噪音**。**修法**：把 §五标题"100%"改为诚实的"尽力捕获 + sdd check 兜底（兜内容、兜不了协同归属）"，并补一节捕获漏失下的归属降级分析。
+
+> 三条共同证明纯函数性目前不成立。**这三处是决定核心赌注成败的语义协议，不能像 §18.4 说的"交原型实证"——必须先在纸面解决**；其余（event id schema、UNCONFIRMED 阈值）才适合原型实证。
+
+### 19.4 P1：产品定位被悄悄迁移（实时纠偏 agent → commit-time linter）
+
+| # | finding | 级别 | 要点 |
+|---|---|---|---|
+| 1 | OpenCode 下 `sdd check` 谁触发无人回答 | **HIGH（confirmed）** | 无 CI / 不 commit 的 vibe 用户，T3 权威层永不触发；会话内只剩被标"可丢"的 Stop nudge，相对当前 `tool.execute.after` 投递通道是退化。缺一节"`sdd check` 触发矩阵"。 |
+| 2 | J5 方向性 doc-doc 信号丢失 | **HIGH（confirmed）** | `DOC_DOC_DRIFT` 只在 `aligned==true` 分支可达，J5 历史 dir 几乎从未 align → 被短路成 `UNCONFIRMED`，永远走不到；即便走到也无方向。回归当前 `TASKS_PENDING_DESIGN`。§7 ↔ §9 矛盾。 |
+| 3 | J1"无提醒"回归 | MEDIUM | 无人 align → `aligned:false` → `UNCONFIRMED`（本地 advisory，有文本），违反 PRD J1"无任何 drift 文本"。§9"即时隐形" ↔ §7 自相矛盾，§14 又把"未 align→UNCONFIRMED"列为正确行为坐实之。 |
+| 4 | 会话内实时提醒被标"可丢" | LOW | 方案把"审计正确性升级"误当成"对核心用途的全面改进"，混淆两个维度；未论证无 CI 用户的提醒触达。 |
+| 5 | J8 PreToolUse 提问/交接 checkpoint 丢失 | MEDIUM（confirmed） | 三层架构无对应触发器，被"提问态识别→不需要"一句默默丢弃。 |
+| 6 | J12 `doc-review` 是死输入 | MEDIUM | §8 记了它，§7 computeDrift 从不消费；"读完确认无需改文档"无法消解 UNCONFIRMED，必须额外 align。 |
+| 7 | J16（DTS）退化 | LOW | 从"prompt 标记即整轮零工件跳过"变成"逐文件写 checked-in impact-decision"。 |
+
+### 19.5 P1："不误报"这一第一验收标准未被证明兑现
+
+- **§7"格式化不误报"是错误的正确性声明**（MEDIUM）：把"mtime-免疫"偷换成"格式-免疫"。`git checkout` 安全，但 gofmt/prettier/CRLF 归一化改字节 → 改哈希 → 对已 aligned link 报 CODE_DRIFT。必须删改这句。
+- **文件级代码哈希**（MEDIUM，§13.1 自承但定级偏轻）：真实文件多关注点，align 后改同文件无关函数 → 误报。
+- **markdown 段落哈希脆弱**（MEDIUM）：错别字/润色/reflow 改哈希；§4.3"到下一个同级/更高级 heading 的 body"对**嵌套子标题归属未定义**（新增低级子标题会卷进父段哈希）。
+- **净误报从未对账**（MEDIUM）：消除一类 mtime 误报，同时引入文件级 / 重格式化 / 锚点 ORPHAN / UNCONFIRMED 噪音四类。§14 应加"同一编辑序列两套方案误报对账"。
+- **ORPHAN 是治理盲区**（MEDIUM）：`ORPHAN`/`UNLINKED` 既不在 §7 严重度链、也不在退出码规则里。"agent 把一节移到另一文件、忘搬 `sdd-id`，`--ci` 是 fail 还是 pass？"无法回答。lint 能查"缺 id"，无法语义重关联"内容搬到了哪"。
+
+### 19.6 P2：采纳成本与迁移悬崖（被低估）
+
+- **存量 repo 冷启动**（MEDIUM）：PRD J4 前置"changes mode"表明存量是一等主路径，但 §12.3 只一句"`sdd init`"，**未定义 bootstrap 后初始状态**。数据模型强制二难：要么全 `UNCONFIRMED`（满屏噪音），要么批量 align 橡皮图章（违反 §18.1）。无任何旅程/验收覆盖"500 文件存量 repo"。
+- **方法论负担 vs"不烦"内核**（MEDIUM）：checked-in 两工件 + `<!-- sdd-id -->` 锚点纪律 + merge driver + CI 接线，把"装上 hook 就能用"变成团队级流程改造，未与 PRD"低摩擦/不强制改 settings"明确对账。
+
+### 19.7 较轻项与文档矛盾清单（partially-valid，仍建议修）
+
+- **align 橡皮图章并未消除，只是改名**：`alignedReviewed` 成员判定只挡"确认后篡改"，挡不住"当初那次 align 就把超出 design 范围的代码盖章"（Codex P0-1 反例在 align 路径原样复活）。§7 边注"防 align 橡皮图章"会误导；建议状态名 `ALIGNED` → `CLAIMED-ALIGNED` 自解释。
+- **computeDrift 成员判定的删除漏报**：align 集 `{a.ts,b.ts}` 删掉 b.ts 后，剩余仍"全部 ∈ 集合"→ 判 ALIGNED，行为收窄被静默漏报。缺"集合成员增（→UNCONFIRMED）/删（→应报）"三态语义。
+- **降级幂等键 `sessionClock` 未定义**：谁递增、是否跨进程单调全空白；OpenCode（无 toolUseId）是高发区。（内容寻址回放对重复行幂等，故后果不灾难，但规格属空白。）
+- **NFR1"永不阻断"被悄悄放宽**：`--require-aligned` 让"正常开发但没盖章（UNCONFIRMED）"在受保护分支被挡；§12"诚实的代价"未列为对 NFR1 的实质让步。
+- **CI 治理三档无需求支撑**：`--max-unconfirmed-age/count`、`--require-aligned`、`--ci` 在 PRD 里无任何旅程/需求支撑，是评审者引入的治理层（YAGNI 候选）。
+
+### 19.8 推进前必答的逼问清单
+
+1. 只有两条事实事件时，`deriveLock` 用**哪个字段**确定性建立跨 path 关联？（不能是 ts）
+2. 两分支各 align 同一 link 后合并，`alignedReviewed` 的确定性归并规则是什么？
+3. OpenCode + 无 CI + 不 commit 的用户，会话内可靠提醒由谁投递？
+4. 单 change-dir、改过 50 文件、从没 align 的真实项目，`sdd check` 输出多少条 UNCONFIRMED？怎么呈现？
+5. 全仓跑一次 gofmt 后，亮多少个 CODE_DRIFT？
+6. `sdd init` 500 文件存量 repo 后，既有关系处于什么状态？怎么避开"全 UNCONFIRMED"和"全橡皮图章"两个坏极？
+7. 用户要的是"会话中被提醒去 sync"还是"PR/CI 时被挡下"？
+
+### 19.9 结论
+
+与前两轮一致：**先修完 P0（§19.3 的三处协议级语义裂缝）+ 直面 P1 的产品定位与误报对账，再做 §14 原型**。§19.3 的三条不属于"机械决策可交原型实证"——它们决定核心赌注是否成立，必须先在纸面落定。此外应承认两轮评审的三个盲区（运行时 / 定位 / 误报率），把"不误报"从口号变成 §14 的一等验收指标。
+
+> 公允保留（避免倒掉孩子）：把权威从 Stop 移到 `sdd check` 绕开 OpenCode Stop 难题、内容哈希替代 mtime、事件日志 PR 可审——这三点是真实且被低估的强点，应保留。
