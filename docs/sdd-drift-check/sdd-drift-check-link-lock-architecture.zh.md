@@ -359,3 +359,130 @@ deriveLock(events, 工作树) → sdd.lock:
 3. 跑通 J1（happy 不报）/ J3（事后改报）/ J5（doc-doc）/ J11（unresolved → 塌缩）四条，验证理论
 
 或先就薄弱点（**link 粒度** 或 **事件日志 compaction**）定方案再写代码。
+
+---
+
+## 十五、2026-05-29 Codex 评审意见
+
+本节只追加当次评审意见，不修改前文 clean-slate 方案原文。
+
+### 15.1 总体判断
+
+v0.2 的大方向值得继续：把漂移真相从隐藏 session/project state 下沉到
+`link-events.jsonl` + `sdd.lock`，并让 `sdd check` 成为确定性权威，比继续依赖
+Stop / idle hook 更稳。这能明显改善跨会话、子代理、Stop 丢失、上下文压缩后遗忘等问题。
+
+但当前草案还有几个会影响正确性的设计缝隙。最核心的风险是：方案把“捕获到了关联”
+和“已经完成语义对齐”放得太近，可能把错误基线稳定地写进 lockfile。
+
+### 15.2 主要问题
+
+#### P0：`auto-coedit` 不能直接视为已对齐
+
+文档中 T0 规则写的是：如果 code-edit 事件里的 `coEditedSddThisSession` 命中唯一
+change-dir，就自动建链，`confidence: auto-coedit`。这只能证明“代码改动和某个 SDD
+change 有关系”，不能证明“代码已经符合 design/tasks”。
+
+典型反例：
+
+1. agent 同一轮修改了 `design.md`、`tasks.md` 和代码。
+2. 代码实际超出了文档范围，或者只实现了一部分。
+3. T0 因为协同编辑唯一命中，直接把当前 codeHash 写入 `sdd.lock`。
+4. 后续 `computeDrift()` 只比较当前 hash 与 lock hash，结果不再报警。
+
+这会把“低置信归属”误升级成“干净基线”。
+
+建议：
+
+- `auto-coedit` 只能建立候选 link，状态应是 `needs-confirmation` 或
+  `confidence: auto-coedit, aligned: false`。
+- 只有显式 `align`、人工/agent review confirmation，或 `sdd resolve` 后，才能把该
+  link 作为不报警基线。
+- `sdd check` 对低置信、未确认 link 应至少给出 advisory，不能完全静默。
+
+#### P0：事件 `seq` 的并发分配方案不完整
+
+文档说 PostToolUse 直接 `appendFileSync` 到 `link-events.jsonl`，并提到 `seq 去重`。
+但多 hook 进程、子代理、并行工具调用时，谁来分配全局递增 `seq` 没有说明。
+
+如果两个进程同时读取末尾 seq，再各自 append，就可能产生重复 seq 或乱序事件。
+这会直接影响 `derivedThrough.eventSeq`、事件回放顺序和 lock 派生结果。
+
+建议二选一：
+
+- 方案 A：追加事件前必须持有 `.sdd/link-events.jsonl.lock`，在锁内分配递增 seq，
+  并原子 append。
+- 方案 B：事件主键改为 UUID / hash event id，`seq` 只作为 `deriveLock()` 时的派生逻辑序号；
+  排序规则使用 `{ts, session, eventId}` 或文件偏移。
+
+如果希望 Git 合并更稳，建议优先考虑方案 B，避免跨分支全局 seq 冲突。
+
+#### P1：`Read` 是否进入事件日志需要重新定义
+
+§5.1 写的是 `PostToolUse(Edit/Write/MultiEdit/Read)` 无条件 append 原始事件，但事件类型
+只定义了 `code-edit`、`doc-edit`、`no-impact`、`archive`、`align`。
+
+这里存在语义空缺：
+
+- 如果 Read 也 append，会导致只读 review 产生大量 checked-in 事件噪音。
+- 如果 Read 不 append，§5.1 不应把 Read 放进捕获列表。
+- 但“read/review 后确认无需修改”又是当前 SDD drift 里非常关键的闭环信号。
+
+建议：
+
+- 捕获层默认只记录写事件：`Edit` / `Write` / `MultiEdit`。
+- 如需表达只读 review，单独定义 `doc-review` 事件。
+- `doc-review` 只能作为 confirmation 输入，不能刷新内容 hash baseline。
+
+#### P1：`sdd.lock` / `link-events.jsonl` 的 Git 合并策略过于乐观
+
+文档认为事件日志 append 冲突会表现为两段 append，`deriveLock` 重放即可合并。但实际 Git
+对同一 JSONL 文件尾部并发追加很容易产生文本冲突，尤其是同时维护递增 seq 时。
+
+建议补充：
+
+- 是否需要 `.gitattributes` merge driver。
+- 是否提供 `sdd repair-events` 对事件日志去重、排序、规范化。
+- `sdd.lock` 是否完全允许由 `deriveLock()` 重写，冲突时以事件日志重算为准。
+- 多分支合并时，低置信 link / unresolved / noImpact 的冲突优先级。
+
+#### P1：`no-impact` 是判断，不是原始事实
+
+文档强调事件字段都是事实、无判断，但 `no-impact` 本身就是语义判断。它不能由捕获层自动生成，
+只能来自显式用户声明、agent 明确声明或 CLI 操作。
+
+建议：
+
+- 把 `no-impact` 拆成确认类事件，例如 `impact-decision`。
+- 字段里必须包含 `declaredBy`、`reason`、`source`、`relatedCodeHash`。
+- `sdd check` 对 no-impact 的比例、重复模式或缺少理由的记录给出 warning，避免 agent 滥用。
+
+### 15.3 建议调整后的最小原型范围
+
+保留文档 §14 的最小原型方向，但建议把原型验收标准改得更严格：
+
+1. `appendEvent()`：只捕获确定性写事件，事件必须有并发安全 id。
+2. `deriveLock()`：能从事件日志重建 lock；`auto-coedit` 只能生成低置信未确认 link。
+3. `computeDrift()`：对未确认 link、unresolved、hash drift 分别报告，不把低置信 link 当 clean baseline。
+4. 增加 `align` / `doc-review` / `impact-decision` 的最小 confirmation 事件。
+5. 跑通 J1 / J3 / J5 / J11 时，额外验证“同轮 co-edit 但未确认”不会被误判为完全对齐。
+
+### 15.4 可以保留的强点
+
+- append-only 事件日志作为真相源，这个方向是对的。
+- `sdd.lock` 作为派生快照、PR 可审，这比隐藏 project state 更透明。
+- Stop 降级为体验优化，`sdd check` 作为权威裁判，这能绕开 OpenCode / Claude hook 差异。
+- 子代理不再靠输出文本 NLP，而是靠最终文件 hash 和事件日志，这个取舍更稳。
+- 用内容 hash 替代 mtime / alignedAtMs，能解决大量跨会话和文件系统时间问题。
+
+### 15.5 结论
+
+该 clean-slate 方向可以继续推进，但不要直接进入完整重构。建议先修正上面的 P0/P1
+设计点，再做一个极小原型验证：
+
+- 事件捕获是否并发安全。
+- lock 是否可从事件日志稳定重算。
+- `auto-coedit` 是否只建立关联、不误清 drift。
+- `sdd check` 是否能在没有 agent/Stop 的情况下可靠报出 unresolved 和 drift。
+
+如果这些成立，再考虑替换当前 session/project state 架构。
