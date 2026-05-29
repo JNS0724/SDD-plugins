@@ -589,3 +589,151 @@ append-only 事件日志为真相、`sdd.lock` 派生可审、Stop 降级 + `sdd
 ### 16.5 一致结论
 
 与 Codex 一致：**先修完 P0/P1（v0.3 已落文档）+ 拍板 §6.5，再做极小原型验证，不直接进完整重构。**
+
+---
+
+## 十七、Codex 增量评审意见（2026-05-29）
+
+本节是在 v0.3 响应基础上的二次增量评价。只追加评审意见，不修改前文设计正文。
+
+### 17.1 总体判断
+
+v0.3 已经吸收上一轮评审的关键问题，特别是：
+
+- 事实事件与决策事件分离。
+- `auto-coedit` 不再直接等同于已对齐。
+- 去掉全局 `seq` 权威，改为事件集合去重与 `deriveLock()` 派生。
+- Read 不再作为 review 证据。
+- 将 `UNCONFIRMED` 是否可作为 happy path 终态暴露为产品决策。
+
+因此，v0.3 可以作为下一阶段设计基础。但在进入完整实现前，仍建议先补齐下面几个协议级决策，否则实现后容易在并发、跨会话、CI 策略和审计语义上反复返工。
+
+### 17.2 P0：`UNCONFIRMED` 不能永远只是 exit 0 提醒
+
+`UNCONFIRMED` 比误判为 `ALIGNED` 更安全，但如果它长期保持 advisory 且没有任何治理压力，团队可能会积累大量“未确认但不阻断”的关系。这样虽然避免了误阻断，却会弱化 SDD 同步检查的约束力。
+
+建议将运行策略拆成两类：
+
+- 本地交互模式：`UNCONFIRMED` 默认 exit 0，只做提示，避免干扰 agent 正常开发。
+- CI / main 分支 / 发布前模式：允许将过期或过量的 `UNCONFIRMED` 升级为失败。
+
+建议补充配置项：
+
+- `--max-unconfirmed-age`：未确认关系超过指定时长后失败。
+- `--max-unconfirmed-count`：未确认关系超过指定数量后失败。
+- `--require-aligned`：要求所有相关 link 都显式 `align` 后才通过。
+- `--ci`：启用更严格的默认策略。
+
+推荐默认策略：
+
+- `sdd check`：本地 advisory，`UNCONFIRMED` exit 0。
+- `sdd check --ci`：对 stale / excessive `UNCONFIRMED` 失败。
+- protected branch 或 release gate：可配置为 `--require-aligned`。
+
+### 17.3 P0：事件 ID 规则必须精确定义
+
+文档目前提到 content hash / UUID，但二者语义不同，不能作为同一层抽象混用：
+
+- content-addressed id 适合确定性去重、重试幂等、Git 合并。
+- UUID 适合唯一记录一次发生，但无法天然判断重复事件。
+
+建议优先选择确定性 hash 作为主 id，并明确参与 hash 的字段。
+
+建议事实事件 id：
+
+```text
+hash(kind + path + hashBefore + hashAfter + toolUseId/sessionId)
+```
+
+建议决策事件 id：
+
+```text
+hash(kind + target + decision + relatedHashes + source)
+```
+
+需要注意：
+
+- 如果 id 包含 timestamp，重试写入可能生成重复事件。
+- 如果 id 排除过多上下文字段，不同事件可能被错误合并。
+- 如果某些运行时没有 `toolUseId`，需要定义降级字段，例如 `sessionId + localClock` 或显式 nonce；同时说明该降级模式的去重能力较弱。
+
+### 17.4 P1：`deriveLock()` 的排序不能只依赖时间
+
+`{ts, session, id}` 可以提供稳定排序，但不能保证真实因果顺序。跨会话、子任务、系统时间漂移、Git 合并都会削弱 timestamp 的语义。
+
+建议事件结构尽量记录可用的因果字段：
+
+- `parentEventId`
+- `toolUseId`
+- `observedAfter`
+- `sessionClock`
+- `sourceRuntime`
+
+建议文档明确：
+
+- timestamp 只用于稳定排序和审计展示，不作为唯一因果权威。
+- 同一路径链路内优先使用 `hashBefore/hashAfter` 判断连续性。
+- 跨路径关系由显式决策事件，例如 `align` / `impact-decision` / `doc-review`，建立语义关联。
+
+### 17.5 P1：`align` 事件不能成为新的橡皮图章
+
+`align` 是强决策事件，如果只记录“已确认”，它会变成新的误清 drift 入口。建议 `align` 必须记录本次确认覆盖的输入集合。
+
+建议最小字段：
+
+```json
+{
+  "kind": "align",
+  "scope": "sdd/changes/feature-a",
+  "reviewed": {
+    "code": ["path:hash"],
+    "design": ["path:hash"],
+    "tasks": ["path:hash"]
+  },
+  "decision": "aligned",
+  "rationale": "design and tasks reflect current code behavior",
+  "declaredBy": "agent",
+  "source": "sdd check",
+  "createdAt": "..."
+}
+```
+
+这样 `computeDrift()` 才能判断：当前文件 hash 是否仍处于被确认过的集合内。否则 `align` 只能说明“某一刻有人说过对齐”，不能说明“当前版本仍然对齐”。
+
+### 17.6 P1：事件日志需要隐私和噪声边界
+
+事件日志如果作为可提交工件，需要明确不会记录敏感内容。建议文档增加边界说明：
+
+- 不记录 prompt 原文。
+- 不记录源码正文。
+- 不记录模型完整输出。
+- 不记录密钥、环境变量、请求体。
+- 默认只记录 path、hash、事件类型、有限 rationale、来源和时间。
+
+`rationale` 也建议限制长度，避免 agent 写入大段上下文或意外包含敏感信息。
+
+### 17.7 P1：`UNRESOLVED` 不应与普通 advisory 混为一类
+
+`UNCONFIRMED` 表示“有候选关联，但缺少显式确认”。`UNRESOLVED` 表示“代码或文档变化无法归属到任何 SDD 关系”。后者风险更高。
+
+建议策略：
+
+- 本地交互：`UNRESOLVED` 可以先 warning，不强制阻断 agent。
+- CI / 发布前：`UNRESOLVED` 默认应比 `UNCONFIRMED` 更严格。
+- 文档应明确二者优先级：`DRIFT` > `UNRESOLVED` > `UNCONFIRMED` > `ALIGNED`。
+
+### 17.8 建议的实现前置决策
+
+在进入完整重构前，建议先拍板以下事项：
+
+1. `UNCONFIRMED` 的默认策略：本地 advisory，CI 可升级失败。
+2. event id 的确定性 hash schema。
+3. `align` / `doc-review` / `impact-decision` 的最小字段。
+4. `deriveLock()` 的排序与因果规则。
+5. 事件日志的隐私边界与 rationale 长度限制。
+
+这些决策确认后，再做极小原型更稳。原型目标不是完整替换当前实现，而是验证三件事：
+
+- 事件日志能否稳定去重和合并。
+- `sdd.lock` 能否完全由事件日志重建。
+- `computeDrift()` 能否区分 `ALIGNED` / `UNCONFIRMED` / `UNRESOLVED` / `DRIFT`，且不会把候选关联误判为 clean baseline。
