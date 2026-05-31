@@ -53,7 +53,7 @@ const init = (ctx) => {
   // After baseline, nothing should be pending — render the (empty) todo for visibility.
   const needs = computeNeedsReview(repoRoot, ledger, cfg)
   writeTextAtomic(ledgerPath, serializeLedger(ledger))
-  writeTextAtomic(todoPath, renderTodo(needs.items, ledger))
+  writeTextAtomic(todoPath, renderTodo(needs.items, ledger, { meta: needs.meta }))
   const gi = ensureGitignore(repoRoot)
 
   return {

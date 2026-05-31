@@ -1051,7 +1051,7 @@ var require_pipeline = __commonJS({
           diag(stateDir, { event: "scan-truncated", skipped: needs.meta.skipped });
         }
         const okLedger = writeTextAtomic(ledgerPath, serializeLedger(ledger));
-        const okTodo = writeTextAtomic(todoPath, renderTodo(needs.items, ledger));
+        const okTodo = writeTextAtomic(todoPath, renderTodo(needs.items, ledger, { meta: needs.meta }));
         if (!okLedger || !okTodo) diag(stateDir, { event: "write-skipped", okLedger, okTodo });
         return {
           action: boot.bootstrapped ? "bootstrap" : "deliver",

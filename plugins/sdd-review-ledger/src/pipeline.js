@@ -143,7 +143,7 @@ const runInner = (ctx) => {
     }
 
     const okLedger = writeTextAtomic(ledgerPath, serializeLedger(ledger))
-    const okTodo = writeTextAtomic(todoPath, renderTodo(needs.items, ledger))
+    const okTodo = writeTextAtomic(todoPath, renderTodo(needs.items, ledger, { meta: needs.meta }))
     if (!okLedger || !okTodo) diag(stateDir, { event: "write-skipped", okLedger, okTodo })
 
     return {
