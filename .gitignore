@@ -1,3 +1,6 @@
 /opencode-sdd-drift-e2e/
 node_modules/
 plugins/opencode-turn-checkpoint/opencode-turn-checkpoint.log.jsonl
+# local/editor artifacts
+.DS_Store
+.claude/
