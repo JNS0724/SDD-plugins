@@ -1,6 +1,9 @@
 param(
   [ValidateSet("deepseek", "minimax")]
-  [string]$Provider = "deepseek"
+  [string]$Provider = "deepseek",
+
+  [ValidateSet("single-session", "split-at-04")]
+  [string]$Scenario = "single-session"
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,8 +14,9 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 $root = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $root)
 $runId = [guid]::NewGuid().ToString("N")
-$workRoot = Join-Path $root ".real-workspaces\ledger-workflow-$Provider-$runId"
-$opencodeHome = Join-Path $root ".real-homes\ledger-workflow-$Provider-$runId"
+$scenarioSlug = $Scenario -replace "[^A-Za-z0-9_-]", "-"
+$workRoot = Join-Path $root ".real-workspaces\ledger-workflow-$Provider-$scenarioSlug-$runId"
+$opencodeHome = Join-Path $root ".real-homes\ledger-workflow-$Provider-$scenarioSlug-$runId"
 $opencodeBin = Join-Path $root "node_modules\.bin\opencode.cmd"
 $configTemplate = Join-Path $root ".opencode\opencode.$Provider.jsonc.example"
 $pluginSource = Join-Path $repoRoot "plugins\sdd-review-ledger\sdd-review-ledger-opencode.js"
@@ -257,15 +261,20 @@ $previousUserProfile = $env:USERPROFILE
 $env:HOME = $opencodeHome
 $env:USERPROFILE = $opencodeHome
 
-$sessionId = $null
+$activeSessionId = $null
 $phaseResults = @()
 try {
-  foreach ($phase in $phases) {
+  for ($phaseIndex = 0; $phaseIndex -lt $phases.Count; $phaseIndex++) {
+    $phase = $phases[$phaseIndex]
+    if ($Scenario -eq "split-at-04" -and $phase.id -eq "04-multi-code") {
+      $activeSessionId = $null
+    }
+
     $outLog = Join-Path $workRoot "$($phase.id).out.jsonl"
     $errLog = Join-Path $workRoot "$($phase.id).err.log"
     $args = @("run", "--print-logs", "--log-level", "DEBUG", "--agent", "sddflow", "--format", "json", "--dir", $workRoot)
-    if ($sessionId) {
-      $args += @("--session", $sessionId)
+    if ($activeSessionId) {
+      $args += @("--session", $activeSessionId)
     }
     $args += $phase.prompt
 
@@ -282,8 +291,8 @@ try {
 
     $outText = Read-Text $outLog
     $errText = Read-Text $errLog
-    if (!$sessionId) {
-      $sessionId = Extract-SessionId $outText
+    if (!$activeSessionId) {
+      $activeSessionId = Extract-SessionId $outText
     }
 
     $todoText = Read-Text $todoPath
@@ -292,7 +301,7 @@ try {
       id = $phase.id
       title = $phase.title
       exitCode = $exitCode
-      sessionId = $sessionId
+      sessionId = $activeSessionId
       reminderCount = $injectedCount
       injectedMetadataCount = $injectedCount
       pendingTodoCount = Count-Matches $todoText "(?m)^- \[ \] "
@@ -315,10 +324,11 @@ try {
 $summary = [pscustomobject]@{
   provider = $Provider
   model = $modelName
+  scenario = $Scenario
   runId = $runId
   marker = $marker
   workRoot = $workRoot
-  sessionId = $sessionId
+  sessionIds = @($phaseResults | Select-Object -ExpandProperty sessionId -Unique)
   phases = $phaseResults
   ledgerExists = (Test-Path -LiteralPath $ledgerPath)
   todoExists = (Test-Path -LiteralPath $todoPath)
@@ -331,17 +341,18 @@ $report += "# SDD Review Ledger Workflow Observation"
 $report += ""
 $report += "- Provider: $Provider"
 $report += "- Model: $modelName"
+$report += "- Scenario: $Scenario"
 $report += "- RunId: $runId"
 $report += "- Marker: $marker"
 $report += "- WorkRoot: $workRoot"
-$report += "- SessionId: $sessionId"
+$report += "- SessionIds: $((@($phaseResults | Select-Object -ExpandProperty sessionId -Unique) -join ', '))"
 $report += ""
 $report += "## Phase Summary"
 $report += ""
-$report += "| Phase | Exit | Reminders | Injected Metadata | Pending Todo | Checked Todo | Error Words |"
-$report += "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+$report += "| Phase | Session | Exit | Reminders | Injected Metadata | Pending Todo | Checked Todo | Error Words |"
+$report += "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
 foreach ($r in $phaseResults) {
-  $report += "| $($r.id) $($r.title) | $($r.exitCode) | $($r.reminderCount) | $($r.injectedMetadataCount) | $($r.pendingTodoCount) | $($r.checkedTodoCount) | $($r.opencodeErrorCount) |"
+  $report += "| $($r.id) $($r.title) | $($r.sessionId) | $($r.exitCode) | $($r.reminderCount) | $($r.injectedMetadataCount) | $($r.pendingTodoCount) | $($r.checkedTodoCount) | $($r.opencodeErrorCount) |"
 }
 $report += ""
 $report += "## Final Todo"
@@ -366,14 +377,15 @@ Set-ContentWithRetry -LiteralPath $summaryMd -Value ($report -join "`n") -NoNewl
 
 Write-Output "PROVIDER=$Provider"
 Write-Output "MODEL=$modelName"
+Write-Output "SCENARIO=$Scenario"
 Write-Output "RUN_ID=$runId"
 Write-Output "MARKER=$marker"
 Write-Output "WORKROOT=$workRoot"
-Write-Output "SESSION_ID=$sessionId"
+Write-Output "SESSION_IDS=$((@($phaseResults | Select-Object -ExpandProperty sessionId -Unique) -join ', '))"
 Write-Output "SUMMARY_JSON=$summaryJson"
 Write-Output "SUMMARY_MD=$summaryMd"
 Write-Output "--- Phase Summary ---"
-$phaseResults | Select-Object id,title,exitCode,reminderCount,injectedMetadataCount,pendingTodoCount,checkedTodoCount,opencodeErrorCount | Format-Table -AutoSize
+$phaseResults | Select-Object id,title,sessionId,exitCode,reminderCount,injectedMetadataCount,pendingTodoCount,checkedTodoCount,opencodeErrorCount | Format-Table -AutoSize
 Write-Output "--- Final Todo ---"
 if (Test-Path -LiteralPath $todoPath) {
   Get-Content -LiteralPath $todoPath -Encoding UTF8

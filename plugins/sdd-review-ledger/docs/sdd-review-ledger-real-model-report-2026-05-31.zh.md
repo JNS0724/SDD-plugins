@@ -1,8 +1,8 @@
-# sdd-review-ledger DeepSeek 真实模型 7 步实测报告
+# sdd-review-ledger DeepSeek 真实模型 7 步实测报告（单会话 + 跨会话）
 
 ## 摘要
 
-本次使用 OpenCode 1.2.27 + `sdd-review-ledger-opencode.js` + DeepSeek 真实模型，跑了一轮贴近实际开发节奏的 7 步交叉场景：
+本次使用 OpenCode 1.2.27 + `sdd-review-ledger-opencode.js` + DeepSeek 真实模型，跑了两轮贴近实际开发节奏的 7 步交叉场景：
 
 1. 先写 `design.md`
 2. 再写 `tasks.md`
@@ -12,11 +12,17 @@
 6. 根据新 `design.md` 再改代码
 7. 最后再改 `tasks.md`
 
+两大场景：
+
+- 场景一：7 步全程使用同一个 OpenCode session。
+- 场景二：第 1-3 步使用 session A；从第 4 步开始新建 session B，并用 session B 完成第 4-7 步。
+
 结论：
 
 - 7 个阶段全部完成，OpenCode 退出码均为 `0`。
 - 最终 `.sdd-review-todo.md` 无待评审项。
 - 未发现 `failed to load plugin` / `fn5 is not a function` 等 OpenCode 插件加载错误。
+- 跨会话场景下，ledger / todo 状态能延续到新 session；第 4 步新会话仍能看到前 3 步留下的 SDD 审查状态。
 - 修正测试脚本后，OpenCode + DeepSeek 没有异常慢；此前慢的主要原因是测试脚本把 OpenCode HOME 放在项目目录内，导致模型搜索项目文件时扫到 `.home/.cache/opencode/node_modules`。
 - 当前“每次相关文件编辑都提醒”的策略覆盖充分，但在模型已经进入 SDD 审查、自行修正文档/代码时，提醒偏密。建议后续引入“审查事务降噪”。
 
@@ -34,25 +40,45 @@
 
 ## 执行命令
 
+场景一：单会话。
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-real-sdd-review-ledger-workflow.ps1 -Provider deepseek
 ```
 
-实际工作目录：
+场景二：第 4 步开始新建会话。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-real-sdd-review-ledger-workflow.ps1 -Provider deepseek -Scenario split-at-04
+```
+
+场景一实际工作目录：
 
 ```text
 E:\tool\MySkills\MySkills\test\opencode-sdd-drift-e2e\.real-workspaces\ledger-workflow-deepseek-66fe6ec429eb4728aeb8268a095a9394
 ```
 
-测试脚本同时为 OpenCode 配置了独立 HOME：
+场景二实际工作目录：
+
+```text
+E:\tool\MySkills\MySkills\test\opencode-sdd-drift-e2e\.real-workspaces\ledger-workflow-deepseek-split-at-04-8b7a327a0bf54115a0b42216b1af5ce6
+```
+
+测试脚本同时为 OpenCode 配置了独立 HOME。场景一：
 
 ```text
 E:\tool\MySkills\MySkills\test\opencode-sdd-drift-e2e\.real-homes\ledger-workflow-deepseek-66fe6ec429eb4728aeb8268a095a9394
 ```
 
+场景二：
+
+```text
+E:\tool\MySkills\MySkills\test\opencode-sdd-drift-e2e\.real-homes\ledger-workflow-deepseek-split-at-04-8b7a327a0bf54115a0b42216b1af5ce6
+```
+
 这点很重要：OpenCode HOME 不应放在被测项目目录内，否则模型搜索 `package.json`、`tsconfig.json` 等文件时，可能把 OpenCode 自己的缓存目录扫进上下文。
 
-## 阶段结果
+## 场景一：单会话阶段结果
 
 | 阶段 | 动作 | 退出码 | 注入提醒次数 | 阶段结束 pending | 阶段结束 checked |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -76,6 +102,37 @@ src/index.ts
 ```
 
 最终 `.sdd-review-todo.md` 的 `## 待评审` 为空，`## 审计历史` 中保留了最新审计记录。
+
+## 场景二：第 4 步起新会话
+
+会话切换：
+
+```text
+01-design ~ 03-code-from-tasks: ses_18145f89dffeP55oC0JkdgxcH5
+04-multi-code ~ 07-tasks-change: ses_18144f8faffepoMSVLaDF11wp9
+```
+
+阶段结果：
+
+| 阶段 | 动作 | Session | 退出码 | 注入提醒次数 | 阶段结束 pending | 阶段结束 checked | Error Words |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 01-design | 创建 `design.md` | `ses_18145f89dffeP55oC0JkdgxcH5` | 0 | 0 | 0 | 1 | 0 |
+| 02-tasks | 根据 design 创建 `tasks.md` | `ses_18145f89dffeP55oC0JkdgxcH5` | 0 | 1 | 0 | 2 | 2 |
+| 03-code-from-tasks | 根据 tasks 写代码 | `ses_18145f89dffeP55oC0JkdgxcH5` | 0 | 6 | 0 | 4 | 0 |
+| 04-multi-code | 从新 session 开始，多次改代码 | `ses_18144f8faffepoMSVLaDF11wp9` | 0 | 6 | 0 | 5 | 0 |
+| 05-design-change | 新 session 中再改 `design.md` | `ses_18144f8faffepoMSVLaDF11wp9` | 0 | 4 | 0 | 5 | 0 |
+| 06-code-after-design | 根据新 design 再改代码 | `ses_18144f8faffepoMSVLaDF11wp9` | 0 | 2 | 0 | 5 | 0 |
+| 07-tasks-change | 最后再改 `tasks.md` | `ses_18144f8faffepoMSVLaDF11wp9` | 0 | 1 | 0 | 5 | 0 |
+
+最终 `.sdd-review-todo.md` 的 `## 待评审` 同样为空。
+
+场景二验证点：
+
+- 第 4 步没有传入前 3 步的 `--session`，OpenCode 创建了新 session。
+- 新 session 下，插件仍然读取同一个仓库的 `.git/sdd-review-ledger-state/ledger.json` 和 `.sdd-review-todo.md`，因此能延续前 3 步的审查状态。
+- 第 4-7 步继续触发 SDD review，并能把新 session 中的 pending 清空。
+- 第 2 阶段日志出现一次 `The socket connection was closed unexpectedly`，OpenCode 随后自动重试，阶段最终退出码为 `0`。这是 DeepSeek/OpenCode 网络流的瞬时错误，不是插件加载或插件执行错误。
+- 未发现 `failed to load plugin`、`fn5 is not a function`、`.home\.cache` 污染项目搜索上下文。
 
 ## 每一步发生了什么
 
@@ -236,4 +293,5 @@ npm test
 同时也确认了两个工程判断：
 
 1. OpenCode + DeepSeek 并没有天然异常慢；测试工程不能把 OpenCode HOME/cache 放进项目根。
-2. 当前“每次相关编辑都提醒”的策略偏保守，适合防漏，但体验上应通过“审查事务降噪”优化。
+2. ledger / todo 是仓库级状态，不是 OpenCode session 私有状态；因此从第 4 步开始新建 session 仍能继续审查。
+3. 当前“每次相关编辑都提醒”的策略偏保守，适合防漏，但体验上应通过“审查事务降噪”优化。
