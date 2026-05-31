@@ -1,0 +1,191 @@
+# sdd-review-ledger 入门（MVP / Claude Code）
+
+`sdd-review-ledger` 在 vibe coding 时做一件事：**代码或 SDD 文档变了，就在编辑那一刻把"该评审的材料"端到 agent 面前，请它评审 文档↔文档 / 代码↔文档 是否需要同步**，并用内容哈希记住每次评审结论。
+
+它**不**替你判断有没有偏差（那是语义判断，没有确定性算法）。它只保证：变更被可靠地端出来评审、留痕、永不阻断你的主流程。判断永远由 agent（LLM）做。
+
+> 当前是 **MVP（v0.1 首发）**：只支持 **Claude Code**。OpenCode 适配器（M4）、双平台 e2e（M5）后置。
+
+---
+
+## 它和上一代 sdd-drift-check 的区别
+
+| | sdd-drift-check | sdd-review-ledger |
+| --- | --- | --- |
+| 信号 | file mtime + session 时序状态机 | **内容哈希**（与 mtime、git 无关） |
+| 工具角色 | 试图"算出有没有 drift" | **只做评审编排 + 记账**，判断全交 agent |
+| 触发判定 | 依赖会话内事件 + git | `needsReview = hash(文件) ≠ 账本里上次评审的哈希`，是 `(工作树, 账本)` 的**纯函数** |
+| 清除 | 多种隐式信号 | **唯一信号 = 勾选** `.sdd-review-todo.md`；编辑从不自动清除 |
+
+设计文档见 [`docs/`](.)：架构（v0.3）、详细设计（v0.3）、R1（去 git 状态依赖）、R2（GateGuard 可借鉴边界）。
+
+---
+
+## 前置条件
+
+- 本机能跑 `node`（开发用 Node 18+）。
+- 项目里有 `sdd/` 或 `.sdd/` 目录，change 目录形如：
+
+  ```text
+  sdd/changes/<change-id>/
+    proposal.md
+    design.md
+    tasks.md
+  ```
+
+  没有 `sdd/` / `.sdd/` 且账本为空时，插件**静默退出**，不写任何文件、不提醒。
+
+---
+
+## 安装（Claude Code）
+
+需要两个文件：发布件 `sdd-review-ledger-hook.js`（自包含，已打包）和可选的提示词规则 `sdd-review-rules.md`。
+
+```bash
+mkdir -p .claude/hooks/sdd-review-ledger
+cp <本插件目录>/sdd-review-ledger-hook.js .claude/hooks/sdd-review-ledger/sdd-review-ledger-hook.js
+cp <本插件目录>/sdd-review-rules.md       .claude/hooks/sdd-review-ledger/sdd-review-rules.md
+```
+
+创建或更新 `.claude/settings.json`（两个事件用**同一个**发布件；它内部按 `hook_event_name` 分派）：
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/sdd-review-ledger/sdd-review-ledger-hook.js"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/sdd-review-ledger/sdd-review-ledger-hook.js"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- **PostToolUse（Edit/Write/MultiEdit）= 主通道**：编辑发生时即检查并在工具结果里端出提醒。
+- **UserPromptSubmit = 跨会话/跨轮兜底**：新会话或下一轮开头，若有未评审项，注入一条紧凑 carry-over 摘要。
+
+冷启动：第一次在已有代码的仓库启用时，插件会**自动 baseline**（把当前所有文件按当前哈希记为已评审、本轮不刷屏），避免满屏"全未评审"。这是一次"不回溯存量"的静默标注，不声称"已验证"。
+
+---
+
+## 你会看到什么
+
+大多数时候它是安静的。
+
+| 场景 | 现象 |
+| --- | --- |
+| 改了代码，且仓库里有活跃 change-dir | 该次编辑的工具结果里出现一段 `<system-reminder>[SDD-REVIEW: NEEDS-REVIEW]`，列出变了哪些文件 + 候选 change-dir + design 首行 |
+| 同一轮里连续改多个文件 | 只主动提醒**一次**（每批次 ≤1），其余只静默刷新 `.sdd-review-todo.md` |
+| 新会话有历史未评审项 | 开头收到一条 carry-over 摘要 |
+| 改了 `design.md` / `tasks.md` | 同样进待评审，提醒评审下游是否需要跟进 |
+| 纯格式化 / 改无关函数 | 也会进待评审（良性），agent 一句"仅格式化，无需改文档"勾掉即可 |
+| 没有 `sdd/` 且账本空 | 完全静默 |
+
+模型看到的提醒长这样（fact-forcing：先取证再下结论）：
+
+```text
+<system-reminder>
+[SDD-REVIEW: NEEDS-REVIEW]
+
+CHANGED (未评审，本批):
+  - src/greet.ts  (候选 change-dir: greeting)
+  ...
+
+REVIEW（你是唯一语义裁判；下结论前必须先取证，不接受裸判断）:
+  1. design/tasks 此刻声称什么  2. code 此刻实现什么
+  3. 二者是否一致  4. 结论：需改→编辑 design/tasks；无需改→在 .sdd-review-todo.md 勾掉
+...
+</system-reminder>
+```
+
+---
+
+## 如何"消项"（唯一信号 = 勾选）
+
+评审完每一项，在 `.sdd-review-todo.md` 把它从 `[ ]` 勾成 `[x]`，即使结论是"无需改"：
+
+```markdown
+## 待评审
+- [x] src/greet.ts@a1b2c3  (候选: greeting)   ← 勾上 + 保留行内 @hash
+```
+
+- **编辑文件不会自动清除**——这是刻意的（防止"碰一下文档就误清掉一条没人审过的评审项"）。
+- 行内 `@<hash>` 把结论钉在你当时看过的那一版上；文件内容再变 → 新哈希 → 自动重新变回待评审。
+- 勾选**下一次运行生效**（下次 hook 触发时 ingest）。
+
+---
+
+## 运行时产物
+
+| 产物 | 位置 | 是否进 git |
+| --- | --- | --- |
+| `ledger.json`（评审记录，机器真相源） | `<.git>/sdd-review-ledger-state/`，无 git 时 `<repo>/.sdd-review-ledger-state/`，再兜底 `%TEMP%/` | 否（gitignore） |
+| `.sdd-review-todo.md`（人可见 + 勾选入口） | repo 根 | 否（gitignore） |
+| `sdd-review.log.jsonl`（诊断） | state 目录 | 否 |
+
+建议加入 `.gitignore`：
+
+```gitignore
+.sdd-review-ledger-state/
+.sdd-review-todo.md
+```
+
+> v0.1 是**本地、不共享**：账本不进 git，跨人/换机不共享（诚实标注，团队模式是 v0.2）。
+
+---
+
+## 常用开关（环境变量）
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `SDD_REVIEW` / `SDD_REVIEW_DISABLED` | — | **逃生阀总开关**：设 `off`/`0`/`false`/`disabled`（或 `SDD_REVIEW_DISABLED=1`）→ 整程静默：不提醒、不写 todo、不扫描 |
+| `SDD_REVIEW_SESSION_MAX_REMINDERS` | `3` | 每会话主动提醒上限；`0` = 纯靠被动 todo，不主动提醒 |
+| `SDD_REVIEW_IGNORE` | — | 追加扫描忽略 glob（逗号分隔，如 `generated/,vendor/`） |
+| `SDD_REVIEW_SCAN_ROOTS` | repo 根 | 限定只扫某些子树（逗号分隔） |
+| `SDD_REVIEW_SCAN_BUDGET_MS` | `1500` | 单次扫描时间预算；超出 → 截断并在 todo 头/日志告警（非静默） |
+| `SDD_REVIEW_SCAN_ALWAYS_HASH` | `0` | `1` = 禁用 mtime 跳过优化、永远全哈希（最慢但最稳） |
+| `SDD_REVIEW_MAX_FILE_BYTES` | `2097152`(2 MiB) | 超此大小的文件不扫 |
+| `SDD_REVIEW_BOOTSTRAP_THRESHOLD` | `1` | 空账本扫到 ≥N 个既有文件即 auto-baseline |
+| `SDD_REVIEW_HASH_LEN` | `16` | 内容哈希 hex 前缀长度 |
+| `SDD_REVIEW_RULES_FILE` | — | 覆盖 `sdd-review-rules.md` 路径 |
+
+---
+
+## 边界与已知残余（诚实标注）
+
+- **主投递无强制力**：提醒是搭在工具结果上的可见文本，模型**可以忽略**（不像有 DENY 的 gate 那样强制）。这是"永不阻断"换来的代价（架构 §10#9）。
+- **评审质量 = LLM 质量**：工具只保证"评审被端到裁判面前并留痕"，不保证"判得对"。
+- **不在被扫描位置的写**仍可能漏（被 ignore-glob 排除 / 扫描预算截断尾部），但两者都有日志、非静默。
+- **单平台**：OpenCode 用户需等 M4。
+
+---
+
+## 快速验证
+
+```text
+sdd/changes/demo/
+  design.md   # 内容：# Design\n当前实现返回普通问候语。
+  tasks.md    # 内容：# Tasks\n- [ ] 实现热情问候语。
+```
+
+让 agent：把 `src/app.ts` 的 greet 改成返回带感叹号的热情问候语。
+
+预期：改完那一刻，工具结果里出现 `[SDD-REVIEW: NEEDS-REVIEW]`，列出 `src/app.ts`；`.sdd-review-todo.md` 出现该项；agent 评审 design/tasks，需要则改、不需要则勾掉并写一行理由。
+
+排查：state 目录下看 `sdd-review.log.jsonl`；完全无反应通常是 hook 没被加载或 `settings.json` 里 `command` 路径写错。
