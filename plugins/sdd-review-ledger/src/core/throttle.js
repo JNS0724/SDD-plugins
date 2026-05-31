@@ -3,19 +3,25 @@
 const fs = require("fs")
 const path = require("path")
 
-// Active reminder state.
-// Default policy is intentionally simple: every relevant code / SDD-doc edit may
-// remind. A missed review is worse than a repeated nudge. We only suppress an
-// identical pending-set reminder inside a tiny time window, which avoids duplicate
-// output from near-simultaneous multi-file writes without muting later changes.
-// The optional SDD_REVIEW_SESSION_MAX_REMINDERS env var still acts as a hard cap
-// for teams that explicitly want a quieter mode; 0 means passive todo only.
+// Active reminder state + decision (改进一：按回合合并 + 按路径集去重).
+//
+// The active-reminder dedupe key is the set of pending PATHS within the current
+// user turn (batch), NOT path@hash. Rationale (real-model report 2026-05-31):
+// keying on content-hash made any mid-review re-edit of an already-pending file
+// mint a fresh signature and re-fire a full reminder. Path-set + turn batching
+// collapses that churn while GUARANTEEING new obligations are never silenced:
+//   - same turn, pending path-set did not grow  → suppress (already nudged)
+//   - any new path appears (set grows)           → ALWAYS remind (by construction)
+//   - new user turn (bumpBatch)                  → re-arm, even for the same set
+// A missed review is still worse than a repeated nudge, so growth always wins.
+// The optional SDD_REVIEW_SESSION_MAX_REMINDERS env var remains a hard cap;
+// 0 means passive todo only.
 
 const emptyThrottle = () => ({
   batch: 0,
   sent: 0,
   lastRemindedBatch: null,
-  lastReminderSignature: "",
+  lastRemindedPathSet: [],
   lastReminderAtMs: 0,
 })
 
@@ -28,7 +34,9 @@ const loadThrottle = (stateDir, sessionKey) => {
       batch: Number.isFinite(data.batch) ? data.batch : 0,
       sent: Number.isFinite(data.sent) ? data.sent : 0,
       lastRemindedBatch: Number.isFinite(data.lastRemindedBatch) ? data.lastRemindedBatch : null,
-      lastReminderSignature: typeof data.lastReminderSignature === "string" ? data.lastReminderSignature : "",
+      lastRemindedPathSet: Array.isArray(data.lastRemindedPathSet)
+        ? data.lastRemindedPathSet.filter((s) => typeof s === "string")
+        : [],
       lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0,
     }
   } catch {
@@ -50,17 +58,16 @@ const saveThrottle = (stateDir, sessionKey, state) => {
 const bumpBatch = (state) => ({ ...state, batch: (state.batch || 0) + 1 })
 
 // Pure decision for an active reminder. Returns { remind, state }.
-// remind iff there is something to review and the optional cap is not reached.
-const decideReminder = (state, { hasNeeds, maxReminders, signature = "", nowMs = Date.now(), dedupeMs = 0 }) => {
+// remind iff there is something to review, the optional cap is not reached, and
+// the pending path-set is NOT a within-turn no-growth repeat.
+// pathSet: the current pending paths (order-independent; caller may sort/dedupe).
+const decideReminder = (state, { hasNeeds, maxReminders, pathSet = [], nowMs = Date.now() }) => {
   const cur = state || emptyThrottle()
-  const duplicate =
-    signature &&
-    signature === cur.lastReminderSignature &&
-    dedupeMs > 0 &&
-    Number.isFinite(cur.lastReminderAtMs) &&
-    nowMs - cur.lastReminderAtMs >= 0 &&
-    nowMs - cur.lastReminderAtMs < dedupeMs
-  const remind = !!hasNeeds && !duplicate && maxReminders > 0 && (cur.sent || 0) < maxReminders
+  const lastSet = new Set(cur.lastRemindedPathSet || [])
+  const grew = pathSet.some((p) => !lastSet.has(p))
+  const sameTurn = cur.lastRemindedBatch !== null && cur.lastRemindedBatch === cur.batch
+  const suppressed = sameTurn && !grew
+  const remind = !!hasNeeds && maxReminders > 0 && (cur.sent || 0) < maxReminders && !suppressed
   if (!remind) return { remind: false, state: cur }
   return {
     remind: true,
@@ -68,7 +75,7 @@ const decideReminder = (state, { hasNeeds, maxReminders, signature = "", nowMs =
       ...cur,
       sent: (cur.sent || 0) + 1,
       lastRemindedBatch: cur.batch,
-      lastReminderSignature: signature || cur.lastReminderSignature || "",
+      lastRemindedPathSet: [...pathSet],
       lastReminderAtMs: nowMs,
     },
   }

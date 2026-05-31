@@ -152,6 +152,111 @@ var require_config = __commonJS({
   }
 });
 
+// src/core/session-key.js
+var require_session_key = __commonJS({
+  "src/core/session-key.js"(exports, module) {
+    "use strict";
+    var crypto = __require("crypto");
+    var path = __require("path");
+    var hashKey = (prefix, value) => `${prefix}-${crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 24)}`;
+    var sanitizeSessionKey = (value) => {
+      const raw = String(value == null ? "" : value).trim();
+      if (!raw) return "";
+      const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
+      if (sanitized && sanitized.length <= 64) return sanitized;
+      return hashKey("sid", raw);
+    };
+    var resolveSessionKey = (event = {}, env = {}, repoRoot) => {
+      const direct = [
+        event && event.session_id,
+        event && event.sessionId,
+        event && event.session && event.session.id,
+        env.CLAUDE_SESSION_ID,
+        env.SDD_REVIEW_SESSION_ID
+      ];
+      for (const candidate of direct) {
+        const s = sanitizeSessionKey(candidate);
+        if (s) return s;
+      }
+      const transcript = event && (event.transcript_path || event.transcriptPath) || env.CLAUDE_TRANSCRIPT_PATH;
+      if (transcript && String(transcript).trim()) {
+        return hashKey("tx", path.resolve(String(transcript).trim()));
+      }
+      const fingerprint = repoRoot || env.CLAUDE_PROJECT_DIR || process.cwd();
+      return hashKey("proj", path.resolve(fingerprint));
+    };
+    module.exports = { sanitizeSessionKey, hashKey, resolveSessionKey };
+  }
+});
+
+// src/core/throttle.js
+var require_throttle = __commonJS({
+  "src/core/throttle.js"(exports, module) {
+    "use strict";
+    var fs = __require("fs");
+    var path = __require("path");
+    var emptyThrottle = () => ({
+      batch: 0,
+      sent: 0,
+      lastRemindedBatch: null,
+      lastRemindedPathSet: [],
+      lastReminderAtMs: 0
+    });
+    var throttlePath = (stateDir, sessionKey) => path.join(stateDir, `throttle-${sessionKey}.json`);
+    var loadThrottle = (stateDir, sessionKey) => {
+      try {
+        const data = JSON.parse(fs.readFileSync(throttlePath(stateDir, sessionKey), "utf8"));
+        return {
+          batch: Number.isFinite(data.batch) ? data.batch : 0,
+          sent: Number.isFinite(data.sent) ? data.sent : 0,
+          lastRemindedBatch: Number.isFinite(data.lastRemindedBatch) ? data.lastRemindedBatch : null,
+          lastRemindedPathSet: Array.isArray(data.lastRemindedPathSet) ? data.lastRemindedPathSet.filter((s) => typeof s === "string") : [],
+          lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0
+        };
+      } catch {
+        return emptyThrottle();
+      }
+    };
+    var saveThrottle = (stateDir, sessionKey, state) => {
+      try {
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.writeFileSync(throttlePath(stateDir, sessionKey), JSON.stringify(state));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    var bumpBatch = (state) => ({ ...state, batch: (state.batch || 0) + 1 });
+    var decideReminder = (state, { hasNeeds, maxReminders, pathSet = [], nowMs = Date.now() }) => {
+      const cur = state || emptyThrottle();
+      const lastSet = new Set(cur.lastRemindedPathSet || []);
+      const grew = pathSet.some((p) => !lastSet.has(p));
+      const sameTurn = cur.lastRemindedBatch !== null && cur.lastRemindedBatch === cur.batch;
+      const suppressed = sameTurn && !grew;
+      const remind = !!hasNeeds && maxReminders > 0 && (cur.sent || 0) < maxReminders && !suppressed;
+      if (!remind) return { remind: false, state: cur };
+      return {
+        remind: true,
+        state: {
+          ...cur,
+          sent: (cur.sent || 0) + 1,
+          lastRemindedBatch: cur.batch,
+          lastRemindedPathSet: [...pathSet],
+          lastReminderAtMs: nowMs
+        }
+      };
+    };
+    module.exports = {
+      emptyThrottle,
+      throttlePath,
+      loadThrottle,
+      saveThrottle,
+      bumpBatch,
+      decideReminder
+    };
+  }
+});
+
 // src/core/paths.js
 var require_paths = __commonJS({
   "src/core/paths.js"(exports, module) {
@@ -191,6 +296,86 @@ var require_paths = __commonJS({
   }
 });
 
+// src/core/change-dirs.js
+var require_change_dirs = __commonJS({
+  "src/core/change-dirs.js"(exports, module) {
+    "use strict";
+    var fs = __require("fs");
+    var path = __require("path");
+    var { toPosix, rel } = require_paths();
+    var CHANGE_PARENTS = ["sdd/changes", ".sdd/changes"];
+    var DOC_NAMES = ["proposal.md", "design.md", "tasks.md"];
+    var firstNonEmptyLine = (absFile) => {
+      let text;
+      try {
+        text = fs.readFileSync(absFile, "utf8");
+      } catch {
+        return "";
+      }
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed) return trimmed;
+      }
+      return "";
+    };
+    var isArchived = (absDir) => {
+      const base = path.basename(absDir).toLowerCase();
+      if (base.startsWith("archived") || base.startsWith("_archived") || base.endsWith(".archived")) return true;
+      if (fs.existsSync(path.join(absDir, "ARCHIVED")) || fs.existsSync(path.join(absDir, ".archived"))) return true;
+      try {
+        const design = fs.readFileSync(path.join(absDir, "design.md"), "utf8").slice(0, 400);
+        if (/^\s*status:\s*archived\s*$/im.test(design)) return true;
+      } catch {
+      }
+      return false;
+    };
+    var listChangeDirs = (repoRoot) => {
+      const dirs = [];
+      for (const parentRel of CHANGE_PARENTS) {
+        const parentAbs = path.join(repoRoot, parentRel);
+        let entries;
+        try {
+          entries = fs.readdirSync(parentAbs, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (entry.isDirectory()) dirs.push(path.join(parentAbs, entry.name));
+        }
+      }
+      return dirs;
+    };
+    var discoverChangeDirs = (repoRoot) => {
+      const out = [];
+      for (const absDir of listChangeDirs(repoRoot)) {
+        if (isArchived(absDir)) continue;
+        const docs = DOC_NAMES.filter((name) => {
+          try {
+            return fs.statSync(path.join(absDir, name)).isFile();
+          } catch {
+            return false;
+          }
+        });
+        out.push({
+          relDir: toPosix(rel(repoRoot, absDir)),
+          absDir,
+          docs,
+          designFirstLine: firstNonEmptyLine(path.join(absDir, "design.md"))
+        });
+      }
+      out.sort((a, b) => a.relDir < b.relDir ? -1 : a.relDir > b.relDir ? 1 : 0);
+      return out;
+    };
+    module.exports = {
+      CHANGE_PARENTS,
+      DOC_NAMES,
+      discoverChangeDirs,
+      firstNonEmptyLine,
+      isArchived
+    };
+  }
+});
+
 // src/core/classify.js
 var require_classify = __commonJS({
   "src/core/classify.js"(exports, module) {
@@ -214,6 +399,100 @@ var require_classify = __commonJS({
       classifyPath,
       inSddChanges,
       inSddTree
+    };
+  }
+});
+
+// src/core/prompts.js
+var require_prompts = __commonJS({
+  "src/core/prompts.js"(exports, module) {
+    "use strict";
+    var { sanitizePath } = require_paths();
+    var HEADER = "[SDD-REVIEW: NEEDS-REVIEW]";
+    var REVIEW_BLOCK = [
+      "REVIEW\uFF08\u4F60\u662F\u552F\u4E00\u8BED\u4E49\u88C1\u5224\uFF1B\u4E0B\u7ED3\u8BBA\u524D\u5FC5\u987B\u5148\u53D6\u8BC1\uFF0C\u4E0D\u63A5\u53D7\u88F8\u5224\u65AD\uFF09:",
+      "  \u5BF9\u6BCF\u4E00\u9879\uFF0C\u5148\u8BFB\u5F53\u524D\u5185\u5BB9\uFF0C\u518D\u6309\u6B64\u7ED3\u6784\u7ED9\u51FA\u4E8B\u5B9E\uFF0C\u6700\u540E\u624D\u4E0B\u7ED3\u8BBA\uFF1A",
+      "    1. design/tasks \u6B64\u523B\u58F0\u79F0\u4EC0\u4E48\uFF08\u5F15\u7528\u5177\u4F53\u4E00\u53E5/\u4E00\u6BB5\uFF09",
+      "    2. code \u6B64\u523B\u5B9E\u73B0\u4EC0\u4E48\uFF08\u5F15\u7528\u5177\u4F53\u51FD\u6570/\u884C\u4E3A\uFF09",
+      '    3. \u4E8C\u8005\u662F\u5426\u4E00\u81F4\uFF08\u6307\u51FA\u51B2\u7A81\u70B9\uFF0C\u6216\u5199"\u7ECF\u5BF9\u7167\u65E0\u51B2\u7A81"\uFF09',
+      "    4. \u7ED3\u8BBA\uFF1A\u9700\u6539 \u2192 \u76F4\u63A5\u7F16\u8F91\u5BF9\u5E94 design/tasks\uFF08\u8FD9\u672C\u8EAB\u662F\u540C\u6B65\u52A8\u4F5C\uFF09\uFF1B",
+      "             \u65E0\u9700\u6539\uFF08\u7EAF\u91CD\u6784/\u683C\u5F0F\u5316/\u65E0\u5173\uFF09\u2192 \u5728 .sdd-review-todo.md \u7684\u300C\u5F85\u8BC4\u5BA1\u300D\u533A\u539F\u5730\u52FE\u6389\uFF0C\u7406\u7531\u987B\u542B\u7B2C 3 \u6B65\u7684\u4F9D\u636E",
+      '  \uFF08Layer A \u7EAF\u6587\u6863\u5BF9\u7EAF\u6587\u6863\uFF1A\u7B2C 2 \u6B65\u66FF\u6362\u4E3A"\u53E6\u4E00\u7BC7 doc \u6B64\u523B\u58F0\u79F0\u4EC0\u4E48"\uFF0C\u4E0D\u5F3A\u6C42 importer \u5F0F\u53D6\u8BC1\u3002\uFF09',
+      "  \u89C4\u5219\u89C1 sdd-review-rules.md\u3002"
+    ].join("\n");
+    var ACTION_LINE = "ACTION: \u5B8C\u6210\u4E0A\u8FF0\u540E\u56DE\u5230\u7528\u6237\u539F\u59CB\u4EFB\u52A1\u3002\u6E05\u9664\u5F85\u8BC4\u5BA1\u9879\u7684\u552F\u4E00\u65B9\u5F0F\u662F\u8BFB\u53D6\u6700\u65B0 .sdd-review-todo.md\uFF0C\u53EA\u5728\u300C## \u5F85\u8BC4\u5BA1\u300D\u533A\u628A\u4F60\u5DF2\u8BC4\u5BA1\u7684\u6BCF\u4E00\u884C\u539F\u5730\u4ECE [ ] \u6539\u4E3A [x]\uFF0C\u4FDD\u7559\u539F path@hash \u5E76\u8FFD\u52A0\u4E00\u53E5\u8BC1\u636E\u7406\u7531\uFF1B\u4E0D\u8981\u628A\u6761\u76EE\u79FB\u52A8\u5230\u300C\u5BA1\u8BA1\u5386\u53F2\u300D\u533A\uFF0C\u4E0D\u8981\u624B\u5199\u65B0\u589E\u5F85\u8BC4\u5BA1\u6761\u76EE\u3002\u82E5\u8BC4\u5BA1\u4E2D\u7F16\u8F91\u8FC7 code/design/tasks\uFF0C\u5148\u518D\u6B21\u8BFB\u53D6 .sdd-review-todo.md\uFF0C\u518D\u52FE\u9009\u6700\u65B0\u51FA\u73B0\u7684 path@hash\uFF08\u7F16\u8F91\u6587\u4EF6\u4E0D\u81EA\u52A8\u6E05\u9664\uFF09\u3002";
+    var changedLine = (item) => {
+      const p = sanitizePath(item.path);
+      if (item.kind === "code" && Array.isArray(item.candidates) && item.candidates.length) {
+        return `  - ${p}  (\u5019\u9009 change-dir: ${item.candidates.map(sanitizePath).join(", ")})`;
+      }
+      return `  - ${p}`;
+    };
+    var buildReminder = (needs, designFirstLineByDir = {}) => {
+      if (!needs || needs.length === 0) return "";
+      const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      const lines = ["<system-reminder>", HEADER, "", "CHANGED (\u672A\u8BC4\u5BA1\uFF0C\u672C\u6279):"];
+      for (const item of items) lines.push(changedLine(item));
+      const dirs = /* @__PURE__ */ new Set();
+      for (const item of items) {
+        for (const d of item.candidates || []) {
+          if (designFirstLineByDir[d]) dirs.add(d);
+        }
+      }
+      const sortedDirs = [...dirs].sort();
+      if (sortedDirs.length) {
+        lines.push("", "CONTEXT (change-dir design \u9996\u884C):");
+        for (const d of sortedDirs) {
+          lines.push(`  - ${sanitizePath(d)}: ${sanitizePath(designFirstLineByDir[d])}`);
+        }
+      }
+      lines.push("", REVIEW_BLOCK, "", ACTION_LINE, "</system-reminder>");
+      return lines.join("\n") + "\n";
+    };
+    var buildCarryOver = (needs) => {
+      if (!needs || needs.length === 0) return "";
+      return [
+        "<system-reminder>",
+        HEADER,
+        `\u6709 ${needs.length} \u9879\u53D8\u66F4\u5C1A\u672A\u8BC4\u5BA1\uFF08\u89C1 .sdd-review-todo.md\uFF09\u3002\u9010\u9879\u5148\u53D6\u8BC1\u540E\u4E0B\u7ED3\u8BBA\uFF1B\u8BC4\u5BA1\u8FC7\u7684\u5728\u8BE5\u6587\u4EF6\u52FE\u6389\u3002`,
+        "</system-reminder>"
+      ].join("\n") + "\n";
+    };
+    var buildCompactReminder = (needs) => {
+      if (!needs || needs.length === 0) return "";
+      const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      const lines = [
+        "<system-reminder>",
+        HEADER,
+        `\u672C\u56DE\u5408\u4ECD\u6709 ${items.length} \u9879\u5F85\u8BC4\u5BA1\uFF08\u5B8C\u6574\u8BC4\u5BA1\u7EAA\u5F8B\u89C1\u672C\u56DE\u5408\u9996\u6761\u63D0\u9192 / sdd-review-rules.md\uFF09:`
+      ];
+      for (const item of items) lines.push(`  - ${sanitizePath(item.path)}`);
+      lines.push(
+        "\u9010\u9879\u5148\u53D6\u8BC1\u540E\u4E0B\u7ED3\u8BBA\uFF1B\u8BC4\u5BA1\u8FC7\u7684\u5728 .sdd-review-todo.md\u300C\u5F85\u8BC4\u5BA1\u300D\u533A\u539F\u5730\u4ECE [ ] \u6539\u4E3A [x] \u5E76\u9644\u8BC1\u636E\u7406\u7531\u3002",
+        "</system-reminder>"
+      );
+      return lines.join("\n") + "\n";
+    };
+    var buildStopBlock = (needs) => {
+      if (!needs || needs.length === 0) return "";
+      const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      const lines = [
+        HEADER,
+        `\u6536\u5C3E\u524D\u68C0\u6D4B\u5230 ${items.length} \u9879 SDD \u53D8\u66F4\u5C1A\u672A\u8BC4\u5BA1\uFF0C\u8BF7\u5148\u5B8C\u6210\u8BC4\u5BA1\u518D\u7ED3\u675F\u672C\u56DE\u5408\uFF1A`
+      ];
+      for (const item of items) lines.push(`  - ${sanitizePath(item.path)}`);
+      lines.push("", REVIEW_BLOCK, "", ACTION_LINE);
+      return lines.join("\n") + "\n";
+    };
+    module.exports = {
+      HEADER,
+      REVIEW_BLOCK,
+      ACTION_LINE,
+      changedLine,
+      buildReminder,
+      buildCarryOver,
+      buildCompactReminder,
+      buildStopBlock
     };
   }
 });
@@ -406,86 +685,6 @@ var require_todo = __commonJS({
       parseTodo,
       renderTodo,
       isThinRationale
-    };
-  }
-});
-
-// src/core/change-dirs.js
-var require_change_dirs = __commonJS({
-  "src/core/change-dirs.js"(exports, module) {
-    "use strict";
-    var fs = __require("fs");
-    var path = __require("path");
-    var { toPosix, rel } = require_paths();
-    var CHANGE_PARENTS = ["sdd/changes", ".sdd/changes"];
-    var DOC_NAMES = ["proposal.md", "design.md", "tasks.md"];
-    var firstNonEmptyLine = (absFile) => {
-      let text;
-      try {
-        text = fs.readFileSync(absFile, "utf8");
-      } catch {
-        return "";
-      }
-      for (const line of text.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed) return trimmed;
-      }
-      return "";
-    };
-    var isArchived = (absDir) => {
-      const base = path.basename(absDir).toLowerCase();
-      if (base.startsWith("archived") || base.startsWith("_archived") || base.endsWith(".archived")) return true;
-      if (fs.existsSync(path.join(absDir, "ARCHIVED")) || fs.existsSync(path.join(absDir, ".archived"))) return true;
-      try {
-        const design = fs.readFileSync(path.join(absDir, "design.md"), "utf8").slice(0, 400);
-        if (/^\s*status:\s*archived\s*$/im.test(design)) return true;
-      } catch {
-      }
-      return false;
-    };
-    var listChangeDirs = (repoRoot) => {
-      const dirs = [];
-      for (const parentRel of CHANGE_PARENTS) {
-        const parentAbs = path.join(repoRoot, parentRel);
-        let entries;
-        try {
-          entries = fs.readdirSync(parentAbs, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const entry of entries) {
-          if (entry.isDirectory()) dirs.push(path.join(parentAbs, entry.name));
-        }
-      }
-      return dirs;
-    };
-    var discoverChangeDirs = (repoRoot) => {
-      const out = [];
-      for (const absDir of listChangeDirs(repoRoot)) {
-        if (isArchived(absDir)) continue;
-        const docs = DOC_NAMES.filter((name) => {
-          try {
-            return fs.statSync(path.join(absDir, name)).isFile();
-          } catch {
-            return false;
-          }
-        });
-        out.push({
-          relDir: toPosix(rel(repoRoot, absDir)),
-          absDir,
-          docs,
-          designFirstLine: firstNonEmptyLine(path.join(absDir, "design.md"))
-        });
-      }
-      out.sort((a, b) => a.relDir < b.relDir ? -1 : a.relDir > b.relDir ? 1 : 0);
-      return out;
-    };
-    module.exports = {
-      CHANGE_PARENTS,
-      DOC_NAMES,
-      discoverChangeDirs,
-      firstNonEmptyLine,
-      isArchived
     };
   }
 });
@@ -937,174 +1136,6 @@ var require_pipeline = __commonJS({
   }
 });
 
-// src/core/session-key.js
-var require_session_key = __commonJS({
-  "src/core/session-key.js"(exports, module) {
-    "use strict";
-    var crypto = __require("crypto");
-    var path = __require("path");
-    var hashKey = (prefix, value) => `${prefix}-${crypto.createHash("sha256").update(String(value)).digest("hex").slice(0, 24)}`;
-    var sanitizeSessionKey = (value) => {
-      const raw = String(value == null ? "" : value).trim();
-      if (!raw) return "";
-      const sanitized = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
-      if (sanitized && sanitized.length <= 64) return sanitized;
-      return hashKey("sid", raw);
-    };
-    var resolveSessionKey = (event = {}, env = {}, repoRoot) => {
-      const direct = [
-        event && event.session_id,
-        event && event.sessionId,
-        event && event.session && event.session.id,
-        env.CLAUDE_SESSION_ID,
-        env.SDD_REVIEW_SESSION_ID
-      ];
-      for (const candidate of direct) {
-        const s = sanitizeSessionKey(candidate);
-        if (s) return s;
-      }
-      const transcript = event && (event.transcript_path || event.transcriptPath) || env.CLAUDE_TRANSCRIPT_PATH;
-      if (transcript && String(transcript).trim()) {
-        return hashKey("tx", path.resolve(String(transcript).trim()));
-      }
-      const fingerprint = repoRoot || env.CLAUDE_PROJECT_DIR || process.cwd();
-      return hashKey("proj", path.resolve(fingerprint));
-    };
-    module.exports = { sanitizeSessionKey, hashKey, resolveSessionKey };
-  }
-});
-
-// src/core/throttle.js
-var require_throttle = __commonJS({
-  "src/core/throttle.js"(exports, module) {
-    "use strict";
-    var fs = __require("fs");
-    var path = __require("path");
-    var emptyThrottle = () => ({
-      batch: 0,
-      sent: 0,
-      lastRemindedBatch: null,
-      lastReminderSignature: "",
-      lastReminderAtMs: 0
-    });
-    var throttlePath = (stateDir, sessionKey) => path.join(stateDir, `throttle-${sessionKey}.json`);
-    var loadThrottle = (stateDir, sessionKey) => {
-      try {
-        const data = JSON.parse(fs.readFileSync(throttlePath(stateDir, sessionKey), "utf8"));
-        return {
-          batch: Number.isFinite(data.batch) ? data.batch : 0,
-          sent: Number.isFinite(data.sent) ? data.sent : 0,
-          lastRemindedBatch: Number.isFinite(data.lastRemindedBatch) ? data.lastRemindedBatch : null,
-          lastReminderSignature: typeof data.lastReminderSignature === "string" ? data.lastReminderSignature : "",
-          lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0
-        };
-      } catch {
-        return emptyThrottle();
-      }
-    };
-    var saveThrottle = (stateDir, sessionKey, state) => {
-      try {
-        fs.mkdirSync(stateDir, { recursive: true });
-        fs.writeFileSync(throttlePath(stateDir, sessionKey), JSON.stringify(state));
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    var bumpBatch = (state) => ({ ...state, batch: (state.batch || 0) + 1 });
-    var decideReminder = (state, { hasNeeds, maxReminders, signature = "", nowMs = Date.now(), dedupeMs = 0 }) => {
-      const cur = state || emptyThrottle();
-      const duplicate = signature && signature === cur.lastReminderSignature && dedupeMs > 0 && Number.isFinite(cur.lastReminderAtMs) && nowMs - cur.lastReminderAtMs >= 0 && nowMs - cur.lastReminderAtMs < dedupeMs;
-      const remind = !!hasNeeds && !duplicate && maxReminders > 0 && (cur.sent || 0) < maxReminders;
-      if (!remind) return { remind: false, state: cur };
-      return {
-        remind: true,
-        state: {
-          ...cur,
-          sent: (cur.sent || 0) + 1,
-          lastRemindedBatch: cur.batch,
-          lastReminderSignature: signature || cur.lastReminderSignature || "",
-          lastReminderAtMs: nowMs
-        }
-      };
-    };
-    module.exports = {
-      emptyThrottle,
-      throttlePath,
-      loadThrottle,
-      saveThrottle,
-      bumpBatch,
-      decideReminder
-    };
-  }
-});
-
-// src/core/prompts.js
-var require_prompts = __commonJS({
-  "src/core/prompts.js"(exports, module) {
-    "use strict";
-    var { sanitizePath } = require_paths();
-    var HEADER = "[SDD-REVIEW: NEEDS-REVIEW]";
-    var REVIEW_BLOCK = [
-      "REVIEW\uFF08\u4F60\u662F\u552F\u4E00\u8BED\u4E49\u88C1\u5224\uFF1B\u4E0B\u7ED3\u8BBA\u524D\u5FC5\u987B\u5148\u53D6\u8BC1\uFF0C\u4E0D\u63A5\u53D7\u88F8\u5224\u65AD\uFF09:",
-      "  \u5BF9\u6BCF\u4E00\u9879\uFF0C\u5148\u8BFB\u5F53\u524D\u5185\u5BB9\uFF0C\u518D\u6309\u6B64\u7ED3\u6784\u7ED9\u51FA\u4E8B\u5B9E\uFF0C\u6700\u540E\u624D\u4E0B\u7ED3\u8BBA\uFF1A",
-      "    1. design/tasks \u6B64\u523B\u58F0\u79F0\u4EC0\u4E48\uFF08\u5F15\u7528\u5177\u4F53\u4E00\u53E5/\u4E00\u6BB5\uFF09",
-      "    2. code \u6B64\u523B\u5B9E\u73B0\u4EC0\u4E48\uFF08\u5F15\u7528\u5177\u4F53\u51FD\u6570/\u884C\u4E3A\uFF09",
-      '    3. \u4E8C\u8005\u662F\u5426\u4E00\u81F4\uFF08\u6307\u51FA\u51B2\u7A81\u70B9\uFF0C\u6216\u5199"\u7ECF\u5BF9\u7167\u65E0\u51B2\u7A81"\uFF09',
-      "    4. \u7ED3\u8BBA\uFF1A\u9700\u6539 \u2192 \u76F4\u63A5\u7F16\u8F91\u5BF9\u5E94 design/tasks\uFF08\u8FD9\u672C\u8EAB\u662F\u540C\u6B65\u52A8\u4F5C\uFF09\uFF1B",
-      "             \u65E0\u9700\u6539\uFF08\u7EAF\u91CD\u6784/\u683C\u5F0F\u5316/\u65E0\u5173\uFF09\u2192 \u5728 .sdd-review-todo.md \u7684\u300C\u5F85\u8BC4\u5BA1\u300D\u533A\u539F\u5730\u52FE\u6389\uFF0C\u7406\u7531\u987B\u542B\u7B2C 3 \u6B65\u7684\u4F9D\u636E",
-      '  \uFF08Layer A \u7EAF\u6587\u6863\u5BF9\u7EAF\u6587\u6863\uFF1A\u7B2C 2 \u6B65\u66FF\u6362\u4E3A"\u53E6\u4E00\u7BC7 doc \u6B64\u523B\u58F0\u79F0\u4EC0\u4E48"\uFF0C\u4E0D\u5F3A\u6C42 importer \u5F0F\u53D6\u8BC1\u3002\uFF09',
-      "  \u89C4\u5219\u89C1 sdd-review-rules.md\u3002"
-    ].join("\n");
-    var ACTION_LINE = "ACTION: \u5B8C\u6210\u4E0A\u8FF0\u540E\u56DE\u5230\u7528\u6237\u539F\u59CB\u4EFB\u52A1\u3002\u6E05\u9664\u5F85\u8BC4\u5BA1\u9879\u7684\u552F\u4E00\u65B9\u5F0F\u662F\u8BFB\u53D6\u6700\u65B0 .sdd-review-todo.md\uFF0C\u53EA\u5728\u300C## \u5F85\u8BC4\u5BA1\u300D\u533A\u628A\u4F60\u5DF2\u8BC4\u5BA1\u7684\u6BCF\u4E00\u884C\u539F\u5730\u4ECE [ ] \u6539\u4E3A [x]\uFF0C\u4FDD\u7559\u539F path@hash \u5E76\u8FFD\u52A0\u4E00\u53E5\u8BC1\u636E\u7406\u7531\uFF1B\u4E0D\u8981\u628A\u6761\u76EE\u79FB\u52A8\u5230\u300C\u5BA1\u8BA1\u5386\u53F2\u300D\u533A\uFF0C\u4E0D\u8981\u624B\u5199\u65B0\u589E\u5F85\u8BC4\u5BA1\u6761\u76EE\u3002\u82E5\u8BC4\u5BA1\u4E2D\u7F16\u8F91\u8FC7 code/design/tasks\uFF0C\u5148\u518D\u6B21\u8BFB\u53D6 .sdd-review-todo.md\uFF0C\u518D\u52FE\u9009\u6700\u65B0\u51FA\u73B0\u7684 path@hash\uFF08\u7F16\u8F91\u6587\u4EF6\u4E0D\u81EA\u52A8\u6E05\u9664\uFF09\u3002";
-    var changedLine = (item) => {
-      const p = sanitizePath(item.path);
-      if (item.kind === "code" && Array.isArray(item.candidates) && item.candidates.length) {
-        return `  - ${p}  (\u5019\u9009 change-dir: ${item.candidates.map(sanitizePath).join(", ")})`;
-      }
-      return `  - ${p}`;
-    };
-    var buildReminder = (needs, designFirstLineByDir = {}) => {
-      if (!needs || needs.length === 0) return "";
-      const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
-      const lines = ["<system-reminder>", HEADER, "", "CHANGED (\u672A\u8BC4\u5BA1\uFF0C\u672C\u6279):"];
-      for (const item of items) lines.push(changedLine(item));
-      const dirs = /* @__PURE__ */ new Set();
-      for (const item of items) {
-        for (const d of item.candidates || []) {
-          if (designFirstLineByDir[d]) dirs.add(d);
-        }
-      }
-      const sortedDirs = [...dirs].sort();
-      if (sortedDirs.length) {
-        lines.push("", "CONTEXT (change-dir design \u9996\u884C):");
-        for (const d of sortedDirs) {
-          lines.push(`  - ${sanitizePath(d)}: ${sanitizePath(designFirstLineByDir[d])}`);
-        }
-      }
-      lines.push("", REVIEW_BLOCK, "", ACTION_LINE, "</system-reminder>");
-      return lines.join("\n") + "\n";
-    };
-    var buildCarryOver = (needs) => {
-      if (!needs || needs.length === 0) return "";
-      return [
-        "<system-reminder>",
-        HEADER,
-        `\u6709 ${needs.length} \u9879\u53D8\u66F4\u5C1A\u672A\u8BC4\u5BA1\uFF08\u89C1 .sdd-review-todo.md\uFF09\u3002\u9010\u9879\u5148\u53D6\u8BC1\u540E\u4E0B\u7ED3\u8BBA\uFF1B\u8BC4\u5BA1\u8FC7\u7684\u5728\u8BE5\u6587\u4EF6\u52FE\u6389\u3002`,
-        "</system-reminder>"
-      ].join("\n") + "\n";
-    };
-    module.exports = {
-      HEADER,
-      REVIEW_BLOCK,
-      ACTION_LINE,
-      changedLine,
-      buildReminder,
-      buildCarryOver
-    };
-  }
-});
-
 // src/handlers/on-edit.js
 var require_on_edit = __commonJS({
   "src/handlers/on-edit.js"(exports, module) {
@@ -1115,38 +1146,50 @@ var require_on_edit = __commonJS({
     var { loadThrottle, saveThrottle, decideReminder } = require_throttle();
     var { discoverChangeDirs } = require_change_dirs();
     var { classifyPath } = require_classify();
-    var { buildReminder } = require_prompts();
+    var { buildReminder, buildCompactReminder } = require_prompts();
     var { run } = require_pipeline();
-    var reminderSignature = (needs) => [...needs].map((item) => `${item.path}@${item.currentHash}`).sort().join("|");
+    var reminderPathSet = (needs) => [...new Set(needs.map((item) => item.path))].sort();
     var onEdit = (ctx) => {
       const result = run(ctx);
       if (result.action === "silent") return { deliver: false, text: "", result };
       const needs = result.needs || [];
       const env = ctx.env || process.env;
       const cfg = readConfig(env);
-      if (cfg.disabled || needs.length === 0) return { deliver: false, text: "", result };
+      if (cfg.disabled) return { deliver: false, text: "", result };
+      const stateDir = resolveStateDir(ctx.repoRoot);
+      const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot);
+      let throttle = loadThrottle(stateDir, sessionKey);
+      const pendingPaths = reminderPathSet(needs);
+      const pendingSet = new Set(pendingPaths);
+      const reminded = throttle.lastRemindedPathSet || [];
+      const prunedReminded = reminded.filter((p) => pendingSet.has(p));
+      if (prunedReminded.length !== reminded.length) {
+        throttle = { ...throttle, lastRemindedPathSet: prunedReminded };
+        saveThrottle(stateDir, sessionKey, throttle);
+      }
+      if (needs.length === 0) return { deliver: false, text: "", result };
       if (ctx.editedPath && classifyPath(ctx.editedPath) === "other") {
         return { deliver: false, text: "", result };
       }
-      const stateDir = resolveStateDir(ctx.repoRoot);
-      const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot);
-      const throttle = loadThrottle(stateDir, sessionKey);
+      const firstThisTurn = throttle.lastRemindedBatch !== throttle.batch;
       const decision = decideReminder(throttle, {
         hasNeeds: true,
         maxReminders: cfg.sessionMaxReminders,
-        signature: reminderSignature(needs),
-        nowMs: ctx.nowMs || Date.now(),
-        dedupeMs: cfg.reminderDedupeMs
+        pathSet: pendingPaths,
+        nowMs: ctx.nowMs || Date.now()
       });
       if (!decision.remind) return { deliver: false, text: "", result };
       saveThrottle(stateDir, sessionKey, decision.state);
+      if (!firstThisTurn) {
+        return { deliver: true, text: buildCompactReminder(needs), result };
+      }
       const designFirstLineByDir = {};
       for (const d of discoverChangeDirs(ctx.repoRoot)) {
         if (d.designFirstLine) designFirstLineByDir[d.relDir] = d.designFirstLine;
       }
       return { deliver: true, text: buildReminder(needs, designFirstLineByDir), result };
     };
-    module.exports = { onEdit, reminderSignature };
+    module.exports = { onEdit, reminderPathSet };
   }
 });
 
@@ -1177,15 +1220,37 @@ var require_on_prompt = __commonJS({
   }
 });
 
+// src/handlers/on-stop.js
+var require_on_stop = __commonJS({
+  "src/handlers/on-stop.js"(exports, module) {
+    "use strict";
+    var { readConfig } = require_config();
+    var { buildStopBlock } = require_prompts();
+    var { run } = require_pipeline();
+    var onStop = (ctx) => {
+      const env = ctx.env || process.env;
+      const cfg = readConfig(env);
+      if (cfg.disabled) return { block: false, text: "" };
+      const result = run(ctx);
+      if (result.action === "silent") return { block: false, text: "", result };
+      const needs = result.needs || [];
+      if (needs.length === 0) return { block: false, text: "", result };
+      if (ctx.stopHookActive) return { block: false, text: "", result };
+      return { block: true, text: buildStopBlock(needs), result };
+    };
+    module.exports = { onStop };
+  }
+});
+
 // src/adapters/opencode/native-plugin.js
 var require_native_plugin = __commonJS({
   "src/adapters/opencode/native-plugin.js"(exports, module) {
     "use strict";
     var path = __require("node:path");
     var { findRepoRoot } = require_state_dir();
-    var { run } = require_pipeline();
     var { onEdit } = require_on_edit();
     var { onPrompt } = require_on_prompt();
+    var { onStop } = require_on_stop();
     var PLUGIN_NAME = "sdd-review-ledger-opencode";
     var TOOL_INPUT_CACHE_TTL_MS = 5 * 60 * 1e3;
     var IDLE_DEDUP_WINDOW_MS = 500;
@@ -1405,9 +1470,16 @@ ${text}` : text;
           c.event.hook_event_name = "Stop";
           c.event.rawType = idle.rawType;
           try {
-            run(c);
+            const sres = onStop({ ...c, stopHookActive: false });
+            if (sres && sres.block) {
+              await logPluginIssue(ctx.client, "info", "SDD review pending at idle; will resurface on next message", {
+                sessionID: idle.sessionID,
+                rawType: idle.rawType,
+                pending: sres.result?.needs?.length || 0
+              });
+            }
           } catch (error) {
-            await logPluginIssue(ctx.client, "warn", "idle refresh did not complete", {
+            await logPluginIssue(ctx.client, "warn", "idle stop sweep did not complete", {
               sessionID: idle.sessionID,
               rawType: idle.rawType,
               error: compactText(error?.message || String(error))

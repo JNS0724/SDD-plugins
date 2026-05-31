@@ -20,20 +20,36 @@ test("decideReminder: reminds when needs present, under cap, new batch", () => {
   assert.equal(state.lastRemindedBatch, 0)
 })
 
-test("decideReminder: default policy allows repeated reminders for different pending sets", () => {
-  const s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, signature: "a@1", nowMs: 1000, dedupeMs: 2000 }).state
-  const again = decideReminder(s, { hasNeeds: true, maxReminders: 3, signature: "a@1|b@1", nowMs: 1001, dedupeMs: 2000 })
-  assert.equal(again.remind, true, "same-batch code edits should still remind")
-  assert.equal(again.state.sent, 2, "sent advances")
+// 改进一（按回合合并 + 按路径集去重）：去重键 = 当前回合内的 pending 路径集，
+// 不再绑 @hash。路径集增长 → 必报（新义务结构上不会被静音）；同回合无增长 → 抑制；
+// 跨回合（bumpBatch）→ 重新算。
+test("decideReminder: path-set grows in same turn → reminds (new obligation never silenced)", () => {
+  const s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, pathSet: ["a"] }).state
+  const grew = decideReminder(s, { hasNeeds: true, maxReminders: 3, pathSet: ["a", "b"] })
+  assert.equal(grew.remind, true, "a new path b in the same turn must remind")
+  assert.equal(grew.state.sent, 2, "sent advances")
+  assert.deepEqual(grew.state.lastRemindedPathSet, ["a", "b"])
 })
 
-test("decideReminder: suppresses identical pending-set reminders inside dedupe window", () => {
-  const s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, signature: "a@1|b@1", nowMs: 1000, dedupeMs: 2000 }).state
-  const duplicate = decideReminder(s, { hasNeeds: true, maxReminders: 3, signature: "a@1|b@1", nowMs: 1500, dedupeMs: 2000 })
-  assert.equal(duplicate.remind, false)
-  assert.equal(duplicate.state.sent, 1)
-  const later = decideReminder(s, { hasNeeds: true, maxReminders: 3, signature: "a@1|b@1", nowMs: 3001, dedupeMs: 2000 })
-  assert.equal(later.remind, true)
+test("decideReminder: same path re-hashed in same turn → suppressed (no growth)", () => {
+  const s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, pathSet: ["a"] }).state
+  const same = decideReminder(s, { hasNeeds: true, maxReminders: 3, pathSet: ["a"] })
+  assert.equal(same.remind, false, "re-editing an already-reminded file in the same turn stays quiet")
+  assert.equal(same.state.sent, 1, "sent does not advance")
+})
+
+test("decideReminder: pending set shrinks to a subset in same turn → suppressed", () => {
+  const s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, pathSet: ["a", "b"] }).state
+  const subset = decideReminder(s, { hasNeeds: true, maxReminders: 3, pathSet: ["b"] })
+  assert.equal(subset.remind, false, "{a,b} → {b} has no new path")
+})
+
+test("decideReminder: new turn re-arms even for the same path-set", () => {
+  let s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, pathSet: ["a"] }).state
+  s = bumpBatch(s) // user turn boundary
+  const next = decideReminder(s, { hasNeeds: true, maxReminders: 3, pathSet: ["a"] })
+  assert.equal(next.remind, true, "a new turn re-fires for the same file")
+  assert.equal(next.state.lastRemindedBatch, 1)
 })
 
 test("decideReminder: batch still records the latest reminded batch", () => {
@@ -71,7 +87,7 @@ test("load/save round-trip; missing/corrupt → empty", () => {
       batch: 2,
       sent: 1,
       lastRemindedBatch: 1,
-      lastReminderSignature: "",
+      lastRemindedPathSet: [],
       lastReminderAtMs: 0,
     })
     fs.writeFileSync(path.join(dir, "throttle-k.json"), "{ corrupt")
@@ -83,4 +99,28 @@ test("load/save round-trip; missing/corrupt → empty", () => {
 
 test("bumpBatch: pure, increments batch only", () => {
   assert.deepEqual(bumpBatch({ batch: 0, sent: 5, lastRemindedBatch: 0 }), { batch: 1, sent: 5, lastRemindedBatch: 0 })
+})
+
+// Migration: an OLD on-disk throttle (legacy lastReminderSignature, no lastRemindedPathSet)
+// must upgrade in the fail-safe direction — defaults filled, never silences an obligation.
+test("loadThrottle: OLD-schema file upgrades safely; subsequent decide re-fires (never silences)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sdd-thr-mig-"))
+  try {
+    fs.writeFileSync(
+      path.join(dir, "throttle-k.json"),
+      JSON.stringify({ batch: 2, sent: 1, lastRemindedBatch: 2, lastReminderSignature: "src/a.ts@abcd" })
+    )
+    const loaded = loadThrottle(dir, "k")
+    assert.deepEqual(loaded, {
+      batch: 2,
+      sent: 1,
+      lastRemindedBatch: 2,
+      lastRemindedPathSet: [],
+      lastReminderAtMs: 0,
+    })
+    // legacy key ignored; empty reminded set → a pending path counts as growth → re-fires
+    assert.equal(decideReminder(loaded, { hasNeeds: true, maxReminders: 3, pathSet: ["src/a.ts"] }).remind, true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })

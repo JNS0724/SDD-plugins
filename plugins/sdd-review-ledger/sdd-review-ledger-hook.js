@@ -209,7 +209,7 @@ var require_throttle = __commonJS({
       batch: 0,
       sent: 0,
       lastRemindedBatch: null,
-      lastReminderSignature: "",
+      lastRemindedPathSet: [],
       lastReminderAtMs: 0
     });
     var throttlePath = (stateDir, sessionKey) => path.join(stateDir, `throttle-${sessionKey}.json`);
@@ -220,7 +220,7 @@ var require_throttle = __commonJS({
           batch: Number.isFinite(data.batch) ? data.batch : 0,
           sent: Number.isFinite(data.sent) ? data.sent : 0,
           lastRemindedBatch: Number.isFinite(data.lastRemindedBatch) ? data.lastRemindedBatch : null,
-          lastReminderSignature: typeof data.lastReminderSignature === "string" ? data.lastReminderSignature : "",
+          lastRemindedPathSet: Array.isArray(data.lastRemindedPathSet) ? data.lastRemindedPathSet.filter((s) => typeof s === "string") : [],
           lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0
         };
       } catch {
@@ -237,10 +237,13 @@ var require_throttle = __commonJS({
       }
     };
     var bumpBatch = (state) => ({ ...state, batch: (state.batch || 0) + 1 });
-    var decideReminder = (state, { hasNeeds, maxReminders, signature = "", nowMs = Date.now(), dedupeMs = 0 }) => {
+    var decideReminder = (state, { hasNeeds, maxReminders, pathSet = [], nowMs = Date.now() }) => {
       const cur = state || emptyThrottle();
-      const duplicate = signature && signature === cur.lastReminderSignature && dedupeMs > 0 && Number.isFinite(cur.lastReminderAtMs) && nowMs - cur.lastReminderAtMs >= 0 && nowMs - cur.lastReminderAtMs < dedupeMs;
-      const remind = !!hasNeeds && !duplicate && maxReminders > 0 && (cur.sent || 0) < maxReminders;
+      const lastSet = new Set(cur.lastRemindedPathSet || []);
+      const grew = pathSet.some((p) => !lastSet.has(p));
+      const sameTurn = cur.lastRemindedBatch !== null && cur.lastRemindedBatch === cur.batch;
+      const suppressed = sameTurn && !grew;
+      const remind = !!hasNeeds && maxReminders > 0 && (cur.sent || 0) < maxReminders && !suppressed;
       if (!remind) return { remind: false, state: cur };
       return {
         remind: true,
@@ -248,7 +251,7 @@ var require_throttle = __commonJS({
           ...cur,
           sent: (cur.sent || 0) + 1,
           lastRemindedBatch: cur.batch,
-          lastReminderSignature: signature || cur.lastReminderSignature || "",
+          lastRemindedPathSet: [...pathSet],
           lastReminderAtMs: nowMs
         }
       };
@@ -465,13 +468,41 @@ var require_prompts = __commonJS({
         "</system-reminder>"
       ].join("\n") + "\n";
     };
+    var buildCompactReminder = (needs) => {
+      if (!needs || needs.length === 0) return "";
+      const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      const lines = [
+        "<system-reminder>",
+        HEADER,
+        `\u672C\u56DE\u5408\u4ECD\u6709 ${items.length} \u9879\u5F85\u8BC4\u5BA1\uFF08\u5B8C\u6574\u8BC4\u5BA1\u7EAA\u5F8B\u89C1\u672C\u56DE\u5408\u9996\u6761\u63D0\u9192 / sdd-review-rules.md\uFF09:`
+      ];
+      for (const item of items) lines.push(`  - ${sanitizePath(item.path)}`);
+      lines.push(
+        "\u9010\u9879\u5148\u53D6\u8BC1\u540E\u4E0B\u7ED3\u8BBA\uFF1B\u8BC4\u5BA1\u8FC7\u7684\u5728 .sdd-review-todo.md\u300C\u5F85\u8BC4\u5BA1\u300D\u533A\u539F\u5730\u4ECE [ ] \u6539\u4E3A [x] \u5E76\u9644\u8BC1\u636E\u7406\u7531\u3002",
+        "</system-reminder>"
+      );
+      return lines.join("\n") + "\n";
+    };
+    var buildStopBlock = (needs) => {
+      if (!needs || needs.length === 0) return "";
+      const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+      const lines = [
+        HEADER,
+        `\u6536\u5C3E\u524D\u68C0\u6D4B\u5230 ${items.length} \u9879 SDD \u53D8\u66F4\u5C1A\u672A\u8BC4\u5BA1\uFF0C\u8BF7\u5148\u5B8C\u6210\u8BC4\u5BA1\u518D\u7ED3\u675F\u672C\u56DE\u5408\uFF1A`
+      ];
+      for (const item of items) lines.push(`  - ${sanitizePath(item.path)}`);
+      lines.push("", REVIEW_BLOCK, "", ACTION_LINE);
+      return lines.join("\n") + "\n";
+    };
     module2.exports = {
       HEADER,
       REVIEW_BLOCK,
       ACTION_LINE,
       changedLine,
       buildReminder,
-      buildCarryOver
+      buildCarryOver,
+      buildCompactReminder,
+      buildStopBlock
     };
   }
 });
@@ -1125,38 +1156,50 @@ var require_on_edit = __commonJS({
     var { loadThrottle, saveThrottle, decideReminder } = require_throttle();
     var { discoverChangeDirs } = require_change_dirs();
     var { classifyPath } = require_classify();
-    var { buildReminder } = require_prompts();
+    var { buildReminder, buildCompactReminder } = require_prompts();
     var { run } = require_pipeline();
-    var reminderSignature = (needs) => [...needs].map((item) => `${item.path}@${item.currentHash}`).sort().join("|");
+    var reminderPathSet = (needs) => [...new Set(needs.map((item) => item.path))].sort();
     var onEdit = (ctx) => {
       const result = run(ctx);
       if (result.action === "silent") return { deliver: false, text: "", result };
       const needs = result.needs || [];
       const env = ctx.env || process.env;
       const cfg = readConfig(env);
-      if (cfg.disabled || needs.length === 0) return { deliver: false, text: "", result };
+      if (cfg.disabled) return { deliver: false, text: "", result };
+      const stateDir = resolveStateDir(ctx.repoRoot);
+      const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot);
+      let throttle = loadThrottle(stateDir, sessionKey);
+      const pendingPaths = reminderPathSet(needs);
+      const pendingSet = new Set(pendingPaths);
+      const reminded = throttle.lastRemindedPathSet || [];
+      const prunedReminded = reminded.filter((p) => pendingSet.has(p));
+      if (prunedReminded.length !== reminded.length) {
+        throttle = { ...throttle, lastRemindedPathSet: prunedReminded };
+        saveThrottle(stateDir, sessionKey, throttle);
+      }
+      if (needs.length === 0) return { deliver: false, text: "", result };
       if (ctx.editedPath && classifyPath(ctx.editedPath) === "other") {
         return { deliver: false, text: "", result };
       }
-      const stateDir = resolveStateDir(ctx.repoRoot);
-      const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot);
-      const throttle = loadThrottle(stateDir, sessionKey);
+      const firstThisTurn = throttle.lastRemindedBatch !== throttle.batch;
       const decision = decideReminder(throttle, {
         hasNeeds: true,
         maxReminders: cfg.sessionMaxReminders,
-        signature: reminderSignature(needs),
-        nowMs: ctx.nowMs || Date.now(),
-        dedupeMs: cfg.reminderDedupeMs
+        pathSet: pendingPaths,
+        nowMs: ctx.nowMs || Date.now()
       });
       if (!decision.remind) return { deliver: false, text: "", result };
       saveThrottle(stateDir, sessionKey, decision.state);
+      if (!firstThisTurn) {
+        return { deliver: true, text: buildCompactReminder(needs), result };
+      }
       const designFirstLineByDir = {};
       for (const d of discoverChangeDirs(ctx.repoRoot)) {
         if (d.designFirstLine) designFirstLineByDir[d.relDir] = d.designFirstLine;
       }
       return { deliver: true, text: buildReminder(needs, designFirstLineByDir), result };
     };
-    module2.exports = { onEdit, reminderSignature };
+    module2.exports = { onEdit, reminderPathSet };
   }
 });
 
@@ -1187,6 +1230,28 @@ var require_on_prompt = __commonJS({
   }
 });
 
+// src/handlers/on-stop.js
+var require_on_stop = __commonJS({
+  "src/handlers/on-stop.js"(exports2, module2) {
+    "use strict";
+    var { readConfig } = require_config();
+    var { buildStopBlock } = require_prompts();
+    var { run } = require_pipeline();
+    var onStop = (ctx) => {
+      const env = ctx.env || process.env;
+      const cfg = readConfig(env);
+      if (cfg.disabled) return { block: false, text: "" };
+      const result = run(ctx);
+      if (result.action === "silent") return { block: false, text: "", result };
+      const needs = result.needs || [];
+      if (needs.length === 0) return { block: false, text: "", result };
+      if (ctx.stopHookActive) return { block: false, text: "", result };
+      return { block: true, text: buildStopBlock(needs), result };
+    };
+    module2.exports = { onStop };
+  }
+});
+
 // src/core/output.js
 var require_output = __commonJS({
   "src/core/output.js"(exports2, module2) {
@@ -1211,6 +1276,7 @@ var require_dispatch = __commonJS({
     var { findRepoRoot } = require_state_dir();
     var { onEdit } = require_on_edit();
     var { onPrompt } = require_on_prompt();
+    var { onStop } = require_on_stop();
     var { buildHookOutput } = require_output();
     var WRITE_TOOLS = /* @__PURE__ */ new Set(["Edit", "Write", "MultiEdit"]);
     var editedPathFromEvent = (event) => {
@@ -1232,6 +1298,13 @@ var require_dispatch = __commonJS({
           res = onEdit({ ...baseCtx, editedPath: editedPathFromEvent(event) });
         } else if (hookName === "UserPromptSubmit") {
           res = onPrompt(baseCtx);
+        } else if (hookName === "Stop") {
+          const stopHookActive = !!(event && (event.stop_hook_active || event.stopHookActive));
+          const sres = onStop({ ...baseCtx, stopHookActive });
+          if (sres && sres.block && sres.text) {
+            return { stdout: JSON.stringify({ decision: "block", reason: sres.text }) };
+          }
+          return { stdout: "" };
         } else {
           return { stdout: "" };
         }

@@ -2,9 +2,9 @@
 
 const path = require("node:path")
 const { findRepoRoot } = require("../../core/state-dir")
-const { run } = require("../../pipeline")
 const { onEdit } = require("../../handlers/on-edit")
 const { onPrompt } = require("../../handlers/on-prompt")
+const { onStop } = require("../../handlers/on-stop")
 
 const PLUGIN_NAME = "sdd-review-ledger-opencode"
 const TOOL_INPUT_CACHE_TTL_MS = 5 * 60 * 1000
@@ -256,10 +256,21 @@ const SddReviewLedgerOpenCode = async (ctx) => {
       const c = baseCtx(ctx, { sessionID: idle.sessionID })
       c.event.hook_event_name = "Stop"
       c.event.rawType = idle.rawType
+      // 改进三（P0）: run the shared end-of-turn Stop sweep at idle. OpenCode cannot
+      // reliably force-continue at idle (gateguard-lessons §7.1), so onStop is used
+      // here to refresh ledger+todo and log unreviewed work; enforcement degrades to
+      // the next chat.message carry-over. stopHookActive:false → onStop never wedges.
       try {
-        run(c)
+        const sres = onStop({ ...c, stopHookActive: false })
+        if (sres && sres.block) {
+          await logPluginIssue(ctx.client, "info", "SDD review pending at idle; will resurface on next message", {
+            sessionID: idle.sessionID,
+            rawType: idle.rawType,
+            pending: sres.result?.needs?.length || 0,
+          })
+        }
       } catch (error) {
-        await logPluginIssue(ctx.client, "warn", "idle refresh did not complete", {
+        await logPluginIssue(ctx.client, "warn", "idle stop sweep did not complete", {
           sessionID: idle.sessionID,
           rawType: idle.rawType,
           error: compactText(error?.message || String(error)),

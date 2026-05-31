@@ -3,6 +3,7 @@
 const { findRepoRoot } = require("./core/state-dir")
 const { onEdit } = require("./handlers/on-edit")
 const { onPrompt } = require("./handlers/on-prompt")
+const { onStop } = require("./handlers/on-stop")
 const { buildHookOutput } = require("./core/output")
 
 // Map a Claude Code hook event → handler → stdout string. Given the event + env,
@@ -31,6 +32,15 @@ const dispatch = (event, env = process.env) => {
       res = onEdit({ ...baseCtx, editedPath: editedPathFromEvent(event) })
     } else if (hookName === "UserPromptSubmit") {
       res = onPrompt(baseCtx)
+    } else if (hookName === "Stop") {
+      // 改进三（P0）: end-of-turn SDD-sync sweep. Block once (decision:"block") so the
+      // model reviews before finishing; stop_hook_active guarantees at-most-one block.
+      const stopHookActive = !!(event && (event.stop_hook_active || event.stopHookActive))
+      const sres = onStop({ ...baseCtx, stopHookActive })
+      if (sres && sres.block && sres.text) {
+        return { stdout: JSON.stringify({ decision: "block", reason: sres.text }) }
+      }
+      return { stdout: "" }
     } else {
       return { stdout: "" }
     }

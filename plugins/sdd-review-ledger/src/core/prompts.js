@@ -77,6 +77,41 @@ const buildCarryOver = (needs) => {
   )
 }
 
+// Compact in-session repeat (改进二 P1): when the full protocol was already shown
+// earlier THIS turn, a later path-set growth re-fires only this lean body — paths +
+// count + pointer, no REVIEW_BLOCK/ACTION_LINE re-paste. Byte-stable; sanitized.
+const buildCompactReminder = (needs) => {
+  if (!needs || needs.length === 0) return ""
+  const items = [...needs].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  const lines = [
+    "<system-reminder>",
+    HEADER,
+    `本回合仍有 ${items.length} 项待评审（完整评审纪律见本回合首条提醒 / sdd-review-rules.md）:`,
+  ]
+  for (const item of items) lines.push(`  - ${sanitizePath(item.path)}`)
+  lines.push(
+    "逐项先取证后下结论；评审过的在 .sdd-review-todo.md「待评审」区原地从 [ ] 改为 [x] 并附证据理由。",
+    "</system-reminder>",
+  )
+  return lines.join("\n") + "\n"
+}
+
+// Stop end-of-turn safety net (改进三 P0): the `reason` text for a Claude Code Stop
+// `decision:"block"` (and OpenCode idle surfacing). It is the last line of defense
+// before the turn ends, so it carries the FULL fact-forcing protocol. Not wrapped in
+// <system-reminder> — it is delivered as the block reason, not injected context.
+const buildStopBlock = (needs) => {
+  if (!needs || needs.length === 0) return ""
+  const items = [...needs].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  const lines = [
+    HEADER,
+    `收尾前检测到 ${items.length} 项 SDD 变更尚未评审，请先完成评审再结束本回合：`,
+  ]
+  for (const item of items) lines.push(`  - ${sanitizePath(item.path)}`)
+  lines.push("", REVIEW_BLOCK, "", ACTION_LINE)
+  return lines.join("\n") + "\n"
+}
+
 module.exports = {
   HEADER,
   REVIEW_BLOCK,
@@ -84,4 +119,6 @@ module.exports = {
   changedLine,
   buildReminder,
   buildCarryOver,
+  buildCompactReminder,
+  buildStopBlock,
 }
