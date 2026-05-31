@@ -84,3 +84,13 @@ test("renderTodo: thin mark is display-only, does not change checkbox state", ()
   const line = out.split("\n").find((l) => l.includes("src/x.ts"))
   assert.ok(line.startsWith("- [x] "), "still checked/cleared despite thin mark")
 })
+
+test("renderTodo: scan-budget truncation surfaces a non-silent header warning (R1 §4.4)", () => {
+  const needs = [{ path: "src/a.ts", currentHash: "aaaa", candidates: ["greeting"] }]
+  const led = emptyLedger()
+  const out = renderTodo(needs, led, { meta: { scanTruncated: true, skipped: 7 } })
+  assert.ok(out.includes("超预算"), "todo header carries the truncation warning, not just the log")
+  assert.ok(out.includes("7"), "reports the skipped count")
+  // without meta, no warning (default path unchanged)
+  assert.ok(!renderTodo(needs, led).includes("超预算"), "no warning when not truncated")
+})

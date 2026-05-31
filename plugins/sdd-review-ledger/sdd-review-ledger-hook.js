@@ -575,6 +575,7 @@ var require_todo = __commonJS({
     "use strict";
     var { sanitizePath } = require_paths();
     var TODO_HEADER = "\u52FE\u9009 [x] \u8868\u793A\u5DF2\u8BC4\u5BA1\uFF08\u7F16\u8F91\u6587\u6863/\u4EE3\u7801\u540E\u4ECD\u9700\u52FE\uFF09\uFF1B\u52FE\u9009\u4E0B\u6B21\u8FD0\u884C\u751F\u6548\u3002";
+    var truncationWarning = (skipped) => `> \u26A0 \u672C\u8F6E\u626B\u63CF\u8D85\u9884\u7B97\uFF0C\u7EA6 ${skipped} \u4E2A\u6587\u4EF6\u672A\u68C0\u67E5\u3001\u5176\u53D8\u66F4\u53EF\u80FD\u5C1A\u672A\u5217\u51FA\uFF1B\u4E0B\u8F6E\u7EE7\u7EED\uFF08\u53EF\u8C03 SDD_REVIEW_SCAN_BUDGET_MS / SCAN_ROOTS / IGNORE\uFF09\u3002`;
     var PENDING_HEADING = "## \u5F85\u8BC4\u5BA1";
     var REVIEWED_HEADING = "## \u5DF2\u8BC4\u5BA1\uFF08\u8FD1 N\uFF0C\u5BA1\u8BA1\u7528\uFF09";
     var DEFAULT_REVIEWED_LIMIT = 50;
@@ -605,7 +606,10 @@ var require_todo = __commonJS({
     var THIN_MARK = "\uFF08\u7406\u7531\u8FC7\u7B80\uFF0C\u5EFA\u8BAE\u8865\u5145\uFF09";
     var renderTodo = (needs, ledger, opts = {}) => {
       const reviewedLimit = opts.reviewedLimit || DEFAULT_REVIEWED_LIMIT;
-      const lines = [TODO_HEADER, ""];
+      const meta = opts.meta || {};
+      const lines = [TODO_HEADER];
+      if (meta.scanTruncated) lines.push(truncationWarning(meta.skipped || 0));
+      lines.push("");
       lines.push(PENDING_HEADING);
       const pending = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
       for (const item of pending) {
@@ -630,6 +634,7 @@ var require_todo = __commonJS({
     };
     module2.exports = {
       TODO_HEADER,
+      truncationWarning,
       PENDING_HEADING,
       REVIEWED_HEADING,
       DEFAULT_REVIEWED_LIMIT,

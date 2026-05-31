@@ -7,6 +7,10 @@ const { sanitizePath } = require("./paths")
 // is free text, stored verbatim, never semantically parsed.
 
 const TODO_HEADER = "勾选 [x] 表示已评审（编辑文档/代码后仍需勾）；勾选下次运行生效。"
+// R1 §4.4: scan-budget truncation must be visible HERE (human-visible todo), not
+// only in the diagnostics log. This is the "非静默" promise — never silently drop.
+const truncationWarning = (skipped) =>
+  `> ⚠ 本轮扫描超预算，约 ${skipped} 个文件未检查、其变更可能尚未列出；下轮继续（可调 SDD_REVIEW_SCAN_BUDGET_MS / SCAN_ROOTS / IGNORE）。`
 const PENDING_HEADING = "## 待评审"
 const REVIEWED_HEADING = "## 已评审（近 N，审计用）"
 const DEFAULT_REVIEWED_LIMIT = 50
@@ -52,9 +56,13 @@ const THIN_MARK = "（理由过简，建议补充）"
 
 // renderTodo(needs, ledger, opts) -> text. Idempotent: same inputs → same bytes.
 // needs: NeedsReviewItem[] (sorted by path). ledger: for the reviewed section.
+// opts.meta: compute meta; if { scanTruncated, skipped } we surface a header warning.
 const renderTodo = (needs, ledger, opts = {}) => {
   const reviewedLimit = opts.reviewedLimit || DEFAULT_REVIEWED_LIMIT
-  const lines = [TODO_HEADER, ""]
+  const meta = opts.meta || {}
+  const lines = [TODO_HEADER]
+  if (meta.scanTruncated) lines.push(truncationWarning(meta.skipped || 0))
+  lines.push("")
 
   // —— 待评审 ——
   lines.push(PENDING_HEADING)
@@ -88,6 +96,7 @@ const renderTodo = (needs, ledger, opts = {}) => {
 
 module.exports = {
   TODO_HEADER,
+  truncationWarning,
   PENDING_HEADING,
   REVIEWED_HEADING,
   DEFAULT_REVIEWED_LIMIT,
