@@ -12,6 +12,9 @@ const { classifyPath } = require("./classify")
 
 const DEFAULT_IGNORE_DIRS = new Set([
   ".git",
+  ".claude",
+  ".home",
+  ".opencode",
   "node_modules",
   "dist",
   "build",

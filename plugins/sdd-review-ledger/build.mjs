@@ -3,7 +3,6 @@ import { basename, dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 // Bundle local source into single-file distributables + byte-check (build:check).
-// MVP ships ONE artifact (Claude Code hook); the OpenCode entry is added in M4.
 // Mirrors sibling sdd-drift-check/build.mjs.
 
 const root = dirname(fileURLToPath(import.meta.url))
@@ -14,6 +13,13 @@ const artifacts = [
     name: "Claude Code command hook",
     entry: resolve(root, "src/adapters/claude-code/command-hook.js"),
     outfile: resolve(root, "sdd-review-ledger-hook.js"),
+    format: "cjs",
+  },
+  {
+    name: "OpenCode native plugin adapter",
+    entry: resolve(root, "src/adapters/opencode/native-plugin-entry.js"),
+    outfile: resolve(root, "sdd-review-ledger-opencode.js"),
+    format: "esm",
   },
 ]
 
@@ -30,7 +36,7 @@ const loadEsbuild = async () => {
   return esbuildPromise
 }
 
-const buildArtifact = async ({ name, entry, outfile }) => {
+const buildArtifact = async ({ name, entry, outfile, format }) => {
   const buildTarget = checkOnly ? resolve(root, `.${basename(outfile)}.${process.pid}.check.js`) : outfile
 
   const esbuild = await loadEsbuild()
@@ -39,8 +45,12 @@ const buildArtifact = async ({ name, entry, outfile }) => {
     outfile: buildTarget,
     platform: "node",
     target: "node18",
-    format: "cjs",
+    format,
     bundle: true,
+    banner:
+      format === "esm"
+        ? { js: 'import { createRequire as __sddCreateRequire } from "node:module";\nconst require = __sddCreateRequire(import.meta.url);' }
+        : undefined,
     minify: false,
     sourcemap: false,
     legalComments: "none",

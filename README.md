@@ -12,6 +12,7 @@ test harnesses under `test/`.
 | Plugin | Status | Purpose |
 | --- | --- | --- |
 | `plugins/sdd-drift-check` | Active | OpenCode native plugin and Claude Code compatible hook that detects SDD drift and asks the model to reconcile related `proposal.md`, `design.md`, and `tasks.md` files. |
+| `plugins/sdd-review-ledger` | Active | Claude Code and OpenCode plugin that tracks changed SDD/code files by content hash and asks the model to review them through a local ledger/todo workflow. |
 | `plugins/opencode-turn-checkpoint` | Active | OpenCode native plugin that observes stable session idle checkpoints and calls external CLI callbacks with a JSON payload. |
 
 ## Repository Layout
@@ -40,6 +41,18 @@ plugins/
     sdd-drift-check-hook.js
     sdd-drift-check-opencode.js
     sdd-drift-check-rules.md
+  sdd-review-ledger/
+    src/
+      adapters/
+        claude-code/
+          command-hook.js
+        opencode/
+          native-plugin.js
+    docs/
+    package.json
+    sdd-review-ledger-hook.js
+    sdd-review-ledger-opencode.js
+    sdd-review-rules.md
 docs/
   sdd-drift-check/
     sdd-drift-check.md
@@ -74,6 +87,16 @@ notifications and integrations. It is independent from `sdd-drift-check`.
 
 ```text
 plugins/opencode-turn-checkpoint/README.md
+```
+
+## SDD Review Ledger
+
+`sdd-review-ledger` is the newer ledger-based review orchestrator. It supports
+Claude Code and OpenCode through separate adapters over the same core logic.
+
+```text
+plugins/sdd-review-ledger/README.md
+plugins/sdd-review-ledger/docs/getting-started.md
 ```
 
 ## Build And Package
@@ -111,6 +134,20 @@ the committed JS files; a non-zero exit means a package artifact is stale.
 Prompt-code changes still need this check because the generated hook artifact
 embeds `src/core/prompts.js`. Runtime edits to `sdd-drift-check-rules.md` do not
 require rebuilding.
+
+`plugins/sdd-review-ledger` follows the same two-artifact pattern:
+
+```powershell
+cd plugins\sdd-review-ledger
+npm install
+npm run build
+npm run build:check
+```
+
+Generated files:
+
+- `sdd-review-ledger-hook.js`
+- `sdd-review-ledger-opencode.js`
 
 ## Testing
 

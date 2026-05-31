@@ -10,6 +10,7 @@ const {
   readConfig,
   DEFAULT_HASH_LEN,
   DEFAULT_SCAN_BUDGET_MS,
+  DEFAULT_REMINDER_DEDUPE_MS,
 } = require("../../src/core/config")
 
 test("isDisabled: SDD_REVIEW off-family values disable (R2 #1)", () => {
@@ -55,6 +56,7 @@ test("readConfig: defaults when env empty", () => {
   assert.equal(c.disabled, false)
   assert.equal(c.hashLen, DEFAULT_HASH_LEN)
   assert.equal(c.scanBudgetMs, DEFAULT_SCAN_BUDGET_MS)
+  assert.equal(c.reminderDedupeMs, DEFAULT_REMINDER_DEDUPE_MS)
   assert.equal(c.bootstrapThreshold, 1)
   assert.equal(c.scanAlwaysHash, false)
   assert.deepEqual(c.ignoreGlobs, [])
@@ -65,12 +67,14 @@ test("readConfig: overrides parsed from env", () => {
   const c = readConfig({
     SDD_REVIEW_HASH_LEN: "8",
     SDD_REVIEW_SCAN_BUDGET_MS: "500",
+    SDD_REVIEW_REMINDER_DEDUPE_MS: "100",
     SDD_REVIEW_SCAN_ALWAYS_HASH: "1",
     SDD_REVIEW_IGNORE: "vendor/, tmp/",
     SDD_REVIEW_BOOTSTRAP_THRESHOLD: "0",
   })
   assert.equal(c.hashLen, 8)
   assert.equal(c.scanBudgetMs, 500)
+  assert.equal(c.reminderDedupeMs, 100)
   assert.equal(c.scanAlwaysHash, true)
   assert.deepEqual(c.ignoreGlobs, ["vendor/", "tmp/"])
   assert.equal(c.bootstrapThreshold, 0, "explicit 0 honored")

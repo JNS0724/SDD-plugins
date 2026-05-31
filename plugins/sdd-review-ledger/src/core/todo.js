@@ -6,13 +6,13 @@ const { sanitizePath } = require("./paths")
 // The tool reads ONLY the structured checkbox + path + inline @hash. The rationale
 // is free text, stored verbatim, never semantically parsed.
 
-const TODO_HEADER = "勾选 [x] 表示已评审（编辑文档/代码后仍需勾）；勾选下次运行生效。"
+const TODO_HEADER = "只在「待评审」区把已完成评审的行原地从 [ ] 改为 [x]；不要移动、复制或改写 path@hash。"
 // R1 §4.4: scan-budget truncation must be visible HERE (human-visible todo), not
 // only in the diagnostics log. This is the "非静默" promise — never silently drop.
 const truncationWarning = (skipped) =>
   `> ⚠ 本轮扫描超预算，约 ${skipped} 个文件未检查、其变更可能尚未列出；下轮继续（可调 SDD_REVIEW_SCAN_BUDGET_MS / SCAN_ROOTS / IGNORE）。`
 const PENDING_HEADING = "## 待评审"
-const REVIEWED_HEADING = "## 已评审（近 N，审计用）"
+const REVIEWED_HEADING = "## 审计历史（只读，勿编辑）"
 const DEFAULT_REVIEWED_LIMIT = 50
 
 // Line contract: - [ ] <path>@<hash>  (候选: ...)   |   - [x] <path>@<hash> — <rationale>
@@ -20,11 +20,11 @@ const DEFAULT_REVIEWED_LIMIT = 50
 // " — rationale" tail on any line. Only checkbox + path + inline hash are structural.
 const TODO_LINE = /^- \[( |x)\] (\S+)@([0-9a-f]+)(?:\s+\(候选:[^)]*\))?(?: — (.*))?$/
 
-// Section-aware: ONLY pending-section lines are ingestable checkoffs. The "已评审"
-// audit section is display-only (§8.2: the sole ack is ticking a box in the pending
+// Section-aware: ONLY pending-section lines are ingestable checkoffs. The audit
+// section is display-only (§8.2: the sole ack is ticking a box in the pending
 // list). If we re-parsed audit `[x]` lines, a stale audit entry (old hash) could
 // re-pin / clobber a fresh pending checkoff (new hash) → wrong stay-pending. So we
-// stop collecting once we enter the reviewed section. Default section = pending, so
+// stop collecting once we enter the audit section. Default section = pending, so
 // a flat list with no headings is still treated as ingestable (the safe direction).
 const parseTodo = (text) => {
   const entries = []
@@ -32,7 +32,7 @@ const parseTodo = (text) => {
   let inReviewed = false
   for (const line of text.split(/\r?\n/)) {
     if (line.trimStart().startsWith("## ")) {
-      inReviewed = line.includes("已评审")
+      inReviewed = line.includes("已评审") || line.includes("审计历史")
       continue
     }
     if (inReviewed) continue // audit section is inert

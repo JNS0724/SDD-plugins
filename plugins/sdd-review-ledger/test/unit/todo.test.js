@@ -39,6 +39,19 @@ test("parseTodo: 已评审 audit section is INERT — its [x] lines are NOT inge
   assert.equal(entries[0].inlineHash, "22222222", "fresh pending hash, not the stale audit hash")
 })
 
+test("parseTodo: 审计历史 section is also inert", () => {
+  const text = [
+    "## 待评审",
+    "- [x] src/a.ts@22222222 — 已核对",
+    "",
+    "## 审计历史（只读，勿编辑）",
+    "- [x] src/a.ts@11111111 — bootstrap",
+  ].join("\n")
+  const entries = parseTodo(text)
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].inlineHash, "22222222")
+})
+
 test("parseTodo: flat list with no headings is treated as ingestable (safe default)", () => {
   const entries = parseTodo("- [x] a.ts@deadbeef — ok")
   assert.equal(entries.length, 1)

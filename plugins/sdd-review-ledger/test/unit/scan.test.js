@@ -33,7 +33,10 @@ test("scanWorkTree: ignores default dirs (node_modules, .git, etc.)", () => {
   try {
     write(root, "src/app.ts", "1")
     write(root, "node_modules/dep/index.js", "1")
+    write(root, ".claude/hooks/x.js", "1")
     write(root, ".git/hooks/x.js", "1")
+    write(root, ".home/.bun/install/cache/dep/index.ts", "1")
+    write(root, ".opencode/plugins/plugin.js", "1")
     write(root, "dist/bundle.js", "1")
     const { codePaths } = scanWorkTree(root, emptyLedger())
     assert.deepEqual(codePaths, ["src/app.ts"])

@@ -20,13 +20,13 @@ const REVIEW_BLOCK = [
   "    2. code 此刻实现什么（引用具体函数/行为）",
   "    3. 二者是否一致（指出冲突点，或写\"经对照无冲突\"）",
   "    4. 结论：需改 → 直接编辑对应 design/tasks（这本身是同步动作）；",
-  "             无需改（纯重构/格式化/无关）→ 在 .sdd-review-todo.md 勾掉，理由须含第 3 步的依据",
+  "             无需改（纯重构/格式化/无关）→ 在 .sdd-review-todo.md 的「待评审」区原地勾掉，理由须含第 3 步的依据",
   "  （Layer A 纯文档对纯文档：第 2 步替换为\"另一篇 doc 此刻声称什么\"，不强求 importer 式取证。）",
   "  规则见 sdd-review-rules.md。",
 ].join("\n")
 
 const ACTION_LINE =
-  "ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最终都需在 .sdd-review-todo.md 勾掉你评审过的每一项（编辑文件不自动清除）。"
+  "ACTION: 完成上述后回到用户原始任务。清除待评审项的唯一方式是读取最新 .sdd-review-todo.md，只在「## 待评审」区把你已评审的每一行原地从 [ ] 改为 [x]，保留原 path@hash 并追加一句证据理由；不要把条目移动到「审计历史」区，不要手写新增待评审条目。若评审中编辑过 code/design/tasks，先再次读取 .sdd-review-todo.md，再勾选最新出现的 path@hash（编辑文件不自动清除）。"
 
 const changedLine = (item) => {
   const p = sanitizePath(item.path)

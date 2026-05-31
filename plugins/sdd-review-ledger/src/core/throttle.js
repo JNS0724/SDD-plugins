@@ -3,15 +3,21 @@
 const fs = require("fs")
 const path = require("path")
 
-// Throttle state for active reminders (§9.3 + R2 #11 batch boundary).
-//   batch              — increments once per user turn (on-prompt bumps it)
-//   sent               — total active reminders this session
-//   lastRemindedBatch  — the batch in which we last actively reminded
-// "Batch" = the run of consecutive edits within one user turn. Per-batch ≤ 1
-// active reminder; per-session ≤ maxReminders. Passive todo is refreshed every
-// run regardless (that happens in the pipeline, not here).
+// Active reminder state.
+// Default policy is intentionally simple: every relevant code / SDD-doc edit may
+// remind. A missed review is worse than a repeated nudge. We only suppress an
+// identical pending-set reminder inside a tiny time window, which avoids duplicate
+// output from near-simultaneous multi-file writes without muting later changes.
+// The optional SDD_REVIEW_SESSION_MAX_REMINDERS env var still acts as a hard cap
+// for teams that explicitly want a quieter mode; 0 means passive todo only.
 
-const emptyThrottle = () => ({ batch: 0, sent: 0, lastRemindedBatch: null })
+const emptyThrottle = () => ({
+  batch: 0,
+  sent: 0,
+  lastRemindedBatch: null,
+  lastReminderSignature: "",
+  lastReminderAtMs: 0,
+})
 
 const throttlePath = (stateDir, sessionKey) => path.join(stateDir, `throttle-${sessionKey}.json`)
 
@@ -22,6 +28,8 @@ const loadThrottle = (stateDir, sessionKey) => {
       batch: Number.isFinite(data.batch) ? data.batch : 0,
       sent: Number.isFinite(data.sent) ? data.sent : 0,
       lastRemindedBatch: Number.isFinite(data.lastRemindedBatch) ? data.lastRemindedBatch : null,
+      lastReminderSignature: typeof data.lastReminderSignature === "string" ? data.lastReminderSignature : "",
+      lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0,
     }
   } catch {
     return emptyThrottle() // missing/corrupt → fresh (throttle loss is benign)
@@ -42,13 +50,28 @@ const saveThrottle = (stateDir, sessionKey, state) => {
 const bumpBatch = (state) => ({ ...state, batch: (state.batch || 0) + 1 })
 
 // Pure decision for an active reminder. Returns { remind, state }.
-// remind iff: there is something to review, the session cap isn't reached, and we
-// have NOT already reminded in this batch (the R2 #11 batch boundary).
-const decideReminder = (state, { hasNeeds, maxReminders }) => {
+// remind iff there is something to review and the optional cap is not reached.
+const decideReminder = (state, { hasNeeds, maxReminders, signature = "", nowMs = Date.now(), dedupeMs = 0 }) => {
   const cur = state || emptyThrottle()
-  const remind = !!hasNeeds && (cur.sent || 0) < maxReminders && cur.lastRemindedBatch !== cur.batch
+  const duplicate =
+    signature &&
+    signature === cur.lastReminderSignature &&
+    dedupeMs > 0 &&
+    Number.isFinite(cur.lastReminderAtMs) &&
+    nowMs - cur.lastReminderAtMs >= 0 &&
+    nowMs - cur.lastReminderAtMs < dedupeMs
+  const remind = !!hasNeeds && !duplicate && maxReminders > 0 && (cur.sent || 0) < maxReminders
   if (!remind) return { remind: false, state: cur }
-  return { remind: true, state: { ...cur, sent: (cur.sent || 0) + 1, lastRemindedBatch: cur.batch } }
+  return {
+    remind: true,
+    state: {
+      ...cur,
+      sent: (cur.sent || 0) + 1,
+      lastRemindedBatch: cur.batch,
+      lastReminderSignature: signature || cur.lastReminderSignature || "",
+      lastReminderAtMs: nowMs,
+    },
+  }
 }
 
 module.exports = {

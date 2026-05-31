@@ -8,6 +8,8 @@
 [`架构`](./sdd-review-ledger-architecture.zh.md) 与 [`详细设计`](./sdd-review-ledger-detailed-design.zh.md)；本文与它们冲突处，**以本文为准**（两文档已按本文打补丁 + 升 v0.3）。
 **设计由来:** GateGuard hook 源码（行号基准）：`~/.claude/plugins/cache/everything-claude-code/everything-claude-code/2.0.0-rc.1/scripts/hooks/gateguard-fact-force.js`；SKILL（A/B 证据）：同版本 `skills/gateguard/SKILL.md`。
 
+> 后续修订（2026-05-31）：真实长任务验证显示，"每会话/每批次上限"会让后半程重要变更静默。因此当前实现已改为默认每次相关编辑都可提醒，只保留 `SDD_REVIEW_SESSION_MAX_REMINDERS` 作为可选硬上限。本文中关于"≤1 项/批次"的内容保留为 R2 历史决策记录，不再代表当前默认行为。
+
 ---
 
 ## 一、先回答用户的二分法：「只适用文档、不适用大量代码」——证伪，方向恰好反了

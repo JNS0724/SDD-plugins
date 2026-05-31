@@ -28,7 +28,7 @@
 
 **本文顺带定（架构 §13 余项，用与已锁决策一致的默认值，标注可调）：**
 - **#2 代码元素粒度** → **文件级**（v1）。函数级/AST 延后，先量化文件级的无害多提醒一次的比率（§十一）。
-- **#5 节流** → 主动提醒**每会话有界**（默认每会话 ≤ N、每批次 ≤ 1），被动 todo 无限留存（§九 / §十二）。
+- **#5 节流** → 主动提醒默认**不设 session/批次上限**，每次相关 code/SDD-doc 编辑都可提醒；只保留可选 env 硬上限和总逃生阀（§九 / §十二）。
 - **#6 双平台投递矩阵** → §十 明确给出。
 
 ---
@@ -66,13 +66,13 @@ plugins/sdd-review-ledger/
     pipeline.js                     #   单次运行编排：acquire→ingest→capture→compute→render→write→deliver
     handlers/
       on-edit.js                    #   PostToolUse / tool.execute.after：捕获 + 投递
-      on-prompt.js                  #   UserPromptSubmit / chat.message：carry-over
+      on-prompt.js                  #   UserPromptSubmit：carry-over；OpenCode chat.message 只做批次边界/诊断
       on-precompact.js              #   PreCompact：注入 pending 摘要
       on-stop.js                    #   Stop / idle：best-effort + 刷新 todo
       cli.js                        #   sdd-review status / init
     adapters/
       claude-code/command-hook.js   # entry：读 stdin event → 调 handlers → 写 stdout
-      opencode/native-plugin.js     # entry：监听 tool.execute.after / chat.message / session.idle
+      opencode/native-plugin.js     # entry：监听 tool.execute.before/after / chat.message / session.idle
 ```
 
 **移植自旧实现的原语**（已读源、行为已知，直接改名复用）：
@@ -225,9 +225,9 @@ parseTodo(text) -> TodoEntry[]
 ```
 ```
 renderTodo(needs, ledger) -> text
-  头部一行："勾选 [x] 表示已评审（编辑文档/代码后仍需勾）；勾选下次运行生效。"
+  头部一行："只在「待评审」区把已完成评审的行原地从 [ ] 改为 [x]；不要移动、复制或改写 path@hash。"
   "## 待评审"：needs 每项 → `- [ ] <sanitizePath(path)>@<currentHash>  (候选: <candidates>)`   // R2 #8 渲染侧消毒
-  "## 已评审（近 N，审计用）"：ledger 中 hash==reviewedHash 的项，按 reviewedAt 取近 N（默认 50）
+  "## 审计历史（只读，勿编辑）"：ledger 中 hash==reviewedHash 的项，按 reviewedAt 取近 N（默认 50）
                               → `- [x] <sanitizePath(path)>@<reviewedHash> — <rationale><thinMark?>`
   // R2 #4b：thinMark = 当 rationale 过简（如纯"无关"/"ok"/空）时追加可见标记"（理由过简，建议补充）"
   //         ——纯展示，不影响清除、不做语义校验（守 §8.2 机械可观测 + §7.3 不解析 NL）
@@ -285,7 +285,7 @@ run(ctx):
 
 **次序铁律**：INGEST → CAPTURE → COMPUTE → WRITE → DELIVER。ingest 先于 render（写 todo）防止重渲染冲掉刚勾的框（§5.3）。
 
-**`ctx.sessionId` 的来源（R2 #2）**：经 `core/session-key.js` `resolveSessionKey(event)` 解析（多级回退，§二），**绝不**直接信任单一字段。它是**节流维度会话键**（§9.3 每会话上限、每批次合并都按它分桶），**与账本的 per-project 持久正交**——账本不按 session 分。空键串台会让节流跨会话误合并；每次不同键会让节流形同虚设。**逃生阀（R2 #1）**：`run` 第一行 `isDisabled()` 短路，先于一切（含 `isSddProject` 与锁），保证"嫌吵或在做无关重构"的用户能一键整程静默——"永不阻断"治不了"持续投递 + 持续重写 todo + 持续扫全树"的噪音，逃生阀正是它的补集。
+**`ctx.sessionId` 的来源（R2 #2）**：经 `core/session-key.js` `resolveSessionKey(event)` 解析（多级回退，§二），**绝不**直接信任单一字段。它是可选提醒上限与诊断状态的会话键，**与账本的 per-project 持久正交**——账本不按 session 分。空键串台会让可选上限跨会话误合并；每次不同键会让可选上限形同虚设。**逃生阀（R2 #1）**：`run` 第一行 `isDisabled()` 短路，先于一切（含 `isSddProject` 与锁），保证"嫌吵或在做无关重构"的用户能一键整程静默——"永不阻断"治不了"持续投递 + 持续重写 todo + 持续扫全树"的噪音，逃生阀正是它的补集。
 
 **init / auto-baseline（冷启动，§9 架构 + R1 §6.1）**：`sdd-review init` 扫描当前工作树所有 change-dir 的 doc + **`scanWorkTree` 扫出的全部 code（R1：不再依赖 git「已变更」）**，把它们的当前哈希**全部写为 reviewedHash（verdict=`bootstrap`，并记 mtimeMs/size）**、不触发评审 → 避免存量 repo 满屏"待评审"。同时写两行 `.gitignore`。
 - **auto-baseline 升为正式机制（R1 关键依赖）**：**首次 compute 遇「账本空 且 扫到 ≥ `SDD_REVIEW_BOOTSTRAP_THRESHOLD`（默认 1）个既有文件」即自动执行上述 baseline**、本轮不刷屏，并在 todo 头 + 日志注明"已对现有 N 个文件建立 baseline（未回溯评审）"。不能仅靠显式 `init`——多数 vibe 用户不会先跑 init。为什么去 git 后 auto-baseline 升为关键依赖，详见 R1 §6.1。
@@ -337,22 +337,24 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 ```
 - 含**候选 change-dir + design 首行摘要**（§6.4 受影响的对应文件交 LLM 圈定）。
 - 指示 LLM **读取列出文件的当前内容**自行定位段落（R1：去 git diff；整文件粒度"损失的段定位"由 LLM 读当前内容补回，v0.2 起 + 已评审内容快照 diff 给"自上次评审"的精确基线，R1 §5）。
-- **fact-forcing（强制先取证再下结论）限定（R2 #4）**：① **Layer B（code↔doc）全力取证**，Layer A 纯文档对纯文档退化为"引用两篇 doc 互相矛盾/相关的两句"，**不强加 importer 式取证**（那正是 GateGuard 误伤文档的复刻）；② 重模板**只用于实际投递的 ≤1 项/批次**——被节流压成被动 todo 的项不带重取证（取证越重越不能频发，是一对张力）；③ **诚实标注增益上限**：这只降低走过场盖章的"最省力出口"，**绝不复制 DENY 的强制力、增益不量化**，且结构性远低于 GateGuard 的 +2.25（真正起作用的部分来自强制、非措辞，见架构 §10#9）。
+- **fact-forcing（强制先取证再下结论）限定（R2 #4）**：① **Layer B（code↔doc）全力取证**，Layer A 纯文档对纯文档退化为"引用两篇 doc 互相矛盾/相关的两句"，**不强加 importer 式取证**（那正是 GateGuard 误伤文档的复刻）；② 默认每次相关编辑都投递重模板，原因是漏审比多提醒更危险；③ **诚实标注增益上限**：这只降低走过场盖章的"最省力出口"，**绝不复制 DENY 的强制力、增益不量化**，且结构性远低于 GateGuard 的 +2.25（真正起作用的部分来自强制、非措辞，见架构 §10#9）。
 - 评审规则从 `sdd-review-rules.md` 动态加载（移植旧规则文件机制），缺失则内置默认。
 - 该段做**字节级 snapshot 测试**（契约稳定性）。path 拼接前过 `sanitizePath`（R2 #8，渲染侧消毒）。
 
-### 9.3 节流（#5 已定）
+### 9.3 主动提醒策略（#5 更新）
 
-- **主动提醒有界**：每会话 ≤ `SDD_REVIEW_SESSION_MAX_REMINDERS`（默认 3）、每批次（连续编辑）≤ 1。超出后**不再主动刷屏**，改由被动 todo + 下一轮 carry-over + Stop 保底。
-- **会话维度按 `core/session-key.js` 分桶（R2 #2）**：见 §七；空或不稳定的会话键会让"每会话 ≤N"失效。
-- **"批次"边界定义（R2 #11，堵空头承诺）**：旧文"每批次 ≤1"未定义"批次"——而那次 GateGuard 4 连击（用户被拦 4 个文档）正暴露：按 file_path 无差别计、无批次概念就会 N 连击。并行编辑 / `MultiEdit` / 子代理 fan-out 会让多个 `tool.execute.after` 几乎同时到达，若不定义批次边界，本工具会重蹈 N 连击（只是 N 条 reminder 而非 N 次 DENY）。**定义：同一 session（按上面会话键）、两个 user turn 之间的连续编辑序列合并为一批；跨 user turn 重置批次。** 一批内即便触发 K 个 `on-edit`，主动提醒也只发 ≤1 条（聚合该批全部 needs）；其余只刷新被动 todo。
-- **取证 × 节流的张力（R2 #4）**：§9.2 的 fact-forcing 重模板**只挂在被实际投递的那 ≤1 项/批次**上；取证越重越不能频发，故重模板与节流是配套的——绝不对每条 needs 都要求重取证。
+- **默认无 session/批次上限**：每次相关 code / SDD-doc 编辑后，只要 `needs` 非空，就可把 fact-forcing 提醒追加到本次工具结果。真实长任务里，漏掉后半程重要变更比多提醒更危险。
+- **相同 pending 短窗口去重**：若并发/连续工具写入导致同一个 `path@hash` 集合在极短时间内重复出现，只投递一次，避免同一段提醒在同一批 multi-write 中复制刷屏。默认窗口 `SDD_REVIEW_REMINDER_DEDUPE_MS=2000`。
+- **会话维度按 `core/session-key.js` 分桶（R2 #2）**：见 §七；仅用于可选硬上限和诊断状态，账本仍是 per-project 持久。
+- **插件状态文件不自触发**：编辑 `.sdd-review-todo.md` / ledger 等 housekeeping 文件只做 ingest + 刷新，不主动再提醒，避免模型勾选后被自己的勾选动作再次打扰。
+- **可选硬上限**：`SDD_REVIEW_SESSION_MAX_REMINDERS=N` 可限制单会话主动提醒次数；默认不限制。设 `0` 可把主动提醒完全关掉、纯靠 todo。
 - **被动 todo 无限留存**：每次 run 都刷新 `.sdd-review-todo.md`，从不因节流而丢项。
-- 设 `0` 可把主动提醒完全关掉、纯靠 todo（与旧实现 `*_TOOL_MAX_REMINDERS` 同风格）。整程静默另见逃生阀总开关 `SDD_REVIEW=off`（R2 #1，比 `0` 更彻底：连 todo 重写/扫描都停）。
+- 整程静默另见逃生阀总开关 `SDD_REVIEW=off`（R2 #1，比 `0` 更彻底：连 todo 重写/扫描都停）。
 
 ### 9.4 carry-over / 保底
 
-- `on-prompt`（UserPromptSubmit / chat.message）：新会话/下一轮首事件 → 若 `needs` 非空，注入紧凑 carry-over 摘要（跨会话不丢，因账本持久）。
+- `on-prompt`（Claude Code `UserPromptSubmit`）：新会话/下一轮首事件 → 若 `needs` 非空，注入紧凑 carry-over 摘要（跨会话不丢，因账本持久）。
+- OpenCode `chat.message`：只打开新批次并记录 carry-over 状态，**不改写消息输出**；OpenCode 1.2.27 对 `chat.message` 输出 schema 校验严格，改写消息结构会导致运行失败。模型可见主通道仍是下一次 `tool.execute.after`，人可见兜底是 `.sdd-review-todo.md`。
 - `on-precompact`：压缩前注入 pending 摘要。
 - `on-stop`（Stop / idle）：best-effort 提醒；**始终先刷新 todo + 诊断日志**，保证 continuation 失效时用户仍可见（移植旧 refreshReport 思路）。
 
@@ -364,7 +366,7 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 |---|---|---|
 | 编辑捕获 | `PostToolUse`（可靠） | `tool.execute.after`（可靠，转换得来） |
 | **主投递**（编辑时提醒） | PostToolUse stdout / additionalContext | **append 到 `tool.execute.after` 的 output**（OpenCode 最可靠模型可见通道） |
-| 下一轮 carry-over | `UserPromptSubmit` | `chat.message` |
+| 下一轮 carry-over | `UserPromptSubmit` | `chat.message` 只记录/重置批次，不改写消息；下一次 `tool.execute.after` 再投递 |
 | 压缩保底 | `PreCompact` | （无则跳过） |
 | Stop continuation | `Stop` hook（可用） | `session.idle` / idle `session.status`（**best-effort，不可靠**） |
 | shell 写 / 未捕获子代理 | compute 时 `scanWorkTree` 保底（R1：已 commit 也照抓） | 同左（`src/core` 逐字节复用） |
@@ -408,7 +410,7 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 - 写中途 kill → tmp/rename 原子性：读者只见旧或新完整账本；损坏账本 → 自愈当空。
 - **Windows rename unlink-retry（R2 #3b）**：模拟 `renameSync` 抛 EEXIST/EPERM（目标已存在）→ 断言 `atomic.js` unlink 旧文件后重试成功、账本被更新（**回归靶**：不修则 Windows 覆盖写恒失败 → 账本永停初始态 = 系统性 false-clean）。
 - **逃生阀（R2 #1）**：`SDD_REVIEW=off` → `run` 第一行 SILENT、不写任何文件、不扫描。
-- **批次边界（R2 #11）**：同一 session 一个 turn 内 4 个 `on-edit` 几乎同时到达 → 主动提醒 ≤1 条（聚合 4 项 needs）、todo 含全部 4 项；跨 turn 重置后新批次可再发 1 条。
+- **默认重复提醒**：同一 session 一个 turn 内 4 个相关 `on-edit` 到达 → 4 次工具结果都可携带提醒；todo 含全部最新 needs。若项目嫌吵，用 `SDD_REVIEW_SESSION_MAX_REMINDERS` 或 `SDD_REVIEW=off` 降噪。
 
 ### 12.4 误报对账（一等验收，对应"不误报"）
 构造真实编辑序列并断言**不产生有害错误结论**（只允许良性"请评审"提示、可一句勾掉）：① 多关注点文件改无关函数；② 全仓 gofmt；③ design 段润色/重组；④ design-first 改后 code 跟进（反向偏差被端出）；⑤ 子代理 / shell 写**后 commit**（R1：scan 保底捕获，直接覆盖 §3.2 commit 洞）。并与旧 mtime 方案在同序列上对账误报数。
@@ -440,7 +442,8 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `SDD_REVIEW_SESSION_MAX_REMINDERS` | `3` | 每会话主动提醒上限；`0`=纯靠 todo |
+| `SDD_REVIEW_SESSION_MAX_REMINDERS` | 无上限 | 可选每会话主动提醒硬上限；`0`=纯靠 todo |
+| `SDD_REVIEW_REMINDER_DEDUPE_MS` | `2000` | 相同 pending 集合短窗口去重；`0`=不去重 |
 | `SDD_REVIEW_LEDGER_CODE_CAP` | `1000` | 账本 code 记录 LRU 上限 |
 | `SDD_REVIEW_RULES_FILE` | — | 覆盖 `sdd-review-rules.md` 路径 |
 | `SDD_REVIEW_LOG` / `SDD_REVIEW_LOG_PATH` | on / state 目录 | 诊断日志开关/路径 |
@@ -459,9 +462,9 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 
 1. **M1 core 纯函数 + 单测**：hash / classify / change-dirs / ledger / todo(parse+render) / compute / ingest。无 IO，先把不变量与误报对账（§12.1/§12.4）跑绿——这是核心赌注的证伪点。
 2. **M2 管线 + 并发/原子**：pipeline.run + locks + atomic + state-dir + init；§12.2/§12.3 跑绿。
-3. **M3 Claude Code 适配器 + 投递**：on-edit / on-prompt / on-stop + prompts + 节流；单平台端到端。
-4. **M4 OpenCode 适配器**：native-plugin（tool.execute.after 主投递 + chat.message carry-over + idle best-effort）。
-5. **M5 双平台 e2e（J1–J16）+ build:check 字节校验 + 文档**。
+3. **M3 Claude Code 适配器 + 投递**：on-edit / on-prompt + prompts + 节流；Claude Code 端到端。
+4. **M4 OpenCode 适配器（已实现）**：native-plugin（tool.execute.before 参数缓存 + tool.execute.after 主投递 + chat.message 批次边界/诊断 + idle 被动刷新）。
+5. **M5 双平台真实模型 e2e（J1–J16）+ 文档硬化**。
 
 每个里程碑独立可验证；M1 通过即证伪/证实核心赌注，再决定是否继续。
 
@@ -469,19 +472,19 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 
 ## 十六、MVP 切割（v0.1 首发范围）
 
-> 本节定义**第一个可发布、可在真实 vibe coding 回路里跑**的最小产品，并逐条说明每个"砍掉"为何**只砍能力、不砍核心赌注的正确性**。MVP = §15 的 **M1+M2+M3**（单平台 Claude Code 端到端）；M4/M5 与 §十七 全部后置。
+> 本节定义**第一个可发布、可在真实 vibe coding 回路里跑**的最小产品，并逐条说明每个"砍掉"为何**只砍能力、不砍核心赌注的正确性**。当前 MVP = §15 的 **M1+M2+M3+M4**（Claude Code + OpenCode 双入口）；M5 与 §十七 后置。
 >
 > **引用约定**：本节裸 `§x` 指**本文**；引用架构文档一律写 `架构 §x`（因两文档存在同号子节，如 §5.3/§6.3/§6.4，必须区分）。
 
 ### 16.1 MVP 要验证的核心赌注（窄化自 架构 §12）
 
-> **「需评审 = (工作树, 账本) 的纯函数」+「判断全外包给 LLM」，在单平台（Claude Code）真实编辑回路里，能不静默漏报、不有害误报地辅助评审。**
+> **「需评审 = (工作树, 账本) 的纯函数」+「判断全外包给 LLM」，在 Claude Code / OpenCode 真实编辑回路里，能不静默漏报、不有害误报地辅助评审。**
 
-选 Claude Code 单平台先行的理由：`src/core` 平台无关、两平台逐字节复用（§十），核心赌注与平台正交；且 CC 的 `PostToolUse` 是**两平台里更可靠**的投递通道——**在更可靠的通道上若都站不住，错的是模型本身，与平台无关**。故 CC 先行是更强的证伪，而非偷懒。OpenCode 只是再加一个薄适配器（M4），`src/core` 零改动。
+先用 Claude Code 启动、再补 OpenCode adapter 的理由：`src/core` 平台无关、两平台复用同一套 ledger/todo 核心，核心赌注与平台正交；OpenCode 只加薄适配器，`src/core` 零改动。
 
 ### 16.2 范围 IN（MVP 必须有）
 
-逐项是 §二 结构的子集 + §15 的 M1–M3：
+逐项是 §二 结构的子集 + §15 的 M1–M4：
 
 | 模块 / 能力 | 落点 | 为何不可砍 |
 |---|---|---|
@@ -491,17 +494,17 @@ ACTION: 完成上述后回到用户原始任务。无论编辑还是勾选，最
 | change-dir 发现 + archived 过滤 + 路径分类 | §6.2 / 移植 `file-classifier`+`isArchivedChangeDir` | Layer A/B 的触发输入 |
 | 管线（acquire→ingest→capture→compute→write→deliver）+ FsLock + 原子写 + state-dir | §七 / 移植 `locks`+`atomic`+`state-dir` | 单次 run 主干；并发失败安全 |
 | `init` + **auto-baseline**（扫描化，R1）+ 写 `.gitignore` 两行 | §七 / 架构 §9 / R1 §6.1 | 否则存量 repo 满屏"待评审"；去 git 后扫描暴露全仓 → auto-baseline 成关键依赖，必须进 MVP |
-| Claude Code 适配器：`PostToolUse`（捕获+编辑时投递）、`UserPromptSubmit`（carry-over） | §九/§十 / `adapters/claude-code` | **主投递通道** + 跨会话主动浮出 |
+| Claude Code 适配器：`PostToolUse`（捕获+编辑时投递）、`UserPromptSubmit`（carry-over） | §九/§十 / `adapters/claude-code` | Claude Code 主投递通道 + 跨会话主动浮出 |
+| OpenCode 适配器：`tool.execute.before`（参数缓存）、`tool.execute.after`（捕获+编辑时投递）、`chat.message`（批次/诊断，不改写消息）、idle 被动刷新 | §九/§十 / `adapters/opencode` | OpenCode 主投递通道 + 批次重置 + todo 兜底刷新 |
 | `scanWorkTree` 发现 code 候选池（R1，取代 `gitChangedFiles`） | §6.3 / `core/scan.js` | **彻底**关掉子代理/shell 写盲区（含已 commit）；恢复纯函数不变量 → 关键依赖，进 MVP |
 | system-reminder 模板（字节级 snapshot） | §9.2 / `core/prompts.js` | 模型可见契约，必须稳定 |
-| 节流（每会话上限 + 每批次 ≤1）、`sdd-review-rules.md` 默认规则、最小诊断日志、env 开关 | §9.3/§十四 / 移植 | 防刷屏 + 可调 + 自诊断 |
+| 默认每次相关编辑提醒、可选会话上限、`sdd-review-rules.md` 默认规则、最小诊断日志、env 开关 | §9.3/§十四 / 移植 | 优先不漏审，同时保留降噪开关 |
 | core 单测 + 误报对账 + 少量管线集成测 | §12.1/§12.2/§12.4 | **证伪闸门**（见 16.5） |
 
 ### 16.3 范围 OUT（v0.1 明确后置，附"为何安全"）
 
 | 后置项 | 归宿 | 砍掉只损失什么 / 为何不伤核心 |
 |---|---|---|
-| **OpenCode 适配器** | M4 | 仅少一个平台；`src/core` 逐字节复用（§十），CC 已证伪即全局成立（16.1）。 |
 | **PreCompact / Stop handler** | M3 后 fast-follow | 主投递本就**不押 Stop**（架构 §7.1）；跨会话/续跑由"持久 todo + `UserPromptSubmit` carry-over"覆盖（§9.4）。砍掉只少几次 best-effort 主动 nudge，**无正确性损失**。 |
 | **账本 code 记录 LRU 上限** | 量化后再加 | 验证期 repo 远不到上限；不加只在超长寿大仓无界增长，属验证后问题。 |
 | **熔断器（circuit breaker）** | 诊断见重复异常再加 | 顶层 `try/catch → SILENT`（§七/§十三）已保证 fail-open / 永不抛给用户（NFR）；熔断只优化"持续失败"的重试成本，MVP 用不到。 |
@@ -522,18 +525,18 @@ src/
   pipeline.js                                                                            ← 进
   handlers/  on-edit · on-prompt · cli(init/status)                                      ← 进
              on-precompact · on-stop                                                     ← 后置（M3后/M4）
-  adapters/claude-code/command-hook.js                                                   ← 进（唯一 entry）
-  adapters/opencode/native-plugin.js                                                     ← 后置（M4）
+  adapters/claude-code/command-hook.js                                                   ← 进
+  adapters/opencode/native-plugin.js                                                     ← 进
 ```
 
-发布件：MVP 只产 **1 个**（`sdd-review-ledger-hook.js`）；`build.mjs`/`package.json` 先配单 entry，M4 再加第二 entry（§二 打包模式不变）。
+发布件：MVP 产 **2 个**：`sdd-review-ledger-hook.js`（Claude Code）和 `sdd-review-ledger-opencode.js`（OpenCode）；`build.mjs` 同时维护两个 entry。
 
 ### 16.5 MVP 验收闸门（窄化自 §12；过则可发，不过则停）
 
 1. **纯函数正确性 + 决定性**：Layer A（doc 变→待评审）、Layer B（code 变→待评审、**scan 候选并入**）、never-reviewed vs changed、删除文件不报；同输入任意次同输出。**含 R1 commit 不变性回归**（写后 commit 仍浮出）——去 git 后此决定性闸门才真正可过（§12.1/§9.2）。
 2. **三条 false-clean 守卫**：checkoff-only（编辑不清除）、哈希钉选（勾 `path@H1` 后改成 H2 仍待评审）、Read 不清除。（架构 §7.2/§8 / §12.2）
 3. **ingest-before-render**：勾完下一次 run → 该项落"已评审"、不被重渲染冲回。（§七 次序铁律 / §12.2）
-4. **编辑时投递 + 保底**：CC `PostToolUse` 编辑时即送达；`.sdd-review-todo.md` 每次 run 必写；跨会话经持久账本 + `UserPromptSubmit` carry-over 重新浮出。（§九 / §12.5 子集）
+4. **编辑时投递 + 保底**：CC `PostToolUse` / OpenCode `tool.execute.after` 编辑时即送达；`.sdd-review-todo.md` 每次 run 必写；跨会话经持久账本 + Claude Code `UserPromptSubmit` carry-over / OpenCode 下一次写工具结果重新浮出。（§九 / §12.5 子集）
 5. **冷启动不刷屏**：`init` 后 0 待评审；此后改一个文件 → 仅它待评审。（§12.2）
 6. **不误报（一等验收）**：gofmt / 多关注点改无关函数 / doc 段润色 → 只产良性"请瞥一眼"、可一句勾掉；与旧 mtime 方案在同序列上对账，误报数下降。（§12.4）
 7. **fail-open**：任何异常 → SILENT，绝不阻断用户主流程；拿不到锁 / 账本损坏走 §七 既定降级。
@@ -541,19 +544,20 @@ src/
 
 ### 16.6 MVP 诚实残余（v0.1 知情放弃，附降级方式）
 
-- **单平台**：OpenCode 用户在 M4 前不被服务。降级：等 M4（薄适配器）。
+- **OpenCode 主投递 best-effort**：OpenCode 通过 `tool.execute.after` 追加工具结果，仍可能被模型忽略；`.sdd-review-todo.md` 是兜底。
 - **本地、不共享**：跨人 / 换机失效；不比旧实现差。降级：v0.2 团队模式（见架构 §10#5）。
 - **扫描覆盖之外的窄缝**（R1）：只剩"不在被扫描位置"（ignore-glob 排除 / 扫描预算截断尾部），有日志、非静默，可经 `SCAN_ROOTS`/`IGNORE` 调；"已 commit"不再是盲区（见架构 §10 / §13）。
 - **扫描成本 / mtime 极罕见漏**（见架构 §10 / §13）：超大仓首扫贵，mtime 门控后稳态廉价、超预算有告警；可 `SCAN_ALWAYS_HASH=1` 关。
 - **跨段 false-clean、LLM 评审质量上限**：与全量设计同源，非 MVP 新增、亦非 MVP 能解（见架构 §10#6 / §10#1）。
 - **主投递无强制力**：主投递是 best-effort 让模型自愿调查，模型可零成本忽略；MVP **知情接受**此上限以换"永不卡用户"，并用 §16.5#8 忽略率量化它。**绝不**在 MVP 引入 DENY（违 §1）或 FactGate（违 §2）（见架构 §10#9 / §7.5）。
 
-### 16.7 MVP 构建顺序（= §15 M1→M2→M3）
+### 16.7 MVP 构建顺序（= §15 M1→M2→M3→M4）
 
 - **MVP-1 = M1**：core 纯函数 + 单测 + 误报对账 → **证伪闸门**。绿了再继续；不绿则核心赌注被证伪，回到架构层，不进 M2。
 - **MVP-2 = M2**：管线 + 锁 + 原子 + state-dir + `init` → 可跑的单次引擎（§12.2/§12.3 子集）。
-- **MVP-3 = M3**：CC 适配器（`PostToolUse` 捕获+投递、`UserPromptSubmit` carry-over）+ prompts snapshot + 节流 → **真实 CC vibe 回路端到端可用 = MVP 发布点**。
-- **MVP 后**：M4（OpenCode）、M5（双平台 e2e），再进 §十七。
+- **MVP-3 = M3**：CC 适配器（`PostToolUse` 捕获+投递、`UserPromptSubmit` carry-over）+ prompts snapshot + 节流。
+- **MVP-4 = M4**：OpenCode adapter（`tool.execute.before` 参数缓存、`tool.execute.after` 主投递、`chat.message` 批次/诊断、idle 被动刷新）+ 发布件。
+- **MVP 后**：M5（双平台真实模型 e2e），再进 §十七。
 
 ---
 

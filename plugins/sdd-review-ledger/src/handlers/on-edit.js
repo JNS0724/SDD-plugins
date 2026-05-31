@@ -5,12 +5,20 @@ const { resolveStateDir } = require("../core/state-dir")
 const { resolveSessionKey } = require("../core/session-key")
 const { loadThrottle, saveThrottle, decideReminder } = require("../core/throttle")
 const { discoverChangeDirs } = require("../core/change-dirs")
+const { classifyPath } = require("../core/classify")
 const { buildReminder } = require("../core/prompts")
 const { run } = require("../pipeline")
 
+const reminderSignature = (needs) =>
+  [...needs]
+    .map((item) => `${item.path}@${item.currentHash}`)
+    .sort()
+    .join("|")
+
 // on-edit (§9.1): main channel. Run the pipeline (writes ledger + todo, always),
-// then decide — under the throttle + batch boundary — whether to ALSO emit an
-// active fact-forcing reminder on this edit's tool result.
+// then decide whether to ALSO emit an active fact-forcing reminder on this edit's
+// tool result. Housekeeping writes like .sdd-review-todo.md still ingest/refresh
+// state, but do not trigger another active reminder.
 const onEdit = (ctx) => {
   const result = run(ctx) // pipeline is fail-open; never throws
   if (result.action === "silent") return { deliver: false, text: "", result }
@@ -21,11 +29,20 @@ const onEdit = (ctx) => {
 
   // disabled is already handled inside run(); guard the active channel too.
   if (cfg.disabled || needs.length === 0) return { deliver: false, text: "", result }
+  if (ctx.editedPath && classifyPath(ctx.editedPath) === "other") {
+    return { deliver: false, text: "", result }
+  }
 
   const stateDir = resolveStateDir(ctx.repoRoot)
   const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot)
   const throttle = loadThrottle(stateDir, sessionKey)
-  const decision = decideReminder(throttle, { hasNeeds: true, maxReminders: cfg.sessionMaxReminders })
+  const decision = decideReminder(throttle, {
+    hasNeeds: true,
+    maxReminders: cfg.sessionMaxReminders,
+    signature: reminderSignature(needs),
+    nowMs: ctx.nowMs || Date.now(),
+    dedupeMs: cfg.reminderDedupeMs,
+  })
   if (!decision.remind) return { deliver: false, text: "", result }
 
   saveThrottle(stateDir, sessionKey, decision.state)
@@ -38,4 +55,4 @@ const onEdit = (ctx) => {
   return { deliver: true, text: buildReminder(needs, designFirstLineByDir), result }
 }
 
-module.exports = { onEdit }
+module.exports = { onEdit, reminderSignature }

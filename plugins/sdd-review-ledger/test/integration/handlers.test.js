@@ -43,7 +43,7 @@ test("onEdit: first edit with needs delivers a fact-forcing reminder; pipeline w
   }
 })
 
-test("onEdit: per-batch ≤ 1 — second edit same batch refreshes todo but does NOT re-remind", () => {
+test("onEdit: every relevant edit can remind; passive todo still refreshes", () => {
   const root = mkRepo()
   try {
     write(root, "src/a.ts", "v1")
@@ -52,32 +52,46 @@ test("onEdit: per-batch ≤ 1 — second edit same batch refreshes todo but does
     assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true)
     write(root, "src/b.ts", "v1")
     const r2 = onEdit(ectx(root, { editedPath: path.join(root, "src/b.ts") }))
-    assert.equal(r2.deliver, false, "throttled within the same batch")
+    assert.equal(r2.deliver, true, "second code edit should remind too")
     assert.ok(fs.readFileSync(todoPathFor(root), "utf8").includes("src/b.ts"), "todo still reflects b.ts")
   } finally {
     rm(root)
   }
 })
 
-test("onPrompt opens a new batch → next onEdit may remind again", () => {
+test("onEdit: todo housekeeping writes ingest but do not actively remind", () => {
   const root = mkRepo()
   try {
     write(root, "src/a.ts", "v1")
     run(ectx(root))
     write(root, "src/a.ts", "v2")
     assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true)
-    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, false, "same batch throttled")
-    const p = onPrompt(ectx(root))
-    assert.equal(p.deliver, true, "carry-over surfaces pending count")
-    assert.ok(p.text.includes(".sdd-review-todo.md"))
-    write(root, "src/a.ts", "v3")
-    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true, "new batch reminds again")
+    write(root, ".sdd-review-todo.md", fs.readFileSync(todoPathFor(root), "utf8"))
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, ".sdd-review-todo.md") })).deliver, false)
   } finally {
     rm(root)
   }
 })
 
-test("onEdit: session cap (SDD_REVIEW_SESSION_MAX_REMINDERS=1) → only one active reminder", () => {
+test("onPrompt keeps carry-over visible and later edits still remind", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "src/a.ts", "v2")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts"), nowMs: 1000 })).deliver, true)
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts"), nowMs: 1001 })).deliver, false, "identical pending set is deduped briefly")
+    const p = onPrompt(ectx(root))
+    assert.equal(p.deliver, true, "carry-over surfaces pending count")
+    assert.ok(p.text.includes(".sdd-review-todo.md"))
+    write(root, "src/a.ts", "v3")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts"), nowMs: 1002 })).deliver, true, "changed hash reminds again")
+  } finally {
+    rm(root)
+  }
+})
+
+test("onEdit: optional session cap (SDD_REVIEW_SESSION_MAX_REMINDERS=1) → only one active reminder", () => {
   const root = mkRepo()
   try {
     write(root, "src/a.ts", "v1")
