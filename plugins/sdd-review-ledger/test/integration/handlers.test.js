@@ -353,3 +353,73 @@ test("dispatch: Stop escape hatch SDD_REVIEW=off → empty, no block", () => {
     rm(root)
   }
 })
+
+// ─── 改进 B（文档领先代码 = 计划，不主动催、不自动写实现）───
+// 主动通道（onEdit 提醒 / onStop 收尾 / onPrompt carry-over）只由 code 变更驱动。
+// design/tasks/proposal 领先 code 永远只被动记进 todo（绝不丢项），不主动打扰。
+test("onEdit: a design-doc change with code unchanged does NOT actively remind; todo still records it (改进B)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root)) // baseline: design.md + a.ts recorded, nothing pending
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## 计划：晚间问候\n")
+    const r = onEdit(ectx(root, { editedPath: path.join(root, "sdd/changes/greeting/design.md") }))
+    assert.equal(r.deliver, false, "docs ahead of code is a plan, not a build order → no active reminder")
+    assert.ok(
+      fs.readFileSync(todoPathFor(root), "utf8").includes("design.md"),
+      "the passive todo still records the doc drift (nothing dropped)"
+    )
+  } finally {
+    rm(root)
+  }
+})
+
+test("onStop: doc-only drift (design ahead of code) does NOT block the turn end (改进B)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## 计划：晚间问候\n")
+    run(ectx(root)) // design.md now pending (doc only)
+    assert.equal(
+      onStop(ectx(root, { stopHookActive: false })).block,
+      false,
+      "doc-ahead drift never blocks the turn end"
+    )
+  } finally {
+    rm(root)
+  }
+})
+
+test("onPrompt: doc-only drift does NOT resurface as carry-over (改进B: 改文档下一轮不被唠叨)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## 计划：晚间问候\n")
+    run(ectx(root)) // design.md pending (doc only)
+    assert.equal(onPrompt(ectx(root)).deliver, false, "a fresh turn does not nag about doc-ahead drift")
+  } finally {
+    rm(root)
+  }
+})
+
+test("onEdit: a real code change still reminds even while a doc is also pending; the doc rides only in the todo (改进B)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## 计划\n")
+    write(root, "src/a.ts", "v2")
+    const r = onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") }))
+    assert.equal(r.deliver, true, "a code change is the direction that actively nags")
+    assert.ok(r.text.includes("src/a.ts"))
+    assert.ok(!r.text.includes("design.md"), "the active reminder is code-driven; the doc is not in the active list")
+    assert.ok(
+      fs.readFileSync(todoPathFor(root), "utf8").includes("design.md"),
+      "the doc is still tracked in the passive todo"
+    )
+  } finally {
+    rm(root)
+  }
+})

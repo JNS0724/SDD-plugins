@@ -396,6 +396,30 @@ var require_change_dirs = __commonJS({
   }
 });
 
+// src/core/hash.js
+var require_hash = __commonJS({
+  "src/core/hash.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var crypto = require("crypto");
+    var { DEFAULT_HASH_LEN } = require_config();
+    var hashBuffer = (buf, hashLen = DEFAULT_HASH_LEN) => crypto.createHash("sha256").update(buf).digest("hex").slice(0, hashLen);
+    var hashElement = (absPath, hashLen = DEFAULT_HASH_LEN) => {
+      let buf;
+      try {
+        buf = fs.readFileSync(absPath);
+      } catch {
+        return null;
+      }
+      return hashBuffer(buf, hashLen);
+    };
+    module2.exports = {
+      hashBuffer,
+      hashElement
+    };
+  }
+});
+
 // src/core/classify.js
 var require_classify = __commonJS({
   "src/core/classify.js"(exports2, module2) {
@@ -419,6 +443,238 @@ var require_classify = __commonJS({
       classifyPath,
       inSddChanges,
       inSddTree
+    };
+  }
+});
+
+// src/core/scan.js
+var require_scan = __commonJS({
+  "src/core/scan.js"(exports2, module2) {
+    "use strict";
+    var fs = require("fs");
+    var path = require("path");
+    var { toPosix, rel } = require_paths();
+    var { classifyPath } = require_classify();
+    var DEFAULT_IGNORE_DIRS = /* @__PURE__ */ new Set([
+      ".git",
+      ".claude",
+      ".home",
+      ".opencode",
+      "node_modules",
+      "dist",
+      "build",
+      "out",
+      "coverage",
+      ".next",
+      ".nuxt",
+      "vendor",
+      ".venv",
+      "venv",
+      "__pycache__",
+      "target",
+      ".gradle",
+      ".idea",
+      ".cache",
+      ".sdd-review-ledger-state",
+      "sdd-review-ledger-state"
+    ]);
+    var makeDirIgnored = (ignoreGlobs) => {
+      const extraDirs = /* @__PURE__ */ new Set();
+      const extraSubstrings = [];
+      for (const g of ignoreGlobs || []) {
+        const trimmed = g.replace(/^\.\//, "");
+        if (trimmed.endsWith("/")) extraDirs.add(trimmed.slice(0, -1));
+        else extraSubstrings.push(trimmed);
+      }
+      return (name, relPosix) => {
+        if (DEFAULT_IGNORE_DIRS.has(name) || extraDirs.has(name)) return true;
+        return extraSubstrings.some((s) => relPosix.includes(s));
+      };
+    };
+    var defaultNow = () => Number(process.hrtime.bigint() / 1000000n);
+    var scanWorkTree = (repoRoot, ledger, cfg = {}, opts = {}) => {
+      const maxFileBytes = cfg.maxFileBytes || 2 * 1024 * 1024;
+      const budgetMs = cfg.scanBudgetMs || 1500;
+      const alwaysHash = !!cfg.scanAlwaysHash;
+      const now = opts.now || defaultNow;
+      const dirIgnored = makeDirIgnored(cfg.ignoreGlobs);
+      const roots = cfg.scanRoots && cfg.scanRoots.length ? cfg.scanRoots.map((r) => path.resolve(repoRoot, r)) : [repoRoot];
+      const codePaths = [];
+      const hashCache = {};
+      let truncated = false;
+      let skipped = 0;
+      const start = now();
+      const stack = [...roots];
+      while (stack.length) {
+        if (now() - start > budgetMs) {
+          truncated = true;
+          skipped += stack.length;
+          break;
+        }
+        const dir = stack.pop();
+        let entries;
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          const abs = path.join(dir, entry.name);
+          const relPosix = toPosix(rel(repoRoot, abs));
+          if (entry.isDirectory()) {
+            if (dirIgnored(entry.name, relPosix)) continue;
+            stack.push(abs);
+            continue;
+          }
+          if (!entry.isFile()) continue;
+          if (classifyPath(relPosix) !== "code") continue;
+          let stat;
+          try {
+            stat = fs.statSync(abs);
+          } catch {
+            continue;
+          }
+          if (stat.size > maxFileBytes) {
+            skipped += 1;
+            continue;
+          }
+          codePaths.push(relPosix);
+          if (!alwaysHash) hashCache[relPosix] = { size: stat.size, mtimeMs: stat.mtimeMs };
+        }
+      }
+      codePaths.sort();
+      return { codePaths, truncated, skipped, hashCache };
+    };
+    module2.exports = {
+      DEFAULT_IGNORE_DIRS,
+      makeDirIgnored,
+      scanWorkTree
+    };
+  }
+});
+
+// src/core/ledger.js
+var require_ledger = __commonJS({
+  "src/core/ledger.js"(exports2, module2) {
+    "use strict";
+    var LEDGER_VERSION = 1;
+    var emptyLedger = () => ({ version: LEDGER_VERSION, records: {} });
+    var parseLedger = (text) => {
+      if (typeof text !== "string" || text.trim() === "") return emptyLedger();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return emptyLedger();
+      }
+      if (!data || typeof data !== "object" || typeof data.records !== "object" || data.records === null) {
+        return emptyLedger();
+      }
+      return { version: LEDGER_VERSION, records: { ...data.records } };
+    };
+    var serializeLedger = (ledger) => JSON.stringify({ version: LEDGER_VERSION, records: ledger.records || {} }, null, 2);
+    var withRecord = (ledger, key, record) => ({
+      version: LEDGER_VERSION,
+      records: { ...ledger.records, [key]: record }
+    });
+    var getRecord = (ledger, key) => ledger.records ? ledger.records[key] : void 0;
+    var trackCodePath = (ledger, key, meta = {}) => {
+      if (getRecord(ledger, key)) return ledger;
+      return withRecord(ledger, key, {
+        kind: "code",
+        reviewedHash: null,
+        verdict: null,
+        rationale: "",
+        reviewedAt: null,
+        by: null,
+        ...meta
+      });
+    };
+    module2.exports = {
+      LEDGER_VERSION,
+      emptyLedger,
+      parseLedger,
+      serializeLedger,
+      withRecord,
+      getRecord,
+      trackCodePath
+    };
+  }
+});
+
+// src/core/compute.js
+var require_compute = __commonJS({
+  "src/core/compute.js"(exports2, module2) {
+    "use strict";
+    var path = require("path");
+    var { hashElement } = require_hash();
+    var { discoverChangeDirs } = require_change_dirs();
+    var { scanWorkTree } = require_scan();
+    var { getRecord } = require_ledger();
+    var DOC_NAMES = ["design.md", "tasks.md", "proposal.md"];
+    var reasonFor = (record) => record ? "changed-since-review" : "never-reviewed";
+    var hashWithCache = (repoRoot, relPath, record, hashCache, hashLen) => {
+      const hint = hashCache && hashCache[relPath];
+      if (hint && record && record.reviewedHash && typeof record.size === "number" && typeof record.mtimeMs === "number" && record.size === hint.size && record.mtimeMs === hint.mtimeMs) {
+        return record.reviewedHash;
+      }
+      return hashElement(path.join(repoRoot, relPath), hashLen);
+    };
+    var computeNeedsReview = (repoRoot, ledger, cfg = {}) => {
+      const hashLen = cfg.hashLen || 16;
+      const items = [];
+      const changeDirs = discoverChangeDirs(repoRoot);
+      const records = ledger && ledger.records || {};
+      for (const dir of changeDirs) {
+        for (const docName of DOC_NAMES) {
+          const relPath = `${dir.relDir}/${docName}`;
+          const abs = path.join(repoRoot, relPath);
+          const h = hashElement(abs, hashLen);
+          if (h === null) continue;
+          const record = getRecord(ledger, relPath);
+          if (h !== (record ? record.reviewedHash : void 0)) {
+            items.push({
+              path: relPath,
+              kind: "sdd-doc",
+              currentHash: h,
+              candidates: [dir.relDir],
+              reason: reasonFor(record)
+            });
+          }
+        }
+      }
+      const scan = scanWorkTree(repoRoot, ledger, cfg);
+      const pool = new Set(scan.codePaths);
+      for (const key of Object.keys(records)) {
+        if (records[key] && records[key].kind === "code") {
+          if (hashElement(path.join(repoRoot, key), hashLen) !== null) pool.add(key);
+        }
+      }
+      const nonArchived = changeDirs.map((d) => d.relDir);
+      for (const relPath of [...pool].sort()) {
+        const record = getRecord(ledger, relPath);
+        const h = hashWithCache(repoRoot, relPath, record, scan.hashCache, hashLen);
+        if (h === null) continue;
+        if (h !== (record ? record.reviewedHash : void 0)) {
+          items.push({
+            path: relPath,
+            kind: "code",
+            currentHash: h,
+            candidates: nonArchived,
+            reason: reasonFor(record)
+          });
+        }
+      }
+      const meta = scan.truncated ? { scanTruncated: true, skipped: scan.skipped } : {};
+      return { items, meta };
+    };
+    var isActiveNeed = (item) => Boolean(item) && item.kind === "code";
+    var selectActiveNeeds = (items) => (items || []).filter(isActiveNeed);
+    module2.exports = {
+      DOC_NAMES,
+      computeNeedsReview,
+      isActiveNeed,
+      selectActiveNeeds
     };
   }
 });
@@ -513,79 +769,6 @@ var require_prompts = __commonJS({
       buildCarryOver,
       buildCompactReminder,
       buildStopBlock
-    };
-  }
-});
-
-// src/core/hash.js
-var require_hash = __commonJS({
-  "src/core/hash.js"(exports2, module2) {
-    "use strict";
-    var fs = require("fs");
-    var crypto = require("crypto");
-    var { DEFAULT_HASH_LEN } = require_config();
-    var hashBuffer = (buf, hashLen = DEFAULT_HASH_LEN) => crypto.createHash("sha256").update(buf).digest("hex").slice(0, hashLen);
-    var hashElement = (absPath, hashLen = DEFAULT_HASH_LEN) => {
-      let buf;
-      try {
-        buf = fs.readFileSync(absPath);
-      } catch {
-        return null;
-      }
-      return hashBuffer(buf, hashLen);
-    };
-    module2.exports = {
-      hashBuffer,
-      hashElement
-    };
-  }
-});
-
-// src/core/ledger.js
-var require_ledger = __commonJS({
-  "src/core/ledger.js"(exports2, module2) {
-    "use strict";
-    var LEDGER_VERSION = 1;
-    var emptyLedger = () => ({ version: LEDGER_VERSION, records: {} });
-    var parseLedger = (text) => {
-      if (typeof text !== "string" || text.trim() === "") return emptyLedger();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        return emptyLedger();
-      }
-      if (!data || typeof data !== "object" || typeof data.records !== "object" || data.records === null) {
-        return emptyLedger();
-      }
-      return { version: LEDGER_VERSION, records: { ...data.records } };
-    };
-    var serializeLedger = (ledger) => JSON.stringify({ version: LEDGER_VERSION, records: ledger.records || {} }, null, 2);
-    var withRecord = (ledger, key, record) => ({
-      version: LEDGER_VERSION,
-      records: { ...ledger.records, [key]: record }
-    });
-    var getRecord = (ledger, key) => ledger.records ? ledger.records[key] : void 0;
-    var trackCodePath = (ledger, key, meta = {}) => {
-      if (getRecord(ledger, key)) return ledger;
-      return withRecord(ledger, key, {
-        kind: "code",
-        reviewedHash: null,
-        verdict: null,
-        rationale: "",
-        reviewedAt: null,
-        by: null,
-        ...meta
-      });
-    };
-    module2.exports = {
-      LEDGER_VERSION,
-      emptyLedger,
-      parseLedger,
-      serializeLedger,
-      withRecord,
-      getRecord,
-      trackCodePath
     };
   }
 });
@@ -705,185 +888,6 @@ var require_todo = __commonJS({
       parseTodo,
       renderTodo,
       isThinRationale
-    };
-  }
-});
-
-// src/core/scan.js
-var require_scan = __commonJS({
-  "src/core/scan.js"(exports2, module2) {
-    "use strict";
-    var fs = require("fs");
-    var path = require("path");
-    var { toPosix, rel } = require_paths();
-    var { classifyPath } = require_classify();
-    var DEFAULT_IGNORE_DIRS = /* @__PURE__ */ new Set([
-      ".git",
-      ".claude",
-      ".home",
-      ".opencode",
-      "node_modules",
-      "dist",
-      "build",
-      "out",
-      "coverage",
-      ".next",
-      ".nuxt",
-      "vendor",
-      ".venv",
-      "venv",
-      "__pycache__",
-      "target",
-      ".gradle",
-      ".idea",
-      ".cache",
-      ".sdd-review-ledger-state",
-      "sdd-review-ledger-state"
-    ]);
-    var makeDirIgnored = (ignoreGlobs) => {
-      const extraDirs = /* @__PURE__ */ new Set();
-      const extraSubstrings = [];
-      for (const g of ignoreGlobs || []) {
-        const trimmed = g.replace(/^\.\//, "");
-        if (trimmed.endsWith("/")) extraDirs.add(trimmed.slice(0, -1));
-        else extraSubstrings.push(trimmed);
-      }
-      return (name, relPosix) => {
-        if (DEFAULT_IGNORE_DIRS.has(name) || extraDirs.has(name)) return true;
-        return extraSubstrings.some((s) => relPosix.includes(s));
-      };
-    };
-    var defaultNow = () => Number(process.hrtime.bigint() / 1000000n);
-    var scanWorkTree = (repoRoot, ledger, cfg = {}, opts = {}) => {
-      const maxFileBytes = cfg.maxFileBytes || 2 * 1024 * 1024;
-      const budgetMs = cfg.scanBudgetMs || 1500;
-      const alwaysHash = !!cfg.scanAlwaysHash;
-      const now = opts.now || defaultNow;
-      const dirIgnored = makeDirIgnored(cfg.ignoreGlobs);
-      const roots = cfg.scanRoots && cfg.scanRoots.length ? cfg.scanRoots.map((r) => path.resolve(repoRoot, r)) : [repoRoot];
-      const codePaths = [];
-      const hashCache = {};
-      let truncated = false;
-      let skipped = 0;
-      const start = now();
-      const stack = [...roots];
-      while (stack.length) {
-        if (now() - start > budgetMs) {
-          truncated = true;
-          skipped += stack.length;
-          break;
-        }
-        const dir = stack.pop();
-        let entries;
-        try {
-          entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const entry of entries) {
-          const abs = path.join(dir, entry.name);
-          const relPosix = toPosix(rel(repoRoot, abs));
-          if (entry.isDirectory()) {
-            if (dirIgnored(entry.name, relPosix)) continue;
-            stack.push(abs);
-            continue;
-          }
-          if (!entry.isFile()) continue;
-          if (classifyPath(relPosix) !== "code") continue;
-          let stat;
-          try {
-            stat = fs.statSync(abs);
-          } catch {
-            continue;
-          }
-          if (stat.size > maxFileBytes) {
-            skipped += 1;
-            continue;
-          }
-          codePaths.push(relPosix);
-          if (!alwaysHash) hashCache[relPosix] = { size: stat.size, mtimeMs: stat.mtimeMs };
-        }
-      }
-      codePaths.sort();
-      return { codePaths, truncated, skipped, hashCache };
-    };
-    module2.exports = {
-      DEFAULT_IGNORE_DIRS,
-      makeDirIgnored,
-      scanWorkTree
-    };
-  }
-});
-
-// src/core/compute.js
-var require_compute = __commonJS({
-  "src/core/compute.js"(exports2, module2) {
-    "use strict";
-    var path = require("path");
-    var { hashElement } = require_hash();
-    var { discoverChangeDirs } = require_change_dirs();
-    var { scanWorkTree } = require_scan();
-    var { getRecord } = require_ledger();
-    var DOC_NAMES = ["design.md", "tasks.md", "proposal.md"];
-    var reasonFor = (record) => record ? "changed-since-review" : "never-reviewed";
-    var hashWithCache = (repoRoot, relPath, record, hashCache, hashLen) => {
-      const hint = hashCache && hashCache[relPath];
-      if (hint && record && record.reviewedHash && typeof record.size === "number" && typeof record.mtimeMs === "number" && record.size === hint.size && record.mtimeMs === hint.mtimeMs) {
-        return record.reviewedHash;
-      }
-      return hashElement(path.join(repoRoot, relPath), hashLen);
-    };
-    var computeNeedsReview = (repoRoot, ledger, cfg = {}) => {
-      const hashLen = cfg.hashLen || 16;
-      const items = [];
-      const changeDirs = discoverChangeDirs(repoRoot);
-      const records = ledger && ledger.records || {};
-      for (const dir of changeDirs) {
-        for (const docName of DOC_NAMES) {
-          const relPath = `${dir.relDir}/${docName}`;
-          const abs = path.join(repoRoot, relPath);
-          const h = hashElement(abs, hashLen);
-          if (h === null) continue;
-          const record = getRecord(ledger, relPath);
-          if (h !== (record ? record.reviewedHash : void 0)) {
-            items.push({
-              path: relPath,
-              kind: "sdd-doc",
-              currentHash: h,
-              candidates: [dir.relDir],
-              reason: reasonFor(record)
-            });
-          }
-        }
-      }
-      const scan = scanWorkTree(repoRoot, ledger, cfg);
-      const pool = new Set(scan.codePaths);
-      for (const key of Object.keys(records)) {
-        if (records[key] && records[key].kind === "code") {
-          if (hashElement(path.join(repoRoot, key), hashLen) !== null) pool.add(key);
-        }
-      }
-      const nonArchived = changeDirs.map((d) => d.relDir);
-      for (const relPath of [...pool].sort()) {
-        const record = getRecord(ledger, relPath);
-        const h = hashWithCache(repoRoot, relPath, record, scan.hashCache, hashLen);
-        if (h === null) continue;
-        if (h !== (record ? record.reviewedHash : void 0)) {
-          items.push({
-            path: relPath,
-            kind: "code",
-            currentHash: h,
-            candidates: nonArchived,
-            reason: reasonFor(record)
-          });
-        }
-      }
-      const meta = scan.truncated ? { scanTruncated: true, skipped: scan.skipped } : {};
-      return { items, meta };
-    };
-    module2.exports = {
-      DOC_NAMES,
-      computeNeedsReview
     };
   }
 });
@@ -1165,6 +1169,7 @@ var require_on_edit = __commonJS({
     var { resolveSessionKey } = require_session_key();
     var { loadThrottle, saveThrottle, decideReminder } = require_throttle();
     var { discoverChangeDirs } = require_change_dirs();
+    var { selectActiveNeeds } = require_compute();
     var { classifyPath } = require_classify();
     var { buildReminder, buildCompactReminder } = require_prompts();
     var { run } = require_pipeline();
@@ -1173,13 +1178,14 @@ var require_on_edit = __commonJS({
       const result = run(ctx);
       if (result.action === "silent") return { deliver: false, text: "", result };
       const needs = result.needs || [];
+      const activeNeeds = selectActiveNeeds(needs);
       const env = ctx.env || process.env;
       const cfg = readConfig(env);
       if (cfg.disabled) return { deliver: false, text: "", result };
       const stateDir = resolveStateDir(ctx.repoRoot);
       const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot);
       let throttle = loadThrottle(stateDir, sessionKey);
-      const pendingPaths = reminderPathSet(needs);
+      const pendingPaths = reminderPathSet(activeNeeds);
       const pendingSet = new Set(pendingPaths);
       const reminded = throttle.lastRemindedPathSet || [];
       const prunedReminded = reminded.filter((p) => pendingSet.has(p));
@@ -1187,7 +1193,7 @@ var require_on_edit = __commonJS({
         throttle = { ...throttle, lastRemindedPathSet: prunedReminded };
         saveThrottle(stateDir, sessionKey, throttle);
       }
-      if (needs.length === 0) return { deliver: false, text: "", result };
+      if (activeNeeds.length === 0) return { deliver: false, text: "", result };
       if (ctx.editedPath && classifyPath(ctx.editedPath) === "other") {
         return { deliver: false, text: "", result };
       }
@@ -1202,13 +1208,13 @@ var require_on_edit = __commonJS({
       if (!decision.remind) return { deliver: false, text: "", result };
       saveThrottle(stateDir, sessionKey, decision.state);
       if (!firstThisTurn) {
-        return { deliver: true, text: buildCompactReminder(needs), result };
+        return { deliver: true, text: buildCompactReminder(activeNeeds), result };
       }
       const designFirstLineByDir = {};
       for (const d of discoverChangeDirs(ctx.repoRoot)) {
         if (d.designFirstLine) designFirstLineByDir[d.relDir] = d.designFirstLine;
       }
-      return { deliver: true, text: buildReminder(needs, designFirstLineByDir), result };
+      return { deliver: true, text: buildReminder(activeNeeds, designFirstLineByDir), result };
     };
     module2.exports = { onEdit, reminderPathSet };
   }
@@ -1223,6 +1229,7 @@ var require_on_prompt = __commonJS({
     var { resolveSessionKey } = require_session_key();
     var { loadThrottle, saveThrottle, bumpBatch } = require_throttle();
     var { buildCarryOver } = require_prompts();
+    var { selectActiveNeeds } = require_compute();
     var { run } = require_pipeline();
     var onPrompt = (ctx) => {
       const env = ctx.env || process.env;
@@ -1234,8 +1241,9 @@ var require_on_prompt = __commonJS({
       const result = run(ctx);
       if (result.action === "silent") return { deliver: false, text: "", result };
       const needs = result.needs || [];
-      if (needs.length === 0) return { deliver: false, text: "", result };
-      return { deliver: true, text: buildCarryOver(needs), result };
+      const activeNeeds = selectActiveNeeds(needs);
+      if (activeNeeds.length === 0) return { deliver: false, text: "", result };
+      return { deliver: true, text: buildCarryOver(activeNeeds), result };
     };
     module2.exports = { onPrompt };
   }
@@ -1247,6 +1255,7 @@ var require_on_stop = __commonJS({
     "use strict";
     var { readConfig } = require_config();
     var { buildStopBlock } = require_prompts();
+    var { selectActiveNeeds } = require_compute();
     var { run } = require_pipeline();
     var onStop = (ctx) => {
       const env = ctx.env || process.env;
@@ -1255,9 +1264,10 @@ var require_on_stop = __commonJS({
       const result = run(ctx);
       if (result.action === "silent") return { block: false, text: "", result };
       const needs = result.needs || [];
-      if (needs.length === 0) return { block: false, text: "", result };
+      const activeNeeds = selectActiveNeeds(needs);
+      if (activeNeeds.length === 0) return { block: false, text: "", result };
       if (ctx.stopHookActive) return { block: false, text: "", result };
-      return { block: true, text: buildStopBlock(needs), result };
+      return { block: true, text: buildStopBlock(activeNeeds), result };
     };
     module2.exports = { onStop };
   }

@@ -127,6 +127,31 @@ test("OpenCode adapter stays silent outside SDD projects", async () => {
   }
 })
 
+test("OpenCode tool.execute.after: a doc-only change (design ahead of code) does NOT inject a reminder; todo still records it (改进B)", async () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    baseline(root) // bootstrap: design.md + a.ts recorded
+    write(root, "sdd/changes/greeting/design.md", "# Greeting behavior\n\n## plan: evening greeting\n")
+
+    const hooks = await makeHooks(root)
+    const output = { title: "edited", output: "updated design.md", metadata: {} }
+    await hooks["tool.execute.before"](
+      { tool: "edit", sessionID: "session-doc", callID: "call-doc" },
+      { args: { filePath: "sdd/changes/greeting/design.md" } }
+    )
+    await hooks["tool.execute.after"]({ tool: "edit", sessionID: "session-doc", callID: "call-doc" }, output)
+
+    assert.doesNotMatch(output.output, /\[SDD-REVIEW/, "docs-ahead-of-code does not actively nag")
+    assert.ok(
+      fs.readFileSync(todoPathFor(root), "utf8").includes("design.md"),
+      "but the doc drift is recorded in the passive todo"
+    )
+  } finally {
+    rm(root)
+  }
+})
+
 test("OpenCode idle event refreshes passively and deduplicates status/idle bursts", async () => {
   const root = mkRepo()
   try {

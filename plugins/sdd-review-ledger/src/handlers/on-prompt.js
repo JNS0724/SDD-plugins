@@ -5,6 +5,7 @@ const { resolveStateDir } = require("../core/state-dir")
 const { resolveSessionKey } = require("../core/session-key")
 const { loadThrottle, saveThrottle, bumpBatch } = require("../core/throttle")
 const { buildCarryOver } = require("../core/prompts")
+const { selectActiveNeeds } = require("../core/compute")
 const { run } = require("../pipeline")
 
 // on-prompt (§9.4): a new user turn. Refresh ledger + todo via the pipeline and,
@@ -25,8 +26,12 @@ const onPrompt = (ctx) => {
   const result = run(ctx)
   if (result.action === "silent") return { deliver: false, text: "", result }
   const needs = result.needs || []
-  if (needs.length === 0) return { deliver: false, text: "", result }
-  return { deliver: true, text: buildCarryOver(needs), result }
+  // 改进 B: carry-over resurfaces only CODE that still needs review. A doc change ahead
+  // of code is a plan — recorded in the todo by run() above, never re-nagged on the next
+  // turn (otherwise "edit a design doc → quiet now, scolded next turn").
+  const activeNeeds = selectActiveNeeds(needs)
+  if (activeNeeds.length === 0) return { deliver: false, text: "", result }
+  return { deliver: true, text: buildCarryOver(activeNeeds), result }
 }
 
 module.exports = { onPrompt }

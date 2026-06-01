@@ -5,7 +5,7 @@ const assert = require("node:assert/strict")
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
-const { computeNeedsReview } = require("../../src/core/compute")
+const { computeNeedsReview, selectActiveNeeds } = require("../../src/core/compute")
 const { hashElement } = require("../../src/core/hash")
 const { emptyLedger, withRecord } = require("../../src/core/ledger")
 
@@ -177,4 +177,30 @@ test("误报对账: editing one file in a multi-file repo surfaces ONLY that fil
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 改进 B（文档领先代码 = 计划，不是 build order）: the ACTIVE channel is driven only
+// by code changes; doc changes (design/tasks/proposal ahead of code) stay PASSIVE —
+// recorded in the todo, never an active nag. The split is mechanical (by item.kind,
+// i.e. classifyPath), so the tool still makes no semantic judgement (§2).
+// ─────────────────────────────────────────────────────────────────────────────
+test("selectActiveNeeds: only code items drive the active channel; docs stay passive", () => {
+  const items = [
+    { path: "sdd/changes/g/design.md", kind: "sdd-doc" },
+    { path: "src/a.ts", kind: "code" },
+    { path: "sdd/changes/g/tasks.md", kind: "sdd-doc" },
+  ]
+  assert.deepEqual(
+    selectActiveNeeds(items).map((i) => i.path),
+    ["src/a.ts"],
+    "code is the only active-channel material"
+  )
+  assert.deepEqual(
+    selectActiveNeeds([{ path: "sdd/changes/g/design.md", kind: "sdd-doc" }]),
+    [],
+    "doc-only (docs ahead of code) → empty active set → no active nag"
+  )
+  assert.deepEqual(selectActiveNeeds([]), [])
+  assert.deepEqual(selectActiveNeeds(undefined), [])
 })

@@ -90,7 +90,19 @@ const computeNeedsReview = (repoRoot, ledger, cfg = {}) => {
   return { items, meta }
 }
 
+// Active vs passive channel (改进 B): a CODE change is the only direction that
+// ACTIVELY nags — reality moved, so the docs may need to follow. A doc change
+// (design/tasks/proposal ahead of code) is a PLAN, not a build order: it is always
+// recorded in the todo (passive, written by the pipeline), but never fires an active
+// reminder, an end-of-turn Stop block, or a next-turn carry-over. The split is purely
+// mechanical (item.kind, which comes from classifyPath), so the tool still emits no
+// semantic verdict — implementing the plan stays a user-initiated step (§2).
+const isActiveNeed = (item) => Boolean(item) && item.kind === "code"
+const selectActiveNeeds = (items) => (items || []).filter(isActiveNeed)
+
 module.exports = {
   DOC_NAMES,
   computeNeedsReview,
+  isActiveNeed,
+  selectActiveNeeds,
 }

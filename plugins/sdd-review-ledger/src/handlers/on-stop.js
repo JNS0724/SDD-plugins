@@ -2,6 +2,7 @@
 
 const { readConfig } = require("../core/config")
 const { buildStopBlock } = require("../core/prompts")
+const { selectActiveNeeds } = require("../core/compute")
 const { run } = require("../pipeline")
 
 // on-stop (改进三 P0): end-of-turn SDD-sync safety net. Always refresh ledger+todo;
@@ -23,10 +24,15 @@ const onStop = (ctx) => {
   if (result.action === "silent") return { block: false, text: "", result }
 
   const needs = result.needs || []
-  if (needs.length === 0) return { block: false, text: "", result }
+  // 改进 B: the end-of-turn sweep only blocks on CODE that still needs review. A doc
+  // change ahead of code is a plan (recorded in the todo by run() above), so it never
+  // blocks the turn end — that would just re-introduce the "editing a design doc nags
+  // you" behavior at the boundary.
+  const activeNeeds = selectActiveNeeds(needs)
+  if (activeNeeds.length === 0) return { block: false, text: "", result }
   if (ctx.stopHookActive) return { block: false, text: "", result } // already blocked once → let it finish
 
-  return { block: true, text: buildStopBlock(needs), result }
+  return { block: true, text: buildStopBlock(activeNeeds), result }
 }
 
 module.exports = { onStop }
