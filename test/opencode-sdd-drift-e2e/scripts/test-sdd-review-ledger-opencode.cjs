@@ -148,7 +148,7 @@ const run = async () => {
       },
       sameBatch
     )
-    assert.match(sameBatch.output, /\[SDD-REVIEW/, "second code edit in same batch should remind too")
+    assert.doesNotMatch(sameBatch.output, /\[SDD-REVIEW/, "second code edit in same batch should be suppressed by once throttling")
 
     const chat = {
       message: { role: "user", content: "继续" },
