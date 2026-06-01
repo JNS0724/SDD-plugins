@@ -79,3 +79,10 @@ test("readConfig: overrides parsed from env", () => {
   assert.deepEqual(c.ignoreGlobs, ["vendor/", "tmp/"])
   assert.equal(c.bootstrapThreshold, 0, "explicit 0 honored")
 })
+
+test("readConfig: reminderMode defaults to once; growth honored; invalid → once", () => {
+  assert.equal(readConfig({}).reminderMode, "once", "default is experience-first once")
+  assert.equal(readConfig({ SDD_REVIEW_REMINDER_MODE: "growth" }).reminderMode, "growth")
+  assert.equal(readConfig({ SDD_REVIEW_REMINDER_MODE: " GROWTH " }).reminderMode, "growth", "trimmed + lowercased")
+  assert.equal(readConfig({ SDD_REVIEW_REMINDER_MODE: "bogus" }).reminderMode, "once", "unknown → safe default")
+})

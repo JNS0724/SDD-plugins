@@ -107,6 +107,8 @@ var require_config = __commonJS({
     var DEFAULT_REMINDER_DEDUPE_MS = 2e3;
     var DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024;
     var DEFAULT_BOOTSTRAP_THRESHOLD = 1;
+    var DEFAULT_REMINDER_MODE = "once";
+    var REMINDER_MODES = /* @__PURE__ */ new Set(["once", "growth"]);
     var DISABLE_VALUES = /* @__PURE__ */ new Set(["0", "false", "off", "disabled", "disable"]);
     var normalizeEnvValue = (value) => String(value == null ? "" : value).trim().toLowerCase();
     var isDisabled = (env = process.env) => {
@@ -119,6 +121,10 @@ var require_config = __commonJS({
     };
     var parseListEnv = (raw) => String(raw == null ? "" : raw).split(",").map((s) => s.trim()).filter(Boolean);
     var isTruthyFlag = (raw) => normalizeEnvValue(raw) === "1" || normalizeEnvValue(raw) === "true";
+    var parseReminderMode = (raw) => {
+      const v = normalizeEnvValue(raw);
+      return REMINDER_MODES.has(v) ? v : DEFAULT_REMINDER_MODE;
+    };
     var readConfig = (env = process.env) => ({
       disabled: isDisabled(env),
       hashLen: parseIntEnv(env.SDD_REVIEW_HASH_LEN, DEFAULT_HASH_LEN) || DEFAULT_HASH_LEN,
@@ -126,6 +132,7 @@ var require_config = __commonJS({
       ledgerCodeCap: parseIntEnv(env.SDD_REVIEW_LEDGER_CODE_CAP, DEFAULT_LEDGER_CODE_CAP) || DEFAULT_LEDGER_CODE_CAP,
       scanBudgetMs: parseIntEnv(env.SDD_REVIEW_SCAN_BUDGET_MS, DEFAULT_SCAN_BUDGET_MS) || DEFAULT_SCAN_BUDGET_MS,
       reminderDedupeMs: parseIntEnv(env.SDD_REVIEW_REMINDER_DEDUPE_MS, DEFAULT_REMINDER_DEDUPE_MS),
+      reminderMode: parseReminderMode(env.SDD_REVIEW_REMINDER_MODE),
       maxFileBytes: parseIntEnv(env.SDD_REVIEW_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES) || DEFAULT_MAX_FILE_BYTES,
       bootstrapThreshold: parseIntEnv(env.SDD_REVIEW_BOOTSTRAP_THRESHOLD, DEFAULT_BOOTSTRAP_THRESHOLD),
       scanAlwaysHash: isTruthyFlag(env.SDD_REVIEW_SCAN_ALWAYS_HASH),
@@ -141,12 +148,15 @@ var require_config = __commonJS({
       DEFAULT_REMINDER_DEDUPE_MS,
       DEFAULT_MAX_FILE_BYTES,
       DEFAULT_BOOTSTRAP_THRESHOLD,
+      DEFAULT_REMINDER_MODE,
+      REMINDER_MODES,
       DISABLE_VALUES,
       normalizeEnvValue,
       isDisabled,
       parseIntEnv,
       parseListEnv,
       isTruthyFlag,
+      parseReminderMode,
       readConfig
     };
   }
@@ -227,12 +237,12 @@ var require_throttle = __commonJS({
       }
     };
     var bumpBatch = (state) => ({ ...state, batch: (state.batch || 0) + 1 });
-    var decideReminder = (state, { hasNeeds, maxReminders, pathSet = [], nowMs = Date.now() }) => {
+    var decideReminder = (state, { hasNeeds, maxReminders, pathSet = [], mode = "growth", nowMs = Date.now() }) => {
       const cur = state || emptyThrottle();
       const lastSet = new Set(cur.lastRemindedPathSet || []);
       const grew = pathSet.some((p) => !lastSet.has(p));
       const sameTurn = cur.lastRemindedBatch !== null && cur.lastRemindedBatch === cur.batch;
-      const suppressed = sameTurn && !grew;
+      const suppressed = mode === "once" ? sameTurn : sameTurn && !grew;
       const remind = !!hasNeeds && maxReminders > 0 && (cur.sent || 0) < maxReminders && !suppressed;
       if (!remind) return { remind: false, state: cur };
       return {
@@ -1176,6 +1186,7 @@ var require_on_edit = __commonJS({
         hasNeeds: true,
         maxReminders: cfg.sessionMaxReminders,
         pathSet: pendingPaths,
+        mode: cfg.reminderMode,
         nowMs: ctx.nowMs || Date.now()
       });
       if (!decision.remind) return { deliver: false, text: "", result };

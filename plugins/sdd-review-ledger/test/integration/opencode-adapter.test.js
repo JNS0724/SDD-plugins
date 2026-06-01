@@ -65,7 +65,7 @@ test("OpenCode tool.execute.after: cached edit args drive onEdit and append a mo
   }
 })
 
-test("OpenCode chat.message opens a new batch without mutating OpenCode message output", async () => {
+test("OpenCode chat.message opens a new batch; once mode reminds once per turn, re-arms next turn", async () => {
   const root = mkRepo()
   try {
     write(root, "src/a.ts", "v1")
@@ -78,7 +78,7 @@ test("OpenCode chat.message opens a new batch without mutating OpenCode message 
       { tool: "edit", sessionID: "session-B", callID: "call-1", args: { filePath: "src/a.ts" } },
       first
     )
-    assert.match(first.output, /\[SDD-REVIEW/)
+    assert.match(first.output, /\[SDD-REVIEW/, "first edit of the turn reminds")
 
     write(root, "src/b.ts", "v1")
     const second = { title: "edited", output: "updated b", metadata: {} }
@@ -86,7 +86,7 @@ test("OpenCode chat.message opens a new batch without mutating OpenCode message 
       { tool: "write", sessionID: "session-B", callID: "call-2", args: { filePath: "src/b.ts" } },
       second
     )
-    assert.match(second.output, /\[SDD-REVIEW/, "second code edit in same user turn should still remind")
+    assert.doesNotMatch(second.output, /\[SDD-REVIEW/, "once mode (default): a second new path in the same turn is suppressed")
 
     const chatOutput = {
       message: { role: "user", content: "continue" },
@@ -103,7 +103,7 @@ test("OpenCode chat.message opens a new batch without mutating OpenCode message 
       { tool: "write", sessionID: "session-B", callID: "call-3", args: { filePath: "src/c.ts" } },
       third
     )
-    assert.match(third.output, /\[SDD-REVIEW/, "later user turn still reminds")
+    assert.match(third.output, /\[SDD-REVIEW/, "a later user turn re-arms and reminds again")
   } finally {
     rm(root)
   }

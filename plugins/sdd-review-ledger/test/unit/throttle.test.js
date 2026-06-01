@@ -52,6 +52,22 @@ test("decideReminder: new turn re-arms even for the same path-set", () => {
   assert.equal(next.state.lastRemindedBatch, 1)
 })
 
+// 6.1 (产品默认): once 模式——每个 turn 至多一次主动提醒，路径集增长也不再提醒
+// （兜底靠 always-written todo + Stop/idle + 下轮 carry-over）。
+test("decideReminder: once mode suppresses any same-turn repeat, even path-set growth", () => {
+  const s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, pathSet: ["a"], mode: "once" }).state
+  const grew = decideReminder(s, { hasNeeds: true, maxReminders: 3, pathSet: ["a", "b"], mode: "once" })
+  assert.equal(grew.remind, false, "once mode: a second new path in the same turn is suppressed")
+  assert.equal(grew.state.sent, 1, "sent does not advance")
+})
+
+test("decideReminder: once mode still reminds first-of-turn and re-arms next turn", () => {
+  const first = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3, pathSet: ["a"], mode: "once" })
+  assert.equal(first.remind, true, "first of turn always reminds")
+  const next = decideReminder(bumpBatch(first.state), { hasNeeds: true, maxReminders: 3, pathSet: ["a", "b"], mode: "once" })
+  assert.equal(next.remind, true, "a new turn re-arms in once mode")
+})
+
 test("decideReminder: batch still records the latest reminded batch", () => {
   let s = decideReminder(emptyThrottle(), { hasNeeds: true, maxReminders: 3 }).state
   s = bumpBatch(s) // user turn → batch 1

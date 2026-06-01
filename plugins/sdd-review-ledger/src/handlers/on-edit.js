@@ -57,6 +57,7 @@ const onEdit = (ctx) => {
     hasNeeds: true,
     maxReminders: cfg.sessionMaxReminders,
     pathSet: pendingPaths,
+    mode: cfg.reminderMode,
     nowMs: ctx.nowMs || Date.now(),
   })
   if (!decision.remind) return { deliver: false, text: "", result }

@@ -44,16 +44,17 @@ test("onEdit: first edit with needs delivers a fact-forcing reminder; pipeline w
   }
 })
 
-test("onEdit: every relevant edit can remind; passive todo still refreshes", () => {
+test("onEdit: growth mode — every new-path edit reminds; passive todo still refreshes", () => {
   const root = mkRepo()
+  const env = { SDD_REVIEW_REMINDER_MODE: "growth" }
   try {
     write(root, "src/a.ts", "v1")
     run(ectx(root))
     write(root, "src/a.ts", "v2")
-    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true)
+    assert.equal(onEdit(ectx(root, { env, editedPath: path.join(root, "src/a.ts") })).deliver, true)
     write(root, "src/b.ts", "v1")
-    const r2 = onEdit(ectx(root, { editedPath: path.join(root, "src/b.ts") }))
-    assert.equal(r2.deliver, true, "second code edit should remind too")
+    const r2 = onEdit(ectx(root, { env, editedPath: path.join(root, "src/b.ts") }))
+    assert.equal(r2.deliver, true, "growth mode: second new path reminds too")
     assert.ok(fs.readFileSync(todoPathFor(root), "utf8").includes("src/b.ts"), "todo still reflects b.ts")
   } finally {
     rm(root)
@@ -197,17 +198,18 @@ test("onEdit: re-editing the same pending file in one turn is suppressed (改进
   }
 })
 
-test("onEdit: a new pending path in the same turn re-fires as a COMPACT reminder (改进二)", () => {
+test("onEdit: growth mode — a new pending path in the same turn re-fires as a COMPACT reminder (改进二)", () => {
   const root = mkRepo()
+  const env = { SDD_REVIEW_REMINDER_MODE: "growth" }
   try {
     write(root, "src/a.ts", "v1")
     run(ectx(root))
     write(root, "src/a.ts", "v2")
-    const first = onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") }))
+    const first = onEdit(ectx(root, { env, editedPath: path.join(root, "src/a.ts") }))
     assert.equal(first.deliver, true)
     assert.ok(first.text.includes("你是唯一语义裁判"), "first reminder of the turn carries the full protocol")
     write(root, "src/b.ts", "v1")
-    const second = onEdit(ectx(root, { editedPath: path.join(root, "src/b.ts") }))
+    const second = onEdit(ectx(root, { env, editedPath: path.join(root, "src/b.ts") }))
     assert.equal(second.deliver, true, "new path b grows the set → re-fire")
     assert.ok(second.text.includes("src/b.ts"))
     assert.ok(!second.text.includes("你是唯一语义裁判"), "same-turn growth uses the compact body, not the full protocol")
@@ -216,25 +218,63 @@ test("onEdit: a new pending path in the same turn re-fires as a COMPACT reminder
   }
 })
 
-test("onEdit: a file checked off then genuinely re-edited in the SAME turn re-fires (active-channel invariant)", () => {
+test("onEdit: growth mode — a file checked off then re-edited in the SAME turn re-fires (active-channel invariant)", () => {
   const root = mkRepo()
+  const env = { SDD_REVIEW_REMINDER_MODE: "growth" }
   try {
     write(root, "src/a.ts", "v1")
     run(ectx(root)) // baseline
     write(root, "src/a.ts", "v2")
     // 1) first edit → active reminder
-    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true)
+    assert.equal(onEdit(ectx(root, { env, editedPath: path.join(root, "src/a.ts") })).deliver, true)
     // 2) model reviews + checks off a.ts in the pending list (current hash → really clears it)
     const todo = fs.readFileSync(todoPathFor(root), "utf8").replace("- [ ] ", "- [x] ")
     write(root, ".sdd-review-todo.md", todo)
-    onEdit(ectx(root, { editedPath: path.join(root, ".sdd-review-todo.md") })) // ingest checkoff + prune throttle
+    onEdit(ectx(root, { env, editedPath: path.join(root, ".sdd-review-todo.md") })) // ingest checkoff + prune throttle
     // 3) genuine re-edit of a.ts in the SAME turn → a new obligation, must re-fire (not silenced)
     write(root, "src/a.ts", "v3")
     assert.equal(
-      onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver,
+      onEdit(ectx(root, { env, editedPath: path.join(root, "src/a.ts") })).deliver,
       true,
-      "a re-edit after checkoff is a new obligation → active reminder must re-fire"
+      "growth mode: a re-edit after checkoff is a new obligation → active reminder must re-fire"
     )
+  } finally {
+    rm(root)
+  }
+})
+
+// ─── once mode (产品默认): one active reminder per turn, turn-end/idle/carry-over backstops ───
+test("onEdit: once mode (default) — a second new path in the same turn is suppressed; todo still tracks it", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "src/a.ts", "v2")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true, "first edit of the turn reminds")
+    write(root, "src/b.ts", "v1")
+    assert.equal(
+      onEdit(ectx(root, { editedPath: path.join(root, "src/b.ts") })).deliver,
+      false,
+      "once mode default: a second new path in the same turn does NOT actively remind"
+    )
+    assert.ok(fs.readFileSync(todoPathFor(root), "utf8").includes("src/b.ts"), "the passive todo still tracks b.ts")
+  } finally {
+    rm(root)
+  }
+})
+
+test("once mode: a within-turn-suppressed path is still caught by the end-of-turn Stop sweep", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "src/a.ts", "v2")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true)
+    write(root, "src/b.ts", "v1")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/b.ts") })).deliver, false, "suppressed in once mode")
+    const blocked = onStop(ectx(root, { stopHookActive: false }))
+    assert.equal(blocked.block, true, "turn-end Stop blocks while anything is pending")
+    assert.ok(blocked.text.includes("src/b.ts"), "the within-turn-suppressed path is surfaced at turn end")
   } finally {
     rm(root)
   }

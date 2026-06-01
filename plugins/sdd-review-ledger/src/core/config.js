@@ -12,6 +12,14 @@ const DEFAULT_REMINDER_DEDUPE_MS = 2000
 const DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024 // 2 MiB
 const DEFAULT_BOOTSTRAP_THRESHOLD = 1
 
+// Active-reminder cadence (基于 2026-06-01 体验报告 §6):
+//   once   — at most one active reminder per user turn; later same-turn growth only
+//            updates ledger/todo, with Stop/idle + next-prompt carry-over as backstops
+//            (experience-first; the DEFAULT).
+//   growth — also re-fire when the pending path-set grows in a turn (safety/audit-first).
+const DEFAULT_REMINDER_MODE = "once"
+const REMINDER_MODES = new Set(["once", "growth"])
+
 // R2 #1: escape-hatch master switch. Ported from GateGuard's ECC_DISABLE_VALUES.
 const DISABLE_VALUES = new Set(["0", "false", "off", "disabled", "disable"])
 
@@ -37,6 +45,12 @@ const parseListEnv = (raw) =>
 
 const isTruthyFlag = (raw) => normalizeEnvValue(raw) === "1" || normalizeEnvValue(raw) === "true"
 
+// SDD_REVIEW_REMINDER_MODE → once | growth. Unknown/blank → once (the quiet default).
+const parseReminderMode = (raw) => {
+  const v = normalizeEnvValue(raw)
+  return REMINDER_MODES.has(v) ? v : DEFAULT_REMINDER_MODE
+}
+
 const readConfig = (env = process.env) => ({
   disabled: isDisabled(env),
   hashLen: parseIntEnv(env.SDD_REVIEW_HASH_LEN, DEFAULT_HASH_LEN) || DEFAULT_HASH_LEN,
@@ -44,6 +58,7 @@ const readConfig = (env = process.env) => ({
   ledgerCodeCap: parseIntEnv(env.SDD_REVIEW_LEDGER_CODE_CAP, DEFAULT_LEDGER_CODE_CAP) || DEFAULT_LEDGER_CODE_CAP,
   scanBudgetMs: parseIntEnv(env.SDD_REVIEW_SCAN_BUDGET_MS, DEFAULT_SCAN_BUDGET_MS) || DEFAULT_SCAN_BUDGET_MS,
   reminderDedupeMs: parseIntEnv(env.SDD_REVIEW_REMINDER_DEDUPE_MS, DEFAULT_REMINDER_DEDUPE_MS),
+  reminderMode: parseReminderMode(env.SDD_REVIEW_REMINDER_MODE),
   maxFileBytes: parseIntEnv(env.SDD_REVIEW_MAX_FILE_BYTES, DEFAULT_MAX_FILE_BYTES) || DEFAULT_MAX_FILE_BYTES,
   bootstrapThreshold: parseIntEnv(env.SDD_REVIEW_BOOTSTRAP_THRESHOLD, DEFAULT_BOOTSTRAP_THRESHOLD),
   scanAlwaysHash: isTruthyFlag(env.SDD_REVIEW_SCAN_ALWAYS_HASH),
@@ -60,11 +75,14 @@ module.exports = {
   DEFAULT_REMINDER_DEDUPE_MS,
   DEFAULT_MAX_FILE_BYTES,
   DEFAULT_BOOTSTRAP_THRESHOLD,
+  DEFAULT_REMINDER_MODE,
+  REMINDER_MODES,
   DISABLE_VALUES,
   normalizeEnvValue,
   isDisabled,
   parseIntEnv,
   parseListEnv,
   isTruthyFlag,
+  parseReminderMode,
   readConfig,
 }
