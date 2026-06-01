@@ -256,6 +256,26 @@ SDD_REVIEW_REMINDER_MODE=growth  # opt-in：安全/审计优先
 **效果**：只改文档时——本次工具调用不注入提醒、idle/Stop 不阻断、下一轮无 carry-over，但 todo 有记录；
 一旦再改 code，主动评审照常触发（那才是"现实动了、文档要跟上"的方向）。
 
+## 12. 2026-06-01 更新（T1+T2）：MiniMax 等模型"review 后又改文件却不闭环"的兜底
+
+依据 MiniMax 两轮真实体验报告（`sdd-review-ledger-minimax-experience-report-2026-06-01.zh.md`）：插件能触发、
+模型能执行、跨会话能延续，但 MiniMax 对"review 中又改了文件 → 必须再读一次 ledger 闭环"这条后置规则遵循不稳，
+常见"已 review 旧 hash → 又改 design/tasks → 新 hash 留 pending → 却回复说完成"。两层应对：
+
+- **T1（提示词硬化，普惠/低风险）**：把最易被漏的"二次闭环"提成短而硬的**最终门槛**领头（`prompts.js: ACTION_LINE`），
+  含"待评审区非空不得说已完成"；`sdd-review-rules.md` 顶部加同款硬门槛 + `pending ≠ bug` 说明。对长提示后半段
+  遵循差的模型，靠前的硬门槛更有效。
+- **T2（定向兜底，折中信号）**：只在"**本回合触发过 active review** 且 **review 之后又冒出新的 `path@hash`**"时
+  补一刀短提醒（点名新增项，不重灌完整协议）。
+  - **怎么判"是 review 导致的新增"（折中）**：首条 review 触发时把**当时全部 pending 的 `path@hash`** 拍进
+    `throttle.reviewBaselinePending`；**同回合**用 `当前 pending \ 快照`（状态差集，最稳、无 stale）；**跨回合**
+    （OpenCode idle 拦不住）退化为下一轮 `on-prompt` 以 `lastRemindedBatch===batch` 判"上一轮 review 过"+ 同样差集，
+    **一次性** carry 后清空快照（不每轮唠叨）。
+  - 新增纯函数 `compute.selectReviewLeftover/pendingKeys`、模板 `prompts.buildLeftoverStopBlock/CarryOver`、
+    throttle 字段 `reviewBaselinePending`。
+  - **不破 B / 不答语义**：纯 `path@hash` 集合差 + batch 比较，机械判断；纯文档规划（本回合没 review）永不触发；
+    底层义务始终在被动 todo 里，兜底只是"少让模型说完成却留尾巴"的体验提示，失败方向偏保守（宁漏一次提示，不误扰规划）。
+
 ---
 
 > 一句话：**改进一让唠叨变克制但不漏；改进二让重复变轻；改进三（双平台 Stop 收尾扫，block-once）

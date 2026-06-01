@@ -3,6 +3,11 @@
 > 范围：OpenCode + `sdd-review-ledger-opencode.js` + MiniMax-M2.7 真实模型。
 > 本报告关注模型在真实开发流程里的行为体验，而不是单元测试覆盖率。
 
+> **落地状态（2026-06-01 之后）**：本报告 §8 的建议已实现——T1 提示词硬化（`ACTION_LINE` 最终门槛 +
+> `sdd-review-rules.md` 硬门槛，§8.1）、T2 定向兜底（"review 后又改文件留下新 pending"的短提醒；判断采用
+> 折中信号：同回合状态差集 / 跨回合一次性 carry，§8.2）。§8.3 的 `pending` 语义说明已并入 `sdd-review-rules.md`。
+> 设计见 `sdd-review-ledger-reminder-ux-improvements.zh.md` §12；验证见 `…-verification-checklist.zh.md` §9。
+
 ## 1. 测试目标
 
 本次观察 MiniMax 在同一套现实开发流程中的两轮表现：

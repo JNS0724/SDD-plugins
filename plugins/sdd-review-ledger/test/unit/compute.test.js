@@ -5,7 +5,12 @@ const assert = require("node:assert/strict")
 const fs = require("fs")
 const os = require("os")
 const path = require("path")
-const { computeNeedsReview, selectActiveNeeds } = require("../../src/core/compute")
+const {
+  computeNeedsReview,
+  selectActiveNeeds,
+  selectReviewLeftover,
+  pendingKeys,
+} = require("../../src/core/compute")
 const { hashElement } = require("../../src/core/hash")
 const { emptyLedger, withRecord } = require("../../src/core/ledger")
 
@@ -203,4 +208,42 @@ test("selectActiveNeeds: only code items drive the active channel; docs stay pas
   )
   assert.deepEqual(selectActiveNeeds([]), [])
   assert.deepEqual(selectActiveNeeds(undefined), [])
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T2 折中信号（同回合状态差集）: a pending is "review-induced" iff its path@hash was
+// NOT present in the snapshot taken when the active review fired. This isolates the
+// model's own post-review edits from pre-existing pending and from unfinished items.
+// ─────────────────────────────────────────────────────────────────────────────
+test("pendingKeys: sorted path@hash keys for the review-time snapshot", () => {
+  assert.deepEqual(
+    pendingKeys([
+      { path: "src/b.ts", currentHash: "h2" },
+      { path: "src/a.ts", currentHash: "h1" },
+    ]),
+    ["src/a.ts@h1", "src/b.ts@h2"]
+  )
+  assert.deepEqual(pendingKeys([]), [])
+  assert.deepEqual(pendingKeys(undefined), [])
+})
+
+test("selectReviewLeftover: only needs whose path@hash is absent from the review-time snapshot", () => {
+  const needs = [
+    { path: "src/a.ts", kind: "code", currentHash: "h1" }, // was pending at review time
+    { path: "sdd/changes/g/tasks.md", kind: "sdd-doc", currentHash: "hT2" }, // edited AFTER review → new hash
+    { path: "sdd/changes/g/design.md", kind: "sdd-doc", currentHash: "hOld" }, // pre-existing, untouched
+  ]
+  const baseline = ["src/a.ts@h1", "sdd/changes/g/design.md@hOld"]
+  assert.deepEqual(
+    selectReviewLeftover(needs, baseline).map((i) => i.path),
+    ["sdd/changes/g/tasks.md"],
+    "only the post-review path@hash counts as review-induced; pre-existing stays out"
+  )
+  assert.deepEqual(
+    selectReviewLeftover(needs, []).map((i) => i.path).sort(),
+    ["sdd/changes/g/design.md", "sdd/changes/g/tasks.md", "src/a.ts"],
+    "empty snapshot → everything is 'new'"
+  )
+  assert.deepEqual(selectReviewLeftover([], baseline), [])
+  assert.deepEqual(selectReviewLeftover(undefined, baseline), [])
 })

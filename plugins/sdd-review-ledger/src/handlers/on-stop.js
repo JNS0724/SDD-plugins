@@ -1,8 +1,11 @@
 "use strict"
 
 const { readConfig } = require("../core/config")
-const { buildStopBlock } = require("../core/prompts")
-const { selectActiveNeeds } = require("../core/compute")
+const { resolveStateDir } = require("../core/state-dir")
+const { resolveSessionKey } = require("../core/session-key")
+const { loadThrottle } = require("../core/throttle")
+const { buildStopBlock, buildLeftoverStopBlock } = require("../core/prompts")
+const { selectActiveNeeds, selectReviewLeftover } = require("../core/compute")
 const { run } = require("../pipeline")
 
 // on-stop (改进三 P0): end-of-turn SDD-sync safety net. Always refresh ledger+todo;
@@ -24,15 +27,26 @@ const onStop = (ctx) => {
   if (result.action === "silent") return { block: false, text: "", result }
 
   const needs = result.needs || []
-  // 改进 B: the end-of-turn sweep only blocks on CODE that still needs review. A doc
-  // change ahead of code is a plan (recorded in the todo by run() above), so it never
-  // blocks the turn end — that would just re-introduce the "editing a design doc nags
-  // you" behavior at the boundary.
-  const activeNeeds = selectActiveNeeds(needs)
-  if (activeNeeds.length === 0) return { block: false, text: "", result }
+  if (needs.length === 0) return { block: false, text: "", result }
   if (ctx.stopHookActive) return { block: false, text: "", result } // already blocked once → let it finish
 
-  return { block: true, text: buildStopBlock(activeNeeds), result }
+  // 改进 B: code that still needs review → full fact-forcing protocol. A doc change ahead
+  // of code is a plan (recorded in the todo by run() above), so it does NOT block by itself.
+  const activeNeeds = selectActiveNeeds(needs)
+  if (activeNeeds.length > 0) return { block: true, text: buildStopBlock(activeNeeds), result }
+
+  // T2 折中兜底: no code pending, but a review fired THIS turn and the model then created
+  // NEW pending (e.g. ticked tasks.md mid-review → new hash). Surface a SHORT leftover hint
+  // naming only the post-review path@hash. Pure doc planning with no review this turn never
+  // reaches here (remindedThisTurn is false), so 改进 B's "planning is quiet" is preserved.
+  const throttle = loadThrottle(resolveStateDir(ctx.repoRoot), resolveSessionKey(ctx.event || {}, env, ctx.repoRoot))
+  const remindedThisTurn = throttle.lastRemindedBatch !== null && throttle.lastRemindedBatch === throttle.batch
+  if (remindedThisTurn) {
+    const leftover = selectReviewLeftover(needs, throttle.reviewBaselinePending)
+    if (leftover.length > 0) return { block: true, text: buildLeftoverStopBlock(leftover), result }
+  }
+
+  return { block: false, text: "", result }
 }
 
 module.exports = { onStop }

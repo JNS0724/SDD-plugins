@@ -105,6 +105,7 @@ test("load/save round-trip; missing/corrupt → empty", () => {
       lastRemindedBatch: 1,
       lastRemindedPathSet: [],
       lastReminderAtMs: 0,
+      reviewBaselinePending: [],
     })
     fs.writeFileSync(path.join(dir, "throttle-k.json"), "{ corrupt")
     assert.deepEqual(loadThrottle(dir, "k"), emptyThrottle(), "corrupt → empty")
@@ -115,6 +116,20 @@ test("load/save round-trip; missing/corrupt → empty", () => {
 
 test("bumpBatch: pure, increments batch only", () => {
   assert.deepEqual(bumpBatch({ batch: 0, sent: 5, lastRemindedBatch: 0 }), { batch: 1, sent: 5, lastRemindedBatch: 0 })
+})
+
+// T2 折中信号：throttle 携带 review 触发时的 pending 快照（path@hash）；round-trips intact.
+test("reviewBaselinePending: persists round-trip; non-array/missing → []", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sdd-thr-base-"))
+  try {
+    saveThrottle(dir, "k", { ...emptyThrottle(), reviewBaselinePending: ["src/a.ts@h1", "sdd/changes/g/tasks.md@hT"] })
+    assert.deepEqual(loadThrottle(dir, "k").reviewBaselinePending, ["src/a.ts@h1", "sdd/changes/g/tasks.md@hT"])
+    saveThrottle(dir, "k", { ...emptyThrottle(), reviewBaselinePending: "oops" })
+    assert.deepEqual(loadThrottle(dir, "k").reviewBaselinePending, [], "non-array → []")
+    assert.deepEqual(emptyThrottle().reviewBaselinePending, [], "empty throttle carries the field")
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // Migration: an OLD on-disk throttle (legacy lastReminderSignature, no lastRemindedPathSet)
@@ -133,6 +148,7 @@ test("loadThrottle: OLD-schema file upgrades safely; subsequent decide re-fires 
       lastRemindedBatch: 2,
       lastRemindedPathSet: [],
       lastReminderAtMs: 0,
+      reviewBaselinePending: [],
     })
     // legacy key ignored; empty reminded set → a pending path counts as growth → re-fires
     assert.equal(decideReminder(loaded, { hasNeeds: true, maxReminders: 3, pathSet: ["src/a.ts"] }).remind, true)

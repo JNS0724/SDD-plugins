@@ -423,3 +423,93 @@ test("onEdit: a real code change still reminds even while a doc is also pending;
     rm(root)
   }
 })
+
+// ─── T2 折中兜底：review 后自造的新 pending（同回合 Stop / 跨回合一次性 carry）───
+// 信号：本回合触发过 active review（快照了当时 pending）+ 回合末出现快照里没有的 path@hash。
+const tickPath = (root, rel) => {
+  const todo = fs.readFileSync(todoPathFor(root), "utf8")
+  write(root, ".sdd-review-todo.md", todo.replace(`- [ ] ${rel}@`, `- [x] ${rel}@`))
+}
+
+test("onStop: model edits a doc AFTER this turn's code review → short leftover block names it (T2 同回合)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "src/a.ts", "v2")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true, "code review fires + snapshots pending")
+    tickPath(root, "src/a.ts")
+    onEdit(ectx(root, { editedPath: path.join(root, ".sdd-review-todo.md") })) // ingest checkoff
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## review 后补的说明\n")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "sdd/changes/greeting/design.md") })).deliver, false, "the doc edit itself stays quiet (B)")
+    const blocked = onStop(ectx(root, { stopHookActive: false }))
+    assert.equal(blocked.block, true, "the review-induced new pending is caught at turn end")
+    assert.ok(blocked.text.includes("design.md"), "names the post-review doc")
+    assert.ok(!blocked.text.includes("你是唯一语义裁判"), "short hint, NOT the full 4-step protocol")
+    assert.equal(onStop(ectx(root, { stopHookActive: true })).block, false, "stop_hook_active → no wedge")
+  } finally {
+    rm(root)
+  }
+})
+
+test("onStop: a doc pending BEFORE this turn's review is in the snapshot → NOT a leftover (T2 不误报既有 pending)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## 计划\n")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "sdd/changes/greeting/design.md") })).deliver, false, "planning doc edit is quiet (B); no review → no snapshot yet")
+    write(root, "src/a.ts", "v2")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true, "code review fires; snapshot includes the already-pending design.md")
+    tickPath(root, "src/a.ts")
+    onEdit(ectx(root, { editedPath: path.join(root, ".sdd-review-todo.md") }))
+    assert.equal(
+      onStop(ectx(root, { stopHookActive: false })).block,
+      false,
+      "the design.md was pending at review time → in the snapshot → not review-induced"
+    )
+  } finally {
+    rm(root)
+  }
+})
+
+test("onStop: only a doc changed this turn (pure planning, no review fired) → no leftover block (T2 不误报规划)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## 计划\n")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "sdd/changes/greeting/design.md") })).deliver, false)
+    assert.equal(
+      onStop(ectx(root, { stopHookActive: false })).block,
+      false,
+      "no active review this turn → no snapshot → leftover backstop must stay silent"
+    )
+  } finally {
+    rm(root)
+  }
+})
+
+test("onPrompt: a review-induced doc leftover surfaces once next turn, then stops repeating (T2 跨回合一次性)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    // turn 1: code review fires (snapshots), tick a.ts, then edit a doc → leftover (idle can't block on OpenCode)
+    write(root, "src/a.ts", "v2")
+    assert.equal(onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") })).deliver, true)
+    tickPath(root, "src/a.ts")
+    onEdit(ectx(root, { editedPath: path.join(root, ".sdd-review-todo.md") }))
+    write(root, "sdd/changes/greeting/design.md", "# Greeting 行为\n\n## review 后补\n")
+    onEdit(ectx(root, { editedPath: path.join(root, "sdd/changes/greeting/design.md") }))
+    // turn 2: next prompt → one-shot carry names the leftover
+    const p2 = onPrompt(ectx(root))
+    assert.equal(p2.deliver, true, "cross-turn one-shot surfaces the review-induced leftover")
+    assert.ok(p2.text.includes("design.md"))
+    assert.ok(p2.text.includes("<system-reminder>"))
+    // turn 3: consumed → no repeat, even though design.md is still passively pending
+    assert.equal(onPrompt(ectx(root)).deliver, false, "one-shot: not nagged on every later turn")
+  } finally {
+    rm(root)
+  }
+})

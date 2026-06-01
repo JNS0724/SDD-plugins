@@ -25,8 +25,12 @@ const REVIEW_BLOCK = [
   "  规则见 sdd-review-rules.md。",
 ].join("\n")
 
-const ACTION_LINE =
-  "ACTION: 完成上述后回到用户原始任务。清除待评审项的唯一方式是读取最新 .sdd-review-todo.md，只在「## 待评审」区把你已评审的每一行原地从 [ ] 改为 [x]，保留原 path@hash 并追加一句证据理由；不要把条目移动到「审计历史」区，不要手写新增待评审条目。若评审中编辑过 code/design/tasks，先再次读取 .sdd-review-todo.md，再勾选最新出现的 path@hash（编辑文件不自动清除）。"
+// T1 提示词硬化：把最易被漏掉的"二次闭环"提成短而硬的最终门槛领头（含"待评审区非空
+// 不得说已完成"），再跟清除机制。MiniMax 等模型对长提示后半段遵循差，硬门槛靠前更有效。
+const ACTION_LINE = [
+  "最终门槛（必做，勿略）：① 若本轮 review 中你编辑过 code/design/tasks，立刻重读最新 .sdd-review-todo.md；② 其中新出现的 path@hash 也要逐项评审并勾选；③ 待评审区非空时，不要说\"SDD review 已完成\"，要说明还剩哪些待人工确认。",
+  "ACTION: 回到用户原始任务。清除待评审项的唯一方式是在 .sdd-review-todo.md 的「## 待评审」区原地把已评审行从 [ ] 改为 [x]，保留原 path@hash 并追加一句证据理由；不要把条目移到「审计历史」区，不要手写新增待评审条目（编辑文件不自动清除）。",
+].join("\n")
 
 const changedLine = (item) => {
   const p = sanitizePath(item.path)
@@ -112,6 +116,39 @@ const buildStopBlock = (needs) => {
   return lines.join("\n") + "\n"
 }
 
+// T2 折中兜底（review 后自造的新 pending）：短提示，点名 path@hash，不重灌完整协议
+// （报告 §8.2：只补一刀，别回到频繁打断）。两个变体：
+//   buildLeftoverStopBlock → Claude Code Stop block reason（裸文本，最后一道防线）。
+//   buildLeftoverCarryOver → OpenCode 下一轮一次性 carry-over（包 <system-reminder>）。
+const leftoverItemLines = (items) =>
+  [...items]
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map((it) => `  - ${sanitizePath(it.path)}@${it.currentHash}`)
+
+const buildLeftoverStopBlock = (items) => {
+  if (!items || items.length === 0) return ""
+  return (
+    [
+      HEADER,
+      "你在本轮 review 后又编辑了文件，.sdd-review-todo.md 出现新的待评审项；最终回复前请重新读取并逐项勾选（先取证后下结论）：",
+      ...leftoverItemLines(items),
+    ].join("\n") + "\n"
+  )
+}
+
+const buildLeftoverCarryOver = (items) => {
+  if (!items || items.length === 0) return ""
+  return (
+    [
+      "<system-reminder>",
+      HEADER,
+      "上一轮 review 后又编辑了文件，.sdd-review-todo.md 仍有新增的待评审项，请先重新读取并逐项勾选：",
+      ...leftoverItemLines(items),
+      "</system-reminder>",
+    ].join("\n") + "\n"
+  )
+}
+
 module.exports = {
   HEADER,
   REVIEW_BLOCK,
@@ -121,4 +158,6 @@ module.exports = {
   buildCarryOver,
   buildCompactReminder,
   buildStopBlock,
+  buildLeftoverStopBlock,
+  buildLeftoverCarryOver,
 }

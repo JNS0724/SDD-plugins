@@ -5,7 +5,7 @@ const { resolveStateDir } = require("../core/state-dir")
 const { resolveSessionKey } = require("../core/session-key")
 const { loadThrottle, saveThrottle, decideReminder } = require("../core/throttle")
 const { discoverChangeDirs } = require("../core/change-dirs")
-const { selectActiveNeeds } = require("../core/compute")
+const { selectActiveNeeds, pendingKeys } = require("../core/compute")
 const { classifyPath } = require("../core/classify")
 const { buildReminder, buildCompactReminder } = require("../core/prompts")
 const { run } = require("../pipeline")
@@ -67,7 +67,14 @@ const onEdit = (ctx) => {
   })
   if (!decision.remind) return { deliver: false, text: "", result }
 
-  saveThrottle(stateDir, sessionKey, decision.state)
+  // T2: on the FIRST active review of the turn, snapshot ALL pending path@hash. Anything
+  // the model edits into pending AFTER this point (e.g. ticking tasks.md mid-review) is a
+  // review-induced leftover the end-of-turn / next-turn backstop can surface. Later
+  // same-turn re-fires keep the original snapshot (decision.state carries it via ...cur).
+  const persistedState = firstThisTurn
+    ? { ...decision.state, reviewBaselinePending: pendingKeys(needs) }
+    : decision.state
+  saveThrottle(stateDir, sessionKey, persistedState)
 
   if (!firstThisTurn) {
     // Already showed the full protocol earlier this turn; a growth re-fire is lean.

@@ -77,6 +77,18 @@ SDD_REVIEW_REMINDER_MODE=growth   # opt-in
   - 模型即便去评审该 doc，也**不应**为"对齐"擅自补写实现代码（A：规则见 `sdd-review-rules.md`）。
 - **再改一次 code**：此时主动提醒**应**正常触发——code 变更才是主动通道（"现实动了、文档要跟上"）。
 
+### 9. T1+T2：review 后又改文件的"二次闭环"兜底（MiniMax 重点）
+
+- **T1 提示词**：检查注入的全量提醒 / Stop 文本里，`ACTION_LINE` 是否以"最终门槛"领头（含"待评审区非空
+  不得说已完成"）；这是普惠所有模型的硬门槛。
+- **T2 同回合（CC）**：一个 turn 内先改 code 触发 review、勾掉 code，**再改 `tasks.md`/`design.md`** 留下新 hash，
+  让回合结束 → **Stop 应短 block 一次**，点名那条新 `path@hash`，且**不重灌完整 4 步协议**；续审后 `stop_hook_active`
+  → 不再 block。
+- **T2 跨回合（OpenCode）**：同样制造"review 后新增 doc pending"，idle 拦不住 → **下一轮**应出现**一次**短 carry-over
+  点名该项；**再下一轮不应重复**（一次性，已消费快照）。
+- **不误报**：① 只改文档做规划（本回合没 review）→ Stop/carry **静默**；② review 前就存在的 passive pending → **不**被
+  当作新增。两者都不该触发短兜底。
+
 ## 跑完后
 
 把结果按"提醒文本 + 次数 + 全量/精简/未注入"记成一份 `…-ux-report-<date>.zh.md`，

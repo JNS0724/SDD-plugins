@@ -220,7 +220,10 @@ var require_throttle = __commonJS({
       sent: 0,
       lastRemindedBatch: null,
       lastRemindedPathSet: [],
-      lastReminderAtMs: 0
+      lastReminderAtMs: 0,
+      // T2: snapshot of ALL pending `path@hash` captured when the first active review of a
+      // turn fired. Used to detect review-induced leftovers (pending that appeared after).
+      reviewBaselinePending: []
     });
     var throttlePath = (stateDir, sessionKey) => path.join(stateDir, `throttle-${sessionKey}.json`);
     var loadThrottle = (stateDir, sessionKey) => {
@@ -231,7 +234,8 @@ var require_throttle = __commonJS({
           sent: Number.isFinite(data.sent) ? data.sent : 0,
           lastRemindedBatch: Number.isFinite(data.lastRemindedBatch) ? data.lastRemindedBatch : null,
           lastRemindedPathSet: Array.isArray(data.lastRemindedPathSet) ? data.lastRemindedPathSet.filter((s) => typeof s === "string") : [],
-          lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0
+          lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0,
+          reviewBaselinePending: Array.isArray(data.reviewBaselinePending) ? data.reviewBaselinePending.filter((s) => typeof s === "string") : []
         };
       } catch {
         return emptyThrottle();
@@ -670,11 +674,20 @@ var require_compute = __commonJS({
     };
     var isActiveNeed = (item) => Boolean(item) && item.kind === "code";
     var selectActiveNeeds = (items) => (items || []).filter(isActiveNeed);
+    var pendingKey = (item) => `${item.path}@${item.currentHash}`;
+    var pendingKeys = (items) => (items || []).map(pendingKey).sort();
+    var selectReviewLeftover = (needs, baselinePending = []) => {
+      const base = new Set(baselinePending);
+      return (needs || []).filter((item) => !base.has(pendingKey(item)));
+    };
     module2.exports = {
       DOC_NAMES,
       computeNeedsReview,
       isActiveNeed,
-      selectActiveNeeds
+      selectActiveNeeds,
+      pendingKey,
+      pendingKeys,
+      selectReviewLeftover
     };
   }
 });
@@ -696,7 +709,10 @@ var require_prompts = __commonJS({
       '  \uFF08Layer A \u7EAF\u6587\u6863\u5BF9\u7EAF\u6587\u6863\uFF1A\u7B2C 2 \u6B65\u66FF\u6362\u4E3A"\u53E6\u4E00\u7BC7 doc \u6B64\u523B\u58F0\u79F0\u4EC0\u4E48"\uFF0C\u4E0D\u5F3A\u6C42 importer \u5F0F\u53D6\u8BC1\u3002\uFF09',
       "  \u89C4\u5219\u89C1 sdd-review-rules.md\u3002"
     ].join("\n");
-    var ACTION_LINE = "ACTION: \u5B8C\u6210\u4E0A\u8FF0\u540E\u56DE\u5230\u7528\u6237\u539F\u59CB\u4EFB\u52A1\u3002\u6E05\u9664\u5F85\u8BC4\u5BA1\u9879\u7684\u552F\u4E00\u65B9\u5F0F\u662F\u8BFB\u53D6\u6700\u65B0 .sdd-review-todo.md\uFF0C\u53EA\u5728\u300C## \u5F85\u8BC4\u5BA1\u300D\u533A\u628A\u4F60\u5DF2\u8BC4\u5BA1\u7684\u6BCF\u4E00\u884C\u539F\u5730\u4ECE [ ] \u6539\u4E3A [x]\uFF0C\u4FDD\u7559\u539F path@hash \u5E76\u8FFD\u52A0\u4E00\u53E5\u8BC1\u636E\u7406\u7531\uFF1B\u4E0D\u8981\u628A\u6761\u76EE\u79FB\u52A8\u5230\u300C\u5BA1\u8BA1\u5386\u53F2\u300D\u533A\uFF0C\u4E0D\u8981\u624B\u5199\u65B0\u589E\u5F85\u8BC4\u5BA1\u6761\u76EE\u3002\u82E5\u8BC4\u5BA1\u4E2D\u7F16\u8F91\u8FC7 code/design/tasks\uFF0C\u5148\u518D\u6B21\u8BFB\u53D6 .sdd-review-todo.md\uFF0C\u518D\u52FE\u9009\u6700\u65B0\u51FA\u73B0\u7684 path@hash\uFF08\u7F16\u8F91\u6587\u4EF6\u4E0D\u81EA\u52A8\u6E05\u9664\uFF09\u3002";
+    var ACTION_LINE = [
+      '\u6700\u7EC8\u95E8\u69DB\uFF08\u5FC5\u505A\uFF0C\u52FF\u7565\uFF09\uFF1A\u2460 \u82E5\u672C\u8F6E review \u4E2D\u4F60\u7F16\u8F91\u8FC7 code/design/tasks\uFF0C\u7ACB\u523B\u91CD\u8BFB\u6700\u65B0 .sdd-review-todo.md\uFF1B\u2461 \u5176\u4E2D\u65B0\u51FA\u73B0\u7684 path@hash \u4E5F\u8981\u9010\u9879\u8BC4\u5BA1\u5E76\u52FE\u9009\uFF1B\u2462 \u5F85\u8BC4\u5BA1\u533A\u975E\u7A7A\u65F6\uFF0C\u4E0D\u8981\u8BF4"SDD review \u5DF2\u5B8C\u6210"\uFF0C\u8981\u8BF4\u660E\u8FD8\u5269\u54EA\u4E9B\u5F85\u4EBA\u5DE5\u786E\u8BA4\u3002',
+      "ACTION: \u56DE\u5230\u7528\u6237\u539F\u59CB\u4EFB\u52A1\u3002\u6E05\u9664\u5F85\u8BC4\u5BA1\u9879\u7684\u552F\u4E00\u65B9\u5F0F\u662F\u5728 .sdd-review-todo.md \u7684\u300C## \u5F85\u8BC4\u5BA1\u300D\u533A\u539F\u5730\u628A\u5DF2\u8BC4\u5BA1\u884C\u4ECE [ ] \u6539\u4E3A [x]\uFF0C\u4FDD\u7559\u539F path@hash \u5E76\u8FFD\u52A0\u4E00\u53E5\u8BC1\u636E\u7406\u7531\uFF1B\u4E0D\u8981\u628A\u6761\u76EE\u79FB\u5230\u300C\u5BA1\u8BA1\u5386\u53F2\u300D\u533A\uFF0C\u4E0D\u8981\u624B\u5199\u65B0\u589E\u5F85\u8BC4\u5BA1\u6761\u76EE\uFF08\u7F16\u8F91\u6587\u4EF6\u4E0D\u81EA\u52A8\u6E05\u9664\uFF09\u3002"
+    ].join("\n");
     var changedLine = (item) => {
       const p = sanitizePath(item.path);
       if (item.kind === "code" && Array.isArray(item.candidates) && item.candidates.length) {
@@ -760,6 +776,25 @@ var require_prompts = __commonJS({
       lines.push("", REVIEW_BLOCK, "", ACTION_LINE);
       return lines.join("\n") + "\n";
     };
+    var leftoverItemLines = (items) => [...items].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0).map((it) => `  - ${sanitizePath(it.path)}@${it.currentHash}`);
+    var buildLeftoverStopBlock = (items) => {
+      if (!items || items.length === 0) return "";
+      return [
+        HEADER,
+        "\u4F60\u5728\u672C\u8F6E review \u540E\u53C8\u7F16\u8F91\u4E86\u6587\u4EF6\uFF0C.sdd-review-todo.md \u51FA\u73B0\u65B0\u7684\u5F85\u8BC4\u5BA1\u9879\uFF1B\u6700\u7EC8\u56DE\u590D\u524D\u8BF7\u91CD\u65B0\u8BFB\u53D6\u5E76\u9010\u9879\u52FE\u9009\uFF08\u5148\u53D6\u8BC1\u540E\u4E0B\u7ED3\u8BBA\uFF09\uFF1A",
+        ...leftoverItemLines(items)
+      ].join("\n") + "\n";
+    };
+    var buildLeftoverCarryOver = (items) => {
+      if (!items || items.length === 0) return "";
+      return [
+        "<system-reminder>",
+        HEADER,
+        "\u4E0A\u4E00\u8F6E review \u540E\u53C8\u7F16\u8F91\u4E86\u6587\u4EF6\uFF0C.sdd-review-todo.md \u4ECD\u6709\u65B0\u589E\u7684\u5F85\u8BC4\u5BA1\u9879\uFF0C\u8BF7\u5148\u91CD\u65B0\u8BFB\u53D6\u5E76\u9010\u9879\u52FE\u9009\uFF1A",
+        ...leftoverItemLines(items),
+        "</system-reminder>"
+      ].join("\n") + "\n";
+    };
     module2.exports = {
       HEADER,
       REVIEW_BLOCK,
@@ -768,7 +803,9 @@ var require_prompts = __commonJS({
       buildReminder,
       buildCarryOver,
       buildCompactReminder,
-      buildStopBlock
+      buildStopBlock,
+      buildLeftoverStopBlock,
+      buildLeftoverCarryOver
     };
   }
 });
@@ -1169,7 +1206,7 @@ var require_on_edit = __commonJS({
     var { resolveSessionKey } = require_session_key();
     var { loadThrottle, saveThrottle, decideReminder } = require_throttle();
     var { discoverChangeDirs } = require_change_dirs();
-    var { selectActiveNeeds } = require_compute();
+    var { selectActiveNeeds, pendingKeys } = require_compute();
     var { classifyPath } = require_classify();
     var { buildReminder, buildCompactReminder } = require_prompts();
     var { run } = require_pipeline();
@@ -1206,7 +1243,8 @@ var require_on_edit = __commonJS({
         nowMs: ctx.nowMs || Date.now()
       });
       if (!decision.remind) return { deliver: false, text: "", result };
-      saveThrottle(stateDir, sessionKey, decision.state);
+      const persistedState = firstThisTurn ? { ...decision.state, reviewBaselinePending: pendingKeys(needs) } : decision.state;
+      saveThrottle(stateDir, sessionKey, persistedState);
       if (!firstThisTurn) {
         return { deliver: true, text: buildCompactReminder(activeNeeds), result };
       }
@@ -1228,8 +1266,8 @@ var require_on_prompt = __commonJS({
     var { resolveStateDir } = require_state_dir();
     var { resolveSessionKey } = require_session_key();
     var { loadThrottle, saveThrottle, bumpBatch } = require_throttle();
-    var { buildCarryOver } = require_prompts();
-    var { selectActiveNeeds } = require_compute();
+    var { buildCarryOver, buildLeftoverCarryOver } = require_prompts();
+    var { selectActiveNeeds, selectReviewLeftover } = require_compute();
     var { run } = require_pipeline();
     var onPrompt = (ctx) => {
       const env = ctx.env || process.env;
@@ -1237,13 +1275,29 @@ var require_on_prompt = __commonJS({
       if (cfg.disabled) return { deliver: false, text: "" };
       const stateDir = resolveStateDir(ctx.repoRoot);
       const sessionKey = resolveSessionKey(ctx.event || {}, env, ctx.repoRoot);
-      saveThrottle(stateDir, sessionKey, bumpBatch(loadThrottle(stateDir, sessionKey)));
+      const prior = loadThrottle(stateDir, sessionKey);
+      const remindedLastTurn = prior.lastRemindedBatch !== null && prior.lastRemindedBatch === prior.batch;
+      const next = bumpBatch(prior);
       const result = run(ctx);
-      if (result.action === "silent") return { deliver: false, text: "", result };
+      if (result.action === "silent") {
+        saveThrottle(stateDir, sessionKey, next);
+        return { deliver: false, text: "", result };
+      }
       const needs = result.needs || [];
       const activeNeeds = selectActiveNeeds(needs);
-      if (activeNeeds.length === 0) return { deliver: false, text: "", result };
-      return { deliver: true, text: buildCarryOver(activeNeeds), result };
+      if (activeNeeds.length > 0) {
+        saveThrottle(stateDir, sessionKey, next);
+        return { deliver: true, text: buildCarryOver(activeNeeds), result };
+      }
+      if (remindedLastTurn) {
+        const leftover = selectReviewLeftover(needs, prior.reviewBaselinePending);
+        if (leftover.length > 0) {
+          saveThrottle(stateDir, sessionKey, { ...next, reviewBaselinePending: [] });
+          return { deliver: true, text: buildLeftoverCarryOver(leftover), result };
+        }
+      }
+      saveThrottle(stateDir, sessionKey, next);
+      return { deliver: false, text: "", result };
     };
     module2.exports = { onPrompt };
   }
@@ -1254,8 +1308,11 @@ var require_on_stop = __commonJS({
   "src/handlers/on-stop.js"(exports2, module2) {
     "use strict";
     var { readConfig } = require_config();
-    var { buildStopBlock } = require_prompts();
-    var { selectActiveNeeds } = require_compute();
+    var { resolveStateDir } = require_state_dir();
+    var { resolveSessionKey } = require_session_key();
+    var { loadThrottle } = require_throttle();
+    var { buildStopBlock, buildLeftoverStopBlock } = require_prompts();
+    var { selectActiveNeeds, selectReviewLeftover } = require_compute();
     var { run } = require_pipeline();
     var onStop = (ctx) => {
       const env = ctx.env || process.env;
@@ -1264,10 +1321,17 @@ var require_on_stop = __commonJS({
       const result = run(ctx);
       if (result.action === "silent") return { block: false, text: "", result };
       const needs = result.needs || [];
-      const activeNeeds = selectActiveNeeds(needs);
-      if (activeNeeds.length === 0) return { block: false, text: "", result };
+      if (needs.length === 0) return { block: false, text: "", result };
       if (ctx.stopHookActive) return { block: false, text: "", result };
-      return { block: true, text: buildStopBlock(activeNeeds), result };
+      const activeNeeds = selectActiveNeeds(needs);
+      if (activeNeeds.length > 0) return { block: true, text: buildStopBlock(activeNeeds), result };
+      const throttle = loadThrottle(resolveStateDir(ctx.repoRoot), resolveSessionKey(ctx.event || {}, env, ctx.repoRoot));
+      const remindedThisTurn = throttle.lastRemindedBatch !== null && throttle.lastRemindedBatch === throttle.batch;
+      if (remindedThisTurn) {
+        const leftover = selectReviewLeftover(needs, throttle.reviewBaselinePending);
+        if (leftover.length > 0) return { block: true, text: buildLeftoverStopBlock(leftover), result };
+      }
+      return { block: false, text: "", result };
     };
     module2.exports = { onStop };
   }

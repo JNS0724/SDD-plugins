@@ -100,9 +100,25 @@ const computeNeedsReview = (repoRoot, ledger, cfg = {}) => {
 const isActiveNeed = (item) => Boolean(item) && item.kind === "code"
 const selectActiveNeeds = (items) => (items || []).filter(isActiveNeed)
 
+// T2 折中信号（同回合状态差集）: identify pending that the model created AFTER the
+// active review fired. We snapshot the pending `path@hash` set at review time; a need
+// whose key is absent from that snapshot appeared later (the model's own mid-review
+// edit). This isolates review-induced leftovers from pre-existing pending and from
+// originally-reminded items the model simply did not finish. Mechanical (path@hash set
+// difference) — no semantic judgement (§2).
+const pendingKey = (item) => `${item.path}@${item.currentHash}`
+const pendingKeys = (items) => (items || []).map(pendingKey).sort()
+const selectReviewLeftover = (needs, baselinePending = []) => {
+  const base = new Set(baselinePending)
+  return (needs || []).filter((item) => !base.has(pendingKey(item)))
+}
+
 module.exports = {
   DOC_NAMES,
   computeNeedsReview,
   isActiveNeed,
   selectActiveNeeds,
+  pendingKey,
+  pendingKeys,
+  selectReviewLeftover,
 }

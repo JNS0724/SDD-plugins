@@ -23,6 +23,9 @@ const emptyThrottle = () => ({
   lastRemindedBatch: null,
   lastRemindedPathSet: [],
   lastReminderAtMs: 0,
+  // T2: snapshot of ALL pending `path@hash` captured when the first active review of a
+  // turn fired. Used to detect review-induced leftovers (pending that appeared after).
+  reviewBaselinePending: [],
 })
 
 const throttlePath = (stateDir, sessionKey) => path.join(stateDir, `throttle-${sessionKey}.json`)
@@ -38,6 +41,9 @@ const loadThrottle = (stateDir, sessionKey) => {
         ? data.lastRemindedPathSet.filter((s) => typeof s === "string")
         : [],
       lastReminderAtMs: Number.isFinite(data.lastReminderAtMs) ? data.lastReminderAtMs : 0,
+      reviewBaselinePending: Array.isArray(data.reviewBaselinePending)
+        ? data.reviewBaselinePending.filter((s) => typeof s === "string")
+        : [],
     }
   } catch {
     return emptyThrottle() // missing/corrupt → fresh (throttle loss is benign)
