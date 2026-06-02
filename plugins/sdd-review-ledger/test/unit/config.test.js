@@ -80,6 +80,12 @@ test("readConfig: overrides parsed from env", () => {
   assert.equal(c.bootstrapThreshold, 0, "explicit 0 honored")
 })
 
+test("readConfig: SDD_REVIEW_RULES_FILE is parsed + trimmed (扩展 A+B); blank → null", () => {
+  assert.equal(readConfig({ SDD_REVIEW_RULES_FILE: " docs/sdd-rules.md " }).rulesFile, "docs/sdd-rules.md")
+  assert.equal(readConfig({ SDD_REVIEW_RULES_FILE: "" }).rulesFile, null)
+  assert.equal(readConfig({}).rulesFile, null)
+})
+
 test("readConfig: reminderMode defaults to once; growth honored; invalid → once", () => {
   assert.equal(readConfig({}).reminderMode, "once", "default is experience-first once")
   assert.equal(readConfig({ SDD_REVIEW_REMINDER_MODE: "growth" }).reminderMode, "growth")

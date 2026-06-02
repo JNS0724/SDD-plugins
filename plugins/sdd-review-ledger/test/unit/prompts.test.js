@@ -9,6 +9,7 @@ const {
   buildStopBlock,
   buildLeftoverStopBlock,
   buildLeftoverCarryOver,
+  buildProjectRulesSegment,
   REVIEW_BLOCK,
   ACTION_LINE,
   HEADER,
@@ -193,4 +194,52 @@ test("buildLeftover*: render-side path sanitization (no injected newline splits 
     const listLines = out.split("\n").filter((l) => l.startsWith("  - "))
     assert.equal(listLines.length, 1, "malicious newline did not create a second list line")
   }
+})
+
+// ─── 扩展 A+B：项目附加规则段（可选、动态、不动冻结的 REVIEW_BLOCK/ACTION_LINE）───
+test("buildProjectRulesSegment: null / empty → [] (segment absent)", () => {
+  assert.deepEqual(buildProjectRulesSegment(null), [])
+  assert.deepEqual(buildProjectRulesSegment(undefined), [])
+  assert.deepEqual(buildProjectRulesSegment({ relPath: "x.md", text: "" }), [])
+})
+
+test("buildReminder: default 3rd arg is byte-identical to passing null (no behavior change)", () => {
+  assert.equal(buildReminder(NEEDS, DIRS), buildReminder(NEEDS, DIRS, null))
+})
+
+test("buildReminder: project rules inject an optional segment AFTER context, BEFORE the protocol (byte-stable)", () => {
+  const rules = { relPath: "sdd-review-rules.md", text: "团队规则A\n团队规则B", truncated: false }
+  const expected =
+    [
+      "<system-reminder>",
+      HEADER,
+      "",
+      "CHANGED (未评审，本批):",
+      "  - sdd/changes/greeting/design.md",
+      "  - src/greet.ts  (候选 change-dir: greeting, refund)",
+      "",
+      "CONTEXT (change-dir design 首行):",
+      "  - greeting: Greeting 行为：根据时段返回问候语",
+      "",
+      "项目附加规则（来自 sdd-review-rules.md；仅供参考，不改变清除判定，是否偏差仍由你判断）:",
+      "  团队规则A",
+      "  团队规则B",
+      "",
+      REVIEW_BLOCK,
+      "",
+      ACTION_LINE,
+      "</system-reminder>",
+    ].join("\n") + "\n"
+  assert.equal(buildReminder(NEEDS, DIRS, rules), expected)
+})
+
+test("buildReminder: truncated project rules append a 'see full file' note", () => {
+  const rules = { relPath: "docs/r.md", text: "规则一", truncated: true }
+  const out = buildReminder(NEEDS, DIRS, rules)
+  assert.ok(out.includes("项目附加规则（来自 docs/r.md"))
+  assert.ok(out.includes("已截断"))
+  assert.ok(out.includes("完整内容见 docs/r.md"))
+  // the frozen protocol still rides intact after the addendum
+  assert.ok(out.includes(REVIEW_BLOCK))
+  assert.ok(out.includes(ACTION_LINE))
 })

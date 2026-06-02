@@ -710,7 +710,18 @@ var require_prompts = __commonJS({
       }
       return `  - ${p}`;
     };
-    var buildReminder = (needs, designFirstLineByDir = {}) => {
+    var buildProjectRulesSegment = (rules) => {
+      if (!rules || !rules.text) return [];
+      const src = sanitizePath(rules.relPath || "");
+      const lines = [
+        "",
+        `\u9879\u76EE\u9644\u52A0\u89C4\u5219\uFF08\u6765\u81EA ${src}\uFF1B\u4EC5\u4F9B\u53C2\u8003\uFF0C\u4E0D\u6539\u53D8\u6E05\u9664\u5224\u5B9A\uFF0C\u662F\u5426\u504F\u5DEE\u4ECD\u7531\u4F60\u5224\u65AD\uFF09:`,
+        ...rules.text.split("\n").map((l) => `  ${l}`)
+      ];
+      if (rules.truncated) lines.push(`  \uFF08\u89C4\u5219\u6587\u4EF6\u8D85\u957F\uFF0C\u5DF2\u622A\u65AD\uFF1B\u5B8C\u6574\u5185\u5BB9\u89C1 ${src}\uFF09`);
+      return lines;
+    };
+    var buildReminder = (needs, designFirstLineByDir = {}, projectRules = null) => {
       if (!needs || needs.length === 0) return "";
       const items = [...needs].sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
       const lines = ["<system-reminder>", HEADER, "", "CHANGED (\u672A\u8BC4\u5BA1\uFF0C\u672C\u6279):"];
@@ -728,6 +739,7 @@ var require_prompts = __commonJS({
           lines.push(`  - ${sanitizePath(d)}: ${sanitizePath(designFirstLineByDir[d])}`);
         }
       }
+      for (const line of buildProjectRulesSegment(projectRules)) lines.push(line);
       lines.push("", REVIEW_BLOCK, "", ACTION_LINE, "</system-reminder>");
       return lines.join("\n") + "\n";
     };
@@ -790,12 +802,111 @@ var require_prompts = __commonJS({
       REVIEW_BLOCK,
       ACTION_LINE,
       changedLine,
+      buildProjectRulesSegment,
       buildReminder,
       buildCarryOver,
       buildCompactReminder,
       buildStopBlock,
       buildLeftoverStopBlock,
       buildLeftoverCarryOver
+    };
+  }
+});
+
+// src/core/rules-file.js
+var require_rules_file = __commonJS({
+  "src/core/rules-file.js"(exports, module) {
+    "use strict";
+    var fs = __require("fs");
+    var { resolveFile, rel, sanitizePath } = require_paths();
+    var RULES_DEFAULT_BASENAME = "sdd-review-rules.md";
+    var MAX_RULES_BYTES = 4096;
+    var MAX_RULES_LINES = 60;
+    var MAX_RULES_LINE_CHARS = 500;
+    var existingFile = (abs) => {
+      try {
+        return fs.statSync(abs).isFile() ? abs : null;
+      } catch {
+        return null;
+      }
+    };
+    var resolveRulesPath = (repoRoot, cfg) => {
+      try {
+        const fromEnv = cfg && cfg.rulesFile;
+        if (fromEnv) {
+          const hit = existingFile(resolveFile(repoRoot, fromEnv));
+          if (hit) return hit;
+        }
+        return existingFile(resolveFile(repoRoot, RULES_DEFAULT_BASENAME));
+      } catch {
+        return null;
+      }
+    };
+    var sanitizeRulesLine = (line) => {
+      const defanged = String(line == null ? "" : line).replace(
+        /<\s*\/?\s*system-reminder\b[^>]*>/gi,
+        (m) => m.replace(/</g, "\uFF1C").replace(/>/g, "\uFF1E")
+      );
+      let out = "";
+      for (const ch of defanged) {
+        const code = ch.codePointAt(0);
+        const isAsciiControl = code <= 31 || code === 127;
+        const isBidiOverride = code >= 8206 && code <= 8207 || code >= 8234 && code <= 8238 || code >= 8294 && code <= 8297;
+        out += isAsciiControl || isBidiOverride ? " " : ch;
+      }
+      return out.slice(0, MAX_RULES_LINE_CHARS);
+    };
+    var readCapped = (abs) => {
+      let fd = null;
+      try {
+        fd = fs.openSync(abs, "r");
+        const buf = Buffer.alloc(MAX_RULES_BYTES + 1);
+        const bytesRead = fs.readSync(fd, buf, 0, MAX_RULES_BYTES + 1, 0);
+        return buf.subarray(0, bytesRead);
+      } catch {
+        return null;
+      } finally {
+        if (fd !== null) {
+          try {
+            fs.closeSync(fd);
+          } catch {
+          }
+        }
+      }
+    };
+    var relPathLabel = (repoRoot, abs) => {
+      try {
+        const r = rel(repoRoot, abs);
+        if (r && !r.startsWith("..")) return sanitizePath(r);
+      } catch {
+      }
+      return sanitizePath(abs);
+    };
+    var readProjectRules = (repoRoot, cfg) => {
+      const abs = resolveRulesPath(repoRoot, cfg);
+      if (!abs) return null;
+      const raw = readCapped(abs);
+      if (!raw) return null;
+      const overByBytes = raw.length > MAX_RULES_BYTES;
+      const content = raw.subarray(0, Math.min(raw.length, MAX_RULES_BYTES));
+      if (content.includes(0)) return null;
+      let lines = content.toString("utf8").split("\n").map(sanitizeRulesLine);
+      if (overByBytes && lines.length > 1) lines = lines.slice(0, -1);
+      const overByLines = lines.length > MAX_RULES_LINES;
+      if (overByLines) lines = lines.slice(0, MAX_RULES_LINES);
+      while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+      const text = lines.join("\n");
+      if (!text.trim()) return null;
+      return { relPath: relPathLabel(repoRoot, abs), text, truncated: overByBytes || overByLines };
+    };
+    module.exports = {
+      RULES_DEFAULT_BASENAME,
+      MAX_RULES_BYTES,
+      MAX_RULES_LINES,
+      MAX_RULES_LINE_CHARS,
+      resolveRulesPath,
+      sanitizeRulesLine,
+      readProjectRules
     };
   }
 });
@@ -1199,6 +1310,7 @@ var require_on_edit = __commonJS({
     var { selectActiveNeeds, pendingKeys } = require_compute();
     var { classifyPath } = require_classify();
     var { buildReminder, buildCompactReminder } = require_prompts();
+    var { readProjectRules } = require_rules_file();
     var { run } = require_pipeline();
     var reminderPathSet = (needs) => [...new Set(needs.map((item) => item.path))].sort();
     var onEdit = (ctx) => {
@@ -1242,7 +1354,8 @@ var require_on_edit = __commonJS({
       for (const d of discoverChangeDirs(ctx.repoRoot)) {
         if (d.designFirstLine) designFirstLineByDir[d.relDir] = d.designFirstLine;
       }
-      return { deliver: true, text: buildReminder(activeNeeds, designFirstLineByDir), result };
+      const projectRules = readProjectRules(ctx.repoRoot, cfg);
+      return { deliver: true, text: buildReminder(activeNeeds, designFirstLineByDir, projectRules), result };
     };
     module.exports = { onEdit, reminderPathSet };
   }

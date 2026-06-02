@@ -424,6 +424,53 @@ test("onEdit: a real code change still reminds even while a doc is also pending;
   }
 })
 
+// ─── 扩展 A+B：项目自定义规则真正进入首条完整提醒（opt-in；缺省零变化）───
+test("onEdit: a repo-root sdd-review-rules.md injects a project-rules addendum into the full reminder (扩展B)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "sdd-review-rules.md", "团队规则：改了支付代码必须同步更新风控文档\n问候语改动需检查 i18n 资源\n")
+    write(root, "src/a.ts", "v1")
+    run(ectx(root)) // baseline
+    write(root, "src/a.ts", "v2")
+    const r = onEdit(ectx(root, { editedPath: path.join(root, "src/a.ts") }))
+    assert.equal(r.deliver, true)
+    assert.ok(r.text.includes("项目附加规则"), "addendum segment present")
+    assert.ok(r.text.includes("改了支付代码必须同步更新风控文档"), "custom rule content reaches the model")
+    assert.ok(r.text.includes("sdd-review-rules.md"), "segment header points at the resolved file (A)")
+    assert.ok(r.text.includes("你是唯一语义裁判"), "frozen protocol still rides intact after the addendum")
+  } finally {
+    rm(root)
+  }
+})
+
+test("onEdit: SDD_REVIEW_RULES_FILE custom path overrides; no rules file → no addendum (扩展A)", () => {
+  const root = mkRepo()
+  try {
+    write(root, "docs/team-rules.md", "唯一来自 env 的规则行\n")
+    write(root, "src/a.ts", "v1")
+    run(ectx(root))
+    write(root, "src/a.ts", "v2")
+    const env = { SDD_REVIEW_RULES_FILE: "docs/team-rules.md" }
+    const r = onEdit(ectx(root, { env, editedPath: path.join(root, "src/a.ts") }))
+    assert.ok(r.text.includes("唯一来自 env 的规则行"), "env-pointed rules injected")
+    assert.ok(r.text.includes("docs/team-rules.md"), "header points at the env path")
+
+    // no rules file at all → addendum absent (default install: byte-unchanged behavior)
+    const root2 = mkRepo()
+    try {
+      write(root2, "src/a.ts", "v1")
+      run(ectx(root2))
+      write(root2, "src/a.ts", "v2")
+      const r2 = onEdit(ectx(root2, { editedPath: path.join(root2, "src/a.ts") }))
+      assert.ok(!r2.text.includes("项目附加规则"), "no rules file → no addendum segment")
+    } finally {
+      rm(root2)
+    }
+  } finally {
+    rm(root)
+  }
+})
+
 // ─── T2 折中兜底：review 后自造的新 pending（同回合 Stop / 跨回合一次性 carry）───
 // 信号：本回合触发过 active review（快照了当时 pending）+ 回合末出现快照里没有的 path@hash。
 const tickPath = (root, rel) => {

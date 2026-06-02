@@ -8,6 +8,7 @@ const { discoverChangeDirs } = require("../core/change-dirs")
 const { selectActiveNeeds, pendingKeys } = require("../core/compute")
 const { classifyPath } = require("../core/classify")
 const { buildReminder, buildCompactReminder } = require("../core/prompts")
+const { readProjectRules } = require("../core/rules-file")
 const { run } = require("../pipeline")
 
 // The active-reminder dedupe key is the pending PATH-SET, not path@hash (改进一).
@@ -86,7 +87,10 @@ const onEdit = (ctx) => {
   for (const d of discoverChangeDirs(ctx.repoRoot)) {
     if (d.designFirstLine) designFirstLineByDir[d.relDir] = d.designFirstLine
   }
-  return { deliver: true, text: buildReminder(activeNeeds, designFirstLineByDir), result }
+  // 扩展 A+B: fold in any project-level custom rules (opt-in; null → no addendum,
+  // byte-identical reminder). readProjectRules is fail-open and never throws.
+  const projectRules = readProjectRules(ctx.repoRoot, cfg)
+  return { deliver: true, text: buildReminder(activeNeeds, designFirstLineByDir, projectRules), result }
 }
 
 module.exports = { onEdit, reminderPathSet }

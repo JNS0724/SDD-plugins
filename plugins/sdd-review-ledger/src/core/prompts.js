@@ -40,9 +40,28 @@ const changedLine = (item) => {
   return `  - ${p}`
 }
 
-// buildReminder(needs, designFirstLineByDir) -> string | "" (empty if no needs).
+// 扩展 A+B: optional project-rules addendum. The rules OBJECT (resolved + capped +
+// per-line sanitized by core/rules-file) renders as a dynamic, OPTIONAL segment — same
+// shape as CONTEXT — so the frozen REVIEW_BLOCK/ACTION_LINE never change and the default
+// (no rules object) stays byte-identical to before. The header echoes the resolved file
+// path, folding option A (a reachable pointer) into the same segment. The tool only
+// renders text the model treats as guidance (§2: still the model's call, not the tool's).
+const buildProjectRulesSegment = (rules) => {
+  if (!rules || !rules.text) return []
+  const src = sanitizePath(rules.relPath || "")
+  const lines = [
+    "",
+    `项目附加规则（来自 ${src}；仅供参考，不改变清除判定，是否偏差仍由你判断）:`,
+    ...rules.text.split("\n").map((l) => `  ${l}`),
+  ]
+  if (rules.truncated) lines.push(`  （规则文件超长，已截断；完整内容见 ${src}）`)
+  return lines
+}
+
+// buildReminder(needs, designFirstLineByDir, projectRules) -> string | "" (empty if no needs).
 // designFirstLineByDir: { [relDir]: firstNonEmptyLine } for CONTEXT hints.
-const buildReminder = (needs, designFirstLineByDir = {}) => {
+// projectRules: { relPath, text, truncated } | null — optional 扩展 A+B addendum.
+const buildReminder = (needs, designFirstLineByDir = {}, projectRules = null) => {
   if (!needs || needs.length === 0) return ""
   const items = [...needs].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 
@@ -63,6 +82,9 @@ const buildReminder = (needs, designFirstLineByDir = {}) => {
       lines.push(`  - ${sanitizePath(d)}: ${sanitizePath(designFirstLineByDir[d])}`)
     }
   }
+
+  // 扩展 A+B: project-rules addendum (optional; absent → byte-identical to before).
+  for (const line of buildProjectRulesSegment(projectRules)) lines.push(line)
 
   lines.push("", REVIEW_BLOCK, "", ACTION_LINE, "</system-reminder>")
   return lines.join("\n") + "\n"
@@ -154,6 +176,7 @@ module.exports = {
   REVIEW_BLOCK,
   ACTION_LINE,
   changedLine,
+  buildProjectRulesSegment,
   buildReminder,
   buildCarryOver,
   buildCompactReminder,
